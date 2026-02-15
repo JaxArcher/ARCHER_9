@@ -1,0 +1,493 @@
+ARCHER — Rebuild Specification
+Instructions for Antigravity Development Team
+February 2026 | Clean Rebuild | Python-Native
+
+
+1. Context & Mission
+ARCHER (Advanced Responsive Computing Helper & Executive Resource) is a personal AI assistant built for a single user. It is not a product or a platform. It is a JARVIS-style system that combines always-on voice interaction, passive behavioral observation via webcam and microphone, proactive pattern-triggered interventions, and a suite of specialized agent personalities — all running primarily on local hardware with cloud services available via a toggle.
+
+This is a clean rebuild. The previous codebase is being retired (it is in the ARCHER_v2 subfolder). You are not patching or extending existing files. You are building from scratch, informed by lessons from prior iterations and by OpenClaw's proven architectural patterns.
+
+
+
+2. Reference Material
+OpenClaw (Primary Architectural Reference)
+OpenClaw is an open-source personal AI assistant runtime with 117k+ GitHub stars. It has solved many of the infrastructure problems ARCHER needs. You are not running OpenClaw — you are porting its proven patterns to Python. Study it carefully before writing any code.
+
+Repository: https://github.com/openclaw/openclaw
+
+The specific OpenClaw subsystems to study and port:
+Gateway / control plane — session model, WebSocket event bus, channel routing logic, presence tracking
+Doctor / diagnostics — health check patterns, config validation approach
+Skills/tools framework — how tools are discovered, registered, and called by agents
+Cron + webhooks — the scheduling and trigger architecture
+Security model — DM pairing, sandbox design, secret detection approach
+Browser automation integration — how CDP control is wired into the agent tool layer
+
+What NOT to port from OpenClaw:
+Anything TypeScript-specific. Rewrite all patterns in Python — do not create Node.js subprocesses or bridges.
+The messaging channel integrations (WhatsApp, Telegram, etc.) — not needed at this stage.
+The macOS/iOS/Android node apps — Windows-primary, desktop-only for now.
+ClawdHub skills marketplace — ARCHER does not use a public registry.
+
+
+3. Hardware & Target Environment
+
+
+
+4. Dependency Isolation Strategy
+Dependency conflicts destroyed previous ARCHER iterations. MediaPipe, ChromaDB, DeepFace, and PyTorch all have conflicting requirements if run in the same environment. The rule is:
+
+
+Lock all package versions in pyproject.toml before writing any feature code. Run pip check as a CI step. Any conflict found during development must be resolved by moving the conflicting package to Docker — not by loosening version pins.
+
+
+5. LLM Configuration & Cloud/Local Toggle
+Default Configuration
+
+Toggle Architecture
+Cloud/local mode is a single runtime setting, not a compile-time flag. It must be switchable mid-session without restart. Implement as a ToggleService that all components subscribe to. When the user says 'switch to local mode' or flips the GUI toggle, every component that uses an LLM, STT, or TTS endpoint updates its active backend within the current session.
+
+Store the toggle state in the central config DB (SQLite), not in memory.
+Each service (STT, TTS, LLM) has a cloud_backend and a local_backend property. The ToggleService writes the active mode; each service reads it before every request.
+The GUI orb color subtly indicates current mode: slightly warmer in cloud mode, cooler in local mode.
+Auto-fallback: if a cloud API call fails (timeout, rate limit, no internet), automatically fall back to local and notify the user once. Do not fail silently.
+
+
+6. Voice Pipeline
+This is the most latency-sensitive part of the system. Every component must be benchmarked individually before integration.
+
+
+Conversational Fillers
+If the agent call has not returned a first token within 600ms, play an audio filler ('Let me think about that...', 'One moment...', 'Hmm...'). These are pre-recorded or pre-generated clips, not synthesized in real time. They prevent dead air and make the interaction feel natural.
+
+
+7. Agent Architecture
+Orchestration
+Use LangGraph as the orchestration framework. The Orchestrator is a routing agent that classifies every inbound event (voice utterance, observer event, scheduled trigger) and dispatches it to the appropriate specialist agent. Agents do not call each other directly — all inter-agent communication goes through the Orchestrator.
+
+Day 1 Agents
+
+Phase 2 Agents (Architecture Must Support, Not Build Yet)
+Knowledge / Second Brain — document ingestion, personal knowledge base, semantic search
+R&D — system self-monitoring, capability research, model improvement proposals
+QA — ethics and quality auditing of other agents' outputs
+
+Agent Instruction Files
+Each agent has a SOUL.md file in its workspace directory that defines its personality, boundaries, behavioral rules, and example interventions. The Orchestrator has an AGENTS.md that describes routing logic. These files are the primary way to tune agent behavior — code changes should be rare after initial build.
+
+SOUL.md files are injected as the system prompt on every agent call.
+They are readable and editable by the user without code changes.
+Include explicit sections: Who You Are, How You Speak, When You Intervene, What You Never Do, Example Exchanges.
+
+
+8. Memory Architecture
+ARCHER uses a four-tier memory system. All tiers must be queryable by all agents. The Orchestrator pre-loads relevant context before dispatching to a specialist agent.
+
+
+Inventory & Correction Memory (Assistant Agent)
+The Assistant agent maintains a dedicated inventory table in the SQLite Tier 2 store. This tracks physical items the user owns — location, condition, last seen, category. The Assistant proactively uses this when the user asks about something they own, mentions looking for something, or makes a statement that contradicts a known inventory fact (e.g., 'I need to buy a new charger' when the inventory shows two chargers in the home office).
+
+Schema: item_name, category, location, last_confirmed, notes, confidence_score
+Items are added via voice ('ARCHER, note that my passport is in the top drawer of my desk')
+Items are updated automatically when the user mentions their location in conversation
+Proactive correction: if the user misstates something ARCHER knows (wrong location, wrong fact), the agent gently corrects it inline, not as a separate interruption
+
+
+9. Observer Architecture
+The Observer is ARCHER's ambient sensing layer. It runs continuously and silently. It never speaks to the user directly — it emits structured ObservationEvents that other agents consume.
+
+What It Watches
+Webcam: presence detection, pose estimation (sitting/standing/lying), emotion inference (DeepFace), food detection when food appears in frame
+Microphone: VAD-based speech activity (seconds speaking vs silence, not content), background audio classification
+System: active window title, application focus, keyboard/mouse activity level (activity score, not keylogging)
+
+ObservationEvent Schema
+Every event emitted by the Observer must include: timestamp, source (webcam|mic|system), event_type, confidence (0.0-1.0), evidence_pointer (frame_id or log_offset), and payload (structured dict). Agents must not act on events with confidence below 0.4 without corroboration.
+
+Privacy Rules — Non-Negotiable
+Raw video and audio are NEVER stored. Only derived features (events, labels, embeddings) are persisted.
+A hardware-accessible kill switch in the GUI disables all observer inputs immediately.
+The GUI always shows a visible indicator when the observer is active.
+Raw AV capture for debugging is opt-in only, time-limited, and stored encrypted.
+
+Isolation
+MediaPipe (pose) and DeepFace (emotion) run in Docker containers due to protobuf conflicts with the main environment. The Observer sends frames to these containers via HTTP and receives structured results. Frame rate to containers is capped at 2fps to manage CPU load — the i9-10900K handles this path, not the GPU.
+
+
+10. Desktop GUI
+PyQt6 on Windows, native. This is a clean-slate implementation — do not reference or port the old orb code. The concept is preserved; the implementation is fresh.
+
+Layout — Four Quadrants
+
+GUI Rules
+PyQt6 owns the main thread. No blocking calls anywhere in the GUI thread.
+All updates to the GUI from background threads go through Qt signals/slots — never direct widget manipulation from non-GUI threads.
+The webcam feed is optional — a small live thumbnail in the bottom-left when observer is active, hidden otherwise.
+Cloud/local toggle is a visible toggle switch in the title bar, always accessible.
+ARCHER HALT button is always visible and always functional. It cancels all queued actions and active TTS immediately.
+
+
+11. PC Control & Browser Automation
+The Assistant agent can control the desktop and browser on the user's behalf. All PC control actions require an intent confirmation step (ARCHER states what it is about to do and waits for verbal confirmation) before execution, except for read-only actions like taking screenshots.
+
+Screen Control Stack
+pyautogui — mouse, keyboard, window management
+Playwright for Python — browser automation (not Selenium). Manages a dedicated Chromium instance.
+pygetwindow — window enumeration and focus management
+mss or PIL — screen capture for vision tasks ('what's on my screen right now?')
+
+HALT Failsafe
+At all times, the phrase 'ARCHER HALT' (or pressing the GUI button) immediately: stops all TTS playback, cancels all queued pyautogui actions, closes any active Playwright automation, and returns ARCHER to idle listening state. This is not optional and must be wired in before any PC control feature is enabled.
+
+
+12. Scheduling & Proactive Intelligence
+Cron / Scheduled Tasks
+Port OpenClaw's cron architecture to Python using APScheduler (AsyncIO-native). All agents can register scheduled tasks. Tasks are stored in SQLite and survive restarts.
+
+Nightly consolidation (2am): Tier 4 memory synthesis, agent self-evaluation reports
+Market data refresh (configurable interval): Investment agent polling
+Reminder delivery: time-based reminders set by user via voice
+Weekly agent team review (Sunday evening if user initiates)
+
+Pattern-Triggered Interventions
+This is ARCHER's core differentiator from OpenClaw. Beyond scheduled cron, agents receive ObservationEvents from the Observer and decide whether to intervene based on pattern rules in their SOUL.md and pattern history in Tier 2 memory.
+
+Intervention cooldowns are enforced per agent — no agent can intervene more than once per 2 hours on the same topic unless escalating a crisis.
+The Orchestrator mediates conflicts — if Trainer and Therapist both want to intervene in a 10-minute window, Orchestrator decides which gets priority based on urgency scoring.
+All triggered interventions are logged with their evidence chain (which ObservationEvents caused the trigger) for auditability.
+
+
+13. Build Phases & Success Criteria
+
+
+
+
+
+14. Explicit Constraints — What Not To Do
+These are lessons from previous build attempts. Treat them as hard rules.
+
+Do not start with the GUI. Build the voice loop headless first.
+Do not add a new package to the native venv without first checking it against the existing lock file. If it conflicts, it goes in Docker.
+Do not put blocking calls in the PyQt6 main thread. Use Qt signals for all cross-thread communication.
+Do not implement more than one agent at a time. Build Assistant, stabilize, then add Trainer, stabilize, then add the rest.
+Do not implement Tier 3 or Tier 4 memory until Tier 1 and Tier 2 are working across session restarts.
+Do not implement the Observer until the agent layer is stable. Observer events causing premature agent calls before agents are reliable will produce confusing bugs.
+Do not change the TTS engine mid-build. Pick one (ElevenLabs for cloud, IndexTTS2 for local) and stick with it through Phase 4.
+Do not try to run MediaPipe natively alongside the main Python process. It will conflict. Docker only.
+Do not implement the voice cloning feature in this phase. It is Phase 2+.
+Do not implement the Knowledge/Second Brain agent in this phase.
+Do not implement the verifier model in this phase.
+
+
+15. Deliverable Expectations
+Col's preference is for complete, working modules — not code snippets. Each phase deliverable should be a runnable state of the system, not a partial implementation. Provide:
+
+A working pyproject.toml with all locked dependencies before any code is written.
+A docker-compose.yml that starts all containerized services (ChromaDB, MediaPipe, DeepFace, TTS) before Phase 2 begins.
+SOUL.md files for each agent written before the agent code — the personality defines the behavior, not the other way around.
+A README with exact startup commands for Windows. Assume a clean machine with Python 3.11 and CUDA 12.4 drivers installed.
+No partial implementations delivered as 'stubs' — if a component isn't working, it should not be present in the deliverable.
+
+
+ARCHER — Rebuild Specification
+Addendum: Sprint Cadence, Communication & Contact
+Supplement to the Antigravity Brief — read alongside the main document
+
+
+A. Contact & Preferred Communication
+
+
+
+B. Sprint Cadence
+Development follows the four build phases defined in the main brief. Each phase is a sprint with a defined gate. 
+
+
+
+C. Phase Gate Success Criteria (Summary)
+These are copied from the main brief for quick reference. Each must be demonstrated, not just reported.
+
+
+
+
+
+
+D. Deliverable Format
+Col's preference is complete, working modules. Not snippets. Not stubs.
+
+Each phase deliverable is a runnable state of the system on a clean Windows 11 machine with Python 3.11 and CUDA 12.4 drivers.
+Deliver full files, not diffs or partial replacements. Colby's workflow does not support manual code merging.
+Every deliverable includes a short written explanation of any decisions made that were not covered by the spec — with reasoning.
+If a component doesn't work, it is not in the deliverable. Partial implementations create confusion and wasted debugging time.
+SOUL.md files for agents are delivered before the agent code, not after.
+
+
+E. Scope Discipline
+The main brief lists explicit items that are OUT OF SCOPE for this build phase. They are listed again here as a reminder:
+
+
+
+ARCHER — Rebuild Specification
+Addendum 2: Artifact Pane, GUI Completions & Missed Items
+Supplement to main brief and Addendum 1 — read all three documents together
+
+
+A. The Artifact Pane (Canvas)
+The bottom-right quadrant of the GUI is the Artifact Pane — ARCHER's equivalent of this chat interface's right-side panel, where rich content is rendered alongside the conversation. This is not a static display. It is a dynamic, context-aware rendering surface that agents push content to whenever a visual output would be more useful than a spoken or text response alone.
+
+The Artifact Pane replaces the need for ARCHER to read out data that is better seen — charts, tables, lists, maps, code, documents. When Investment gives you a portfolio summary, you see the graph. When Finance shows your budget, you see the chart. When Assistant finds a file, you see its contents. When Trainer tracks your session, you see the metrics panel.
+
+What the Pane Renders
+
+How Agents Push Content to the Pane
+The artifact pane is driven by a standardized ArtifactPayload that any agent can emit as part of its response. This is separate from the spoken/text response. An agent can speak a summary and simultaneously push a detailed visual to the pane.
+
+ArtifactPayload schema: { type: 'chart'|'table'|'document'|'code'|'image'|'web'|'dashboard'|'checklist', title: str, content: any, agent: str, timestamp: datetime }
+The agent layer sends ArtifactPayload objects to a dedicated artifact queue. The GUI artifact thread picks them up and renders them — no blocking the main thread.
+Each new artifact pushes a tab into the pane's tab bar. Up to 5 recent artifacts are kept as tabs. Older ones are accessible via an artifact history button.
+The active tab auto-switches to the newest artifact when it arrives, unless the user has manually selected a previous tab — in that case it does not auto-switch.
+
+Artifact Pane Tab Bar
+The pane has a thin tab bar at the top showing the last 5 artifacts with agent color coding and a short label. Example tabs: '📊 Portfolio' (orange, Investment), '💰 Budget' (yellow, Finance), '🏃 Session' (green, Trainer). Clicking a tab restores that artifact. A history icon opens a list of all artifacts from the current session.
+
+
+
+B. Orb Color Coding — Complete Specification
+The main brief described the orb's state animations but omitted the per-agent color coding. This is a core part of ARCHER's personality — the orb's color tells the user at a glance which agent is active, even before a word is spoken.
+
+
+
+
+C. Conversation Panel
+The main brief described the top-left quadrant as 'Voice pipeline status: wake word indicator, VAD level meter, STT live transcription.' This is correct but incomplete — the conversation panel needs to persist the full session history, not just the live transcription of the current utterance.
+
+Panel Layout
+Top strip (thin): wake word indicator dot (lights up on detection) + VAD level meter bar + current STT transcription streaming in real time
+Main area (scrollable): full conversation history for the current session
+Bottom: cloud/local mode toggle + text input field (see section E)
+
+Conversation History Entry Format
+Each entry in the scrollable history shows:
+User turn: timestamp, 'You:' label in neutral white, transcribed text
+Agent turn: timestamp, agent name badge (colored to match orb color for that agent), ARCHER's response text
+Observer events (optional, toggle): gray italic entries showing what the Observer detected — useful for debugging, off by default
+System events: inline gray labels for mode changes, HALT events, session start/end
+
+
+
+D. Voice Authentication
+Voice authentication was present in all previous ARCHER specifications but was not included in the main brief. It should be included in Phase 1 — it is a voice pipeline component, not a later-phase feature, and it is simple to add at the same time as the STT pipeline.
+
+Implementation
+Library: SpeechBrain ECAPA-TDNN speaker verification model
+Enrollment: On first run, ARCHER asks Col to speak 3 short enrollment phrases. These are stored as a voice embedding in the local SQLite DB.
+Verification: After wake word detection and before the agent call, a 2-second voice sample is compared against the enrollment embedding. Cosine similarity threshold: 0.85.
+If verification fails: ARCHER responds in a neutral tone, does not identify which agent would have responded, and does not execute any tool calls. Guest mode only.
+Guest mode: A limited set of read-only interactions are permitted without authentication (ask the time, ask the weather, ask what ARCHER is). No memory reads, no tool execution, no personal data.
+
+
+
+E. Text Input Fallback
+ARCHER is voice-first but must support full text input as a fallback. This is both a usability feature (quiet environments, preference) and a development tool (faster testing without speaking).
+
+A text input field sits at the bottom of the conversation panel, always visible.
+Typing and pressing Enter (or clicking Send) routes the text through the same agent pipeline as a voice utterance — there is no separate text-mode agent path.
+TTS is triggered by text input the same as voice input — ARCHER speaks its response unless TTS is muted.
+A mute-TTS toggle sits next to the text input for when the user wants text-only mode.
+The wake word is not required for text input — the text field is always active when the window is focused.
+
+
+F. System Tray & Background Operation
+ARCHER is an always-on system. Closing the main window should not stop ARCHER — it should minimize to the system tray and continue running the voice pipeline, observer, and scheduled tasks in the background.
+
+Tray Icon Behavior
+Tray icon shows ARCHER's logo. Color ring around the icon reflects current orb state (idle gray, listening blue, etc.).
+Left-click the tray icon: restore the main window.
+Right-click the tray icon: context menu with — Show Window, Mute Microphone, Pause Observer, Cloud/Local Toggle, Quit ARCHER.
+'Quit ARCHER' in the tray menu is the only way to fully stop the process. The window's X button always minimizes to tray, never quits.
+A tray notification (balloon tooltip) appears when ARCHER has a proactive message while the window is minimized — clicking it opens the window and focuses the conversation panel.
+
+
+
+G. HALT — Voice Command Integration
+The main brief described ARCHER HALT in the PC Control section, but it needs to be specified as a voice pipeline feature, not just a GUI button. The HALT command must be the highest-priority element in the voice processing loop.
+
+How HALT Works in the Voice Pipeline
+HALT detection runs as a parallel listener alongside the normal VAD/STT loop — it does not wait for a wake word.
+When the phrase 'ARCHER HALT' is detected (or a configurable alternative), the following happens within 150ms: all queued TTS is stopped, all queued pyautogui actions are cancelled, all active Playwright sessions are closed, all pending agent calls are dropped, the orb turns red for 1 second then returns to idle.
+ARCHER confirms verbally: 'Stopped.' — one word, then silence.
+HALT does not clear conversation history or memory. It only stops active execution.
+After a HALT, ARCHER is immediately ready for a new wake word — it does not require a restart.
+
+
+
+H. Summary — Items Added by This Addendum
+
+
+
+Primary Objectives
+1. A stable, production-quality voice loop: wake word → STT → agent → TTS → barge-in, with <800ms first-word latency in cloud mode.
+2. A working multi-agent orchestration layer with distinct personalities and shared memory.
+3. A passive observer that watches the webcam and microphone continuously and posts structured events to the agent layer.
+4. A PyQt6 desktop GUI with orb visualization, live transcription, and webcam feed.
+5. An architecture that never creates race conditions between the GPU, the webcam, and the event loop.	
+Component	Specification	Notes	
+GPU	NVIDIA RTX 5080 16GB	Primary inference device — CUDA path must work natively	
+CPU	Intel i9-10900K	Observer vision tasks run here when GPU is busy with inference	
+RAM	256GB	Multiple models can be resident simultaneously	
+Storage	10TB	Models, vector DBs, conversation history	
+OS	Windows 11 Native	No WSL. No Linux containers for GPU path. Windows-native Python.	
+Python	3.11 (locked)	Do not use 3.12+ — compatibility matrix requires 3.11	
+CUDA	12.4	Match all GPU packages to this version	
+Critical Threading Constraint
+PyQt6 owns the main thread and its own event loop.
+FastAPI runs in a dedicated thread with its own asyncio loop.
+GPU inference (STT, TTS, LLM if local) runs in a worker thread pool behind a queue.
+The webcam capture loop runs in its own thread.
+These four components NEVER share objects directly. All inter-thread communication goes through thread-safe queues.
+Violating this constraint is the single most common cause of GUI freezes and dropped audio frames. It must be designed in from Day 1.	
+Isolation Rules
+NATIVE (single venv, pyproject.toml, locked versions): FastAPI core, PyQt6, Faster-Whisper, openWakeWord, LangGraph, SQLite, Anthropic SDK, OpenCV. These must share one environment and must be tested together before any other package is added.
+
+DOCKER (isolated containers, GPU passthrough via NVIDIA Container Toolkit): MediaPipe (protobuf conflicts), ChromaDB (vector DB service), DeepFace/emotion detection, TTS server (IndexTTS2 or Chatterbox). Each gets its own container. The main Python process talks to them via HTTP on localhost.
+
+NEVER mix MediaPipe and ChromaDB in the same Python process. They will conflict on protobuf versions every time.	
+Role	Default (Cloud)	Fallback (Local)	
+Primary Agent LLM	Claude claude-sonnet-4-5-20250929 via Anthropic API	Ollama — llama3.2 or deepseek-r1 on RTX 5080	
+STT	ElevenLabs (cloud streaming)	Faster-Whisper large-v3, CUDA, float16	
+TTS	ElevenLabs (streaming, low latency)	IndexTTS2 — local Docker container, GPU	
+Embeddings	OpenAI text-embedding-3-small	all-MiniLM-L6-v2 via sentence-transformers	
+Stage	Implementation	Target Latency	Notes	
+Wake word	openWakeWord — 'Hey ARCHER'	<50ms	Runs on CPU continuously. Does not use GPU.	
+VAD gate	webrtcvad	<10ms	Prevents STT from processing silence.	
+STT	ElevenLabs cloud (default) / Faster-Whisper (local)	<300ms	Faster-Whisper: base.en for speed, large-v3 for accuracy toggle.	
+Agent call	Claude API streaming	<400ms to first token	Use streaming — pipe first sentence to TTS before full response is complete.	
+TTS	ElevenLabs streaming (default) / IndexTTS2 (local)	<200ms to first audio	Sentence-level streaming. Do not wait for full response.	
+Barge-in	VAD running in parallel during TTS playback	<150ms to stop	When speech detected during playback, stop TTS immediately, preserve context.	
+Agent	Personality	Primary Inputs	Key Tools	
+Orchestrator	Neutral router	All events	Agent dispatch, intent classification	
+Assistant	Helpful, practical, efficient	Voice, scheduled triggers	Calendar, reminders, inventory DB, screen control, web browser, file system	
+Trainer	Direct, stern, no-nonsense	Observer events, voice	Food detection (CV), sedentary alerts, exercise prompts, nutrition DB	
+Therapist	Warm, empathetic, non-judgmental	Observer events, voice	Mood tracking, crisis protocol, behavioral pattern DB	
+Finance	Pragmatic, data-driven	Voice, scheduled triggers	Spending DB, budget rules, transaction log	
+Investment	Analytical, cautiously optimistic	Scheduled triggers, voice	Yahoo Finance API, portfolio DB, news feed	
+Observer	Silent — never speaks	Webcam frames, mic VAD	Emits ObservationEvents only — no direct user output	
+Tier	Store	Content	Lifecycle	
+Tier 1 — Working	LangGraph state (in-memory)	Current conversation context, active session state	Cleared on session end	
+Tier 2 — Episodic	SQLite (structured)	Conversation logs, observer event log, action audit trail, inventory, behavioral drift records	Permanent, queryable by date/agent/type	
+Tier 3 — Semantic	ChromaDB (vector)	User preferences, facts, habits, relationship graph, agent-derived insights	Permanent, updated on significant new information	
+Tier 4 — Consolidated	SQLite + ChromaDB (nightly job)	Summaries of episodic data, long-term behavioral trends, EOD reflection from each agent	Runs at 2am daily, updates Tier 3 with synthesized insights	
+Quadrant	Content	
+Top-left	Voice pipeline status: wake word indicator, VAD level meter, STT live transcription (monospace, streams in real time)	
+Top-right	3D Orb (PyVista): state-coded color — Idle=cool gray, Listening=blue pulse, Thinking=amber pulse, Speaking=green, Error=red. Animates with audio amplitude during speech.	
+Bottom-left	Memory / context panel: active agent name, last 3 memory retrievals, current tier-3 facts in context	
+Bottom-right	Response panel: ARCHER's last response text, active agent badge, confidence indicator for observer-triggered interventions	
+Phase 1 — Core Voice Loop (Complete this before anything else)
+Success criteria: Say 'Hey ARCHER', ask a question, receive a spoken response via Claude + ElevenLabs in under 800ms.
+Components: openWakeWord, webrtcvad, Faster-Whisper (local fallback only needed), Anthropic SDK (streaming), ElevenLabs TTS (streaming), basic PyQt6 window with orb placeholder.
+Do NOT add agents, memory, or observer until this passes a 30-minute stability test without crashes.	
+Phase 2 — Agent Orchestration + Memory
+Success criteria: Three different questions routed to three different agents with distinct response styles. Memory persists across a session restart.
+Components: LangGraph orchestrator, 3 agents (Assistant, Trainer, Therapist), SQLite Tier 1+2, ChromaDB Tier 3 (Docker), SOUL.md files for each agent.
+Do NOT add observer, PC control, or proactive triggers until agents are stable.	
+Phase 3 — Observer + Proactive
+Success criteria: Sitting for 2 hours triggers a Trainer intervention. Emotion detection notices stress and Therapist initiates a check-in.
+Components: MediaPipe Docker container, DeepFace Docker container, Observer event loop, ObservationEvent schema, pattern trigger rules in agent SOUL.md files.	
+Phase 4 — PC Control + Finance/Investment + Full GUI
+Success criteria: 'Open Chrome and go to my calendar' executes correctly. Finance agent answers budget questions. Full four-quadrant PyQt6 GUI with animated PyVista orb.
+Components: pyautogui, Playwright for Python, Finance agent, Investment agent (Yahoo Finance), complete GUI.	
+Final Note
+The previous ARCHER builds failed not because of bad ideas, but because of dependency conflicts and scope creep that accumulated faster than they were resolved. This rebuild succeeds by doing less, more completely, one phase at a time.
+
+Phase 1 success — a clean voice loop that runs for 30 minutes without crashing — is worth more than 10 partially-working features.
+
+Questions should come before code, not after. If a decision in this spec is ambiguous, ask Col before implementing.	
+Ground Rule
+If something in the spec is ambiguous, ask before implementing. A 5-minute clarification saves a day of rework.
+Do not make assumptions about intent and build on them. Wrong assumptions compound.	
+Event	Format	Purpose	
+Phase kickoff	Written summary sent to Colby	Confirm understanding of phase scope before any code is written. List assumptions and ask for clarification as needed	
+Progress check-in	Short written update (bullets)	What's done, what's blocked, what's next. No fluff.	
+Phase gate review	Demo + written deliverable	Cobyl verifies success criteria from the main brief before green-lighting next phase.	
+Phase 1 Gate — Voice Loop
+Demonstrated: Wake word triggers, question asked, Claude responds via ElevenLabs TTS, end-to-end under 800ms.
+Stability test: 30 continuous minutes with no crashes, no audio glitches, no memory leaks.
+Deliverable: pyproject.toml with locked deps, docker-compose.yml for containerized services, README with exact Windows startup commands.	
+Phase 2 Gate — Agents + Memory
+Demonstrated: Three questions routed to three different agents with clearly distinct response styles.
+Demonstrated: Session ends and restarts — memory from the previous session is retrievable.
+Deliverable: SOUL.md for each agent, LangGraph orchestrator, SQLite + ChromaDB working.	
+Phase 3 Gate — Observer + Proactive
+Demonstrated: Sitting for 2 hours triggers a Trainer intervention unprompted.
+Demonstrated: Visible stress expression detected, Therapist initiates a check-in.
+Deliverable: MediaPipe and DeepFace running in Docker, ObservationEvent log in SQLite.	
+Phase 4 Gate — PC Control + Full GUI
+Demonstrated: 'Open Chrome and go to my calendar' executes correctly with HALT working.
+Demonstrated: Finance agent answers a budget question. Investment agent delivers a market summary.
+Demonstrated: Full four-quadrant PyQt6 GUI with animated PyVista orb running stably.	
+Out of Scope — This Build	Why	
+WhatsApp / Telegram integrations	Browser control covers the use case. No channel bridges needed.	
+Knowledge / Second Brain agent	Phase 2 — after core agents are stable.	
+Verifier model (secondary LLM for high-stakes checks)	Phase 2 — after cloud/local toggle is proven stable.	
+Voice cloning	Phase 2+ — TTS stack must be stable first.	
+R&D, QA, and Orchestrator governance agents	Architecture must support them, but do not build them now.	
+Remote access / PWA / mobile		
+Skills marketplace or plugin registry	Not part of ARCHER's design. Never.	
+If a good idea comes up during the build that isn't in the spec
+Write it down and flag it to Colby. Do not implement it mid-phase.
+Good ideas mid-build are how scope creep starts. Log it, deliver the phase, discuss it after the gate.	
+Content Type	Triggered By	Render Method	
+Chart / graph	Finance, Investment, Trainer, Therapist	Matplotlib figure rendered to QPixmap and displayed inline	
+Data table	Any agent returning structured rows	HTML table rendered via QWebEngineView or custom Qt widget	
+Document / text	Assistant returning file contents, research summaries	Scrollable styled text panel with monospace option	
+Code block	Assistant generating scripts, R&D agent output	Syntax-highlighted code panel with copy button	
+Image / screenshot	Observer snapshots (on demand), screen capture	QPixmap display, scaled to fit pane	
+Web page preview	Browser automation output, Assistant research	Embedded QWebEngineView (lightweight)	
+Metric dashboard	Trainer during active session, Observer summary	Custom Qt widget with live-updating numeric displays	
+Checklist / todo	Assistant task management	Interactive checkboxes — user can tick items by clicking	
+Empty / idle state	No active agent output	ARCHER logo, current date/time, last interaction summary	
+Design Note
+The artifact pane should feel like the right-side panel in Claude — content appears there naturally as a companion to the conversation, not as a separate 'tool window' the user has to open.
+The default idle state should be calm and unobtrusive — not blank, but not demanding attention.
+Agents should use the pane when it genuinely adds value, not for every response. A one-line answer does not need an artifact.	
+Agent	Orb Color	Animation Style	
+🔵 Assistant	Calm blue — #2E6DA4	Steady pulse. Professional, attentive. Slightly faster pulse when actively searching or executing.	
+🟢 Trainer	Strong green — #1A6B3C	Sharp, rhythmic pulse — like a heartbeat monitor. Intensifies during exercise prompts.	
+🟣 Therapist	Soft purple — #5B2A8C	Slow, gentle breathing animation. Calming, unhurried. Never fast or sharp.	
+🟡 Finance	Amber gold — #8C6B00	Steady, precise rotation effect. Businesslike. Briefly flashes red if budget is over limit.	
+🟠 Investment	Deep orange — #C75B00	Dynamic ripple effect. Energetic during market hours, subdued outside them.	
+⚪ Observer	Neutral gray — #888888	Barely visible slow pulse. Silent mode — designed to be unobtrusive.	
+🔴 HALT / Error	Alert red — #9B2335	Rapid strobe for 1 second, then solid red until acknowledged.	
+⬜ Idle	Off-white — #CCCCCC	Very slow ambient breathe. Calm, passive, awaiting wake word.	
+Implementation Note
+Color transitions between agents should be smooth cross-fades (300ms), not instant snaps.
+The orb never shows two colors simultaneously — the active agent always owns the orb fully.
+If Observer fires a proactive trigger that activates Therapist, the orb transitions from gray to purple as Therapist begins speaking.	
+Why This Matters
+Without a persistent conversation panel, the user has no way to review what was said — especially important when ARCHER proactively intervenes and the user wants to read back what triggered it.
+Agent badges in the conversation history also teach the user which agent handles what, naturally.	
+Phase 1 Scope for Voice Auth
+Enroll Col's voice on first run. Verify before every agent call. Reject unknowns into guest mode.
+Do NOT implement multi-user profiles in Phase 1. The architecture should support it (separate embeddings per user_id in the DB) but only Col's profile is active.
+Voice cloning attacks: not in scope for Phase 1. Note it as a Phase 3+ concern.	
+Windows-Specific Note
+Use QSystemTrayIcon (PyQt6 built-in). No third-party library needed.
+On Windows, the tray icon area may hide inactive icons. Instruct the user during first-run setup to pin ARCHER to the visible tray area.	
+Why HALT Is a Voice Pipeline Feature, Not Just a Button
+If ARCHER is autonomously controlling the screen and the user's hands are not on the keyboard, the voice HALT is their only reliable escape.
+The HALT listener must be active even when the main STT is busy processing another utterance.
+This requires a second, lightweight, always-running speech detection thread dedicated solely to the HALT phrase.	
+Item	Status in Main Brief	Resolution	
+Artifact / Canvas pane	Mentioned as 'canvas' in layout — not specified	Fully specified in Section A above	
+Orb color per agent	Omitted entirely	Fully specified in Section B above	
+Conversation history panel	Partial — only live transcription mentioned	Fully specified in Section C above	
+Voice authentication	Omitted from main brief	Added to Phase 1 scope in Section D above	
+Text input fallback	Omitted from main brief	Specified in Section E above	
+System tray / background operation	Omitted from main brief	Specified in Section F above	
+HALT as voice pipeline feature	In PC Control section only	Moved to voice pipeline, specified in Section G above	
+All three documents are required reading for Antigravity
+Main Brief — architecture, agents, memory, voice pipeline, build phases
+Addendum 1 — sprint cadence, communication, phase gates, deliverable format, scope discipline
+Addendum 2 (this document) — artifact pane, orb colors, conversation panel, voice auth, text input, system tray, HALT voice command
+
+In any conflict between documents, the most recent addendum takes precedence.	

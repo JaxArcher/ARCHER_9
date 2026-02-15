@@ -1,0 +1,74 @@
+# ARCHER — Containerized Services
+# These services run in Docker to avoid dependency conflicts with the native Python venv.
+# GPU passthrough requires NVIDIA Container Toolkit installed on the host.
+
+services:
+  # --- Vector Database (Tier 3 Memory) ---
+  chromadb:
+    image: chromadb/chroma:0.5.23
+    container_name: archer-chromadb
+    ports:
+      - "8100:8000"
+    volumes:
+      - chromadb-data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --- MediaPipe Pose Estimation (Observer - Phase 3) ---
+  # Isolated due to protobuf version conflicts with main environment.
+  # Receives frames via HTTP, returns structured pose data.
+  mediapipe:
+    build:
+      context: ./docker/mediapipe
+      dockerfile: Dockerfile
+    container_name: archer-mediapipe
+    ports:
+      - "8101:8000"
+    restart: unless-stopped
+    profiles:
+      - observer  # Only started when observer is enabled (Phase 3+)
+
+  # --- DeepFace Emotion Detection (Observer - Phase 3) ---
+  # Isolated due to TensorFlow/protobuf conflicts.
+  # Receives frames via HTTP, returns emotion classifications.
+  deepface:
+    build:
+      context: ./docker/deepface
+      dockerfile: Dockerfile
+    container_name: archer-deepface
+    ports:
+      - "8102:8000"
+    restart: unless-stopped
+    profiles:
+      - observer  # Only started when observer is enabled (Phase 3+)
+
+  # --- Local TTS Server (IndexTTS2) ---
+  # GPU-accelerated text-to-speech for local/offline mode.
+  indextts:
+    build:
+      context: ./docker/indextts
+      dockerfile: Dockerfile
+    container_name: archer-indextts
+    ports:
+      - "8103:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    profiles:
+      - local-tts  # Only started when local TTS mode is active
+
+volumes:
+  chromadb-data:
+    driver: local

@@ -1,0 +1,101 @@
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "archer"
+version = "0.4.0"
+description = "ARCHER — Advanced Responsive Computing Helper & Executive Resource"
+requires-python = "==3.11.*"
+license = {text = "Proprietary"}
+
+dependencies = [
+    # --- Core Framework ---
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.34.0",
+    "websockets==14.1",
+
+    # --- GUI ---
+    "PyQt6==6.8.1",
+    "PyQt6-WebEngine==6.8.0",
+    "pyvista==0.44.2",
+    "pyvistaqt==0.11.2",
+
+    # --- Voice Pipeline ---
+    "openwakeword==0.6.0",
+    "webrtcvad==2.0.10",
+    "faster-whisper==1.1.0",
+    "elevenlabs==2.35.0",
+    "sounddevice==0.5.1",
+    "soundfile==0.13.1",
+    "numpy==1.26.4",
+
+    # --- Voice Authentication ---
+    "speechbrain==1.0.2",
+
+    # --- LLM / Agent ---
+    "anthropic==0.43.0",
+    "langgraph==0.2.65",
+    "langchain-core==0.3.31",
+    "langchain-anthropic==0.3.4",
+
+    # --- Memory ---
+    "aiosqlite==0.20.0",
+    "chromadb-client==0.6.3",
+    "sentence-transformers",
+
+    # --- Observer (Phase 3) ---
+    "opencv-python-headless==4.10.0.84",
+
+    # --- PC Control (Phase 4) ---
+    "pyautogui==0.9.54",
+    "pygetwindow==0.0.9",
+    "mss==9.0.2",
+    "Pillow==11.1.0",
+    "playwright==1.49.1",
+
+    # --- Finance/Investment (Phase 4) ---
+    "yfinance==0.2.51",
+
+    # --- Scheduling ---
+    "apscheduler==3.10.4",
+
+    # --- Utilities ---
+    "pydantic==2.10.4",
+    "pydantic-settings==2.7.1",
+    "python-dotenv==1.0.1",
+    "httpx==0.28.1",
+    "loguru==0.7.3",
+    "pyaudio==0.2.14",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.0",
+    "pytest-qt==4.4.0",
+    "ruff==0.9.2",
+    "mypy==1.14.1",
+]
+
+[project.scripts]
+archer = "archer.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

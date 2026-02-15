@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+
+# Data & Logs
+data/
+logs/
+*.db
+
+# Models
+models/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Docker
+docker/mediapipe/
+docker/deepface/
+docker/indextts/
+
+# Previous codebase
+ARCHER_v2/
