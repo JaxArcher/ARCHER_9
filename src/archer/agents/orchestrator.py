@@ -37,6 +37,9 @@ from archer.config import get_config
 from archer.core.event_bus import Event, EventType, get_event_bus
 from archer.core.toggle import get_toggle_service
 from archer.memory.sqlite_store import get_sqlite_store
+from archer.memory.redis_buffer import get_redis_buffer
+from archer.memory.openmemory_store import get_openmemory_store
+from archer.memory.markdown_logger import get_markdown_logger
 
 
 # Regex to split on sentence-ending punctuation followed by a space or end-of-string.
@@ -99,7 +102,7 @@ _AGENT_NAME_MAP = {
 }
 
 # Active agents and their SOUL.md files
-_ACTIVE_AGENTS = ("assistant", "trainer", "therapist", "finance", "investment")
+_ACTIVE_AGENTS = ("assistant", "trainer", "therapist", "finance", "investment", "observer")
 
 
 class AgentOrchestrator:
@@ -115,6 +118,9 @@ class AgentOrchestrator:
         self._bus = get_event_bus()
         self._toggle = get_toggle_service()
         self._store = get_sqlite_store()
+        self._redis = get_redis_buffer()
+        self._om = get_openmemory_store()
+        self._md = get_markdown_logger()
 
         # Load SOUL.md for all active agents
         self._souls: dict[str, str] = {}
@@ -141,11 +147,33 @@ class AgentOrchestrator:
         # Cancelled flag
         self._cancelled = threading.Event()
 
-        # Load previous session context from Tier 2 on startup
+        # Load previous session context on startup
         self._load_session_context()
+
+        # Start Redis heartbeat thread (every 10 minutes)
+        self._heartbeat_timer = threading.Timer(600, self._run_heartbeat)
+        self._heartbeat_timer.daemon = True
+        self._heartbeat_timer.start()
 
         logger.info(f"Orchestrator initialized — session {self._session_id[:8]}")
         logger.info(f"Active agents: {', '.join(_ACTIVE_AGENTS)}")
+
+    def _run_heartbeat(self) -> None:
+        """Periodic background heartbeat to Redis."""
+        try:
+            with self._history_lock:
+                state = {
+                    "history": self._conversation_history[-10:],
+                    "active_agent": self._active_agent,
+                    "timestamp": time.time(),
+                }
+            self._redis.save_snapshot(self._session_id, state)
+            # Reschedule
+            self._heartbeat_timer = threading.Timer(600, self._run_heartbeat)
+            self._heartbeat_timer.daemon = True
+            self._heartbeat_timer.start()
+        except Exception as e:
+            logger.error(f"Heartbeat failed: {e}")
 
     def _load_soul(self, agent_name: str) -> str:
         """Load the SOUL.md file for an agent."""
@@ -374,13 +402,22 @@ class AgentOrchestrator:
 
         logger.info(f"Orchestrator processing (streaming): '{text}' → {target_agent}")
 
-        # Log user message to Tier 2
+        # Log user message to all memory layers
         self._store.log_conversation(
             session_id=self._session_id,
             role="user",
             content=text,
             metadata={"routed_to": target_agent},
         )
+        self._md.log_turn("user", text, agent=target_agent)
+        self._om.add_memory(text, sector="episodic", metadata={"role": "user"})
+
+        # Update Redis buffer snapshot immediately on turn start
+        self._redis.save_snapshot(self._session_id, {
+            "last_turn": "user",
+            "text": text,
+            "agent": target_agent
+        })
 
         # Add user message to Tier 1 conversation history
         with self._history_lock:
@@ -418,13 +455,24 @@ class AgentOrchestrator:
                 "content": full_response,
             })
 
-        # Log response to Tier 2
+        # Log response to all memory layers
         self._store.log_conversation(
             session_id=self._session_id,
             role="assistant",
             agent_name=target_agent,
             content=full_response,
         )
+        self._md.log_turn("assistant", full_response, agent=target_agent)
+        # Classify message to a cognitive sector (simplified: assistant = episodic/procedural)
+        sector = "procedural" if "how to" in full_response.lower() or "step" in full_response.lower() else "episodic"
+        self._om.add_memory(full_response, sector=sector, metadata={"role": "assistant", "agent": target_agent})
+
+        # Final Redis snapshot for the turn
+        self._redis.save_snapshot(self._session_id, {
+            "last_turn": "assistant",
+            "text": full_response,
+            "agent": target_agent
+        })
 
         elapsed = (time.monotonic() - start_time) * 1000
         logger.info(f"Orchestrator response ({elapsed:.0f}ms): '{full_response[:80]}...'")
@@ -448,32 +496,38 @@ class AgentOrchestrator:
         return soul
 
     def _retrieve_memory_context(self, agent: str) -> str:
-        """Retrieve relevant context from Tier 3 (ChromaDB semantic memory)."""
+        """Retrieve relevant context from Layer 3 (OpenMemory hybrid search)."""
         try:
-            from archer.memory.chromadb_store import get_chromadb_store
-            chroma = get_chromadb_store()
-
             # Get last user message for context query
+            last_user = None
             with self._history_lock:
                 if self._conversation_history:
-                    last_user = None
                     for msg in reversed(self._conversation_history):
                         if msg["role"] == "user":
                             last_user = msg["content"]
                             break
-                    if last_user:
-                        results = chroma.query(last_user, agent=agent, n_results=3)
-                        if results:
-                            context_parts = []
-                            for r in results:
-                                context_parts.append(
-                                    f"- [{r['agent']}] {r['content']}"
-                                )
-                            return "\n".join(context_parts)
+            
+            if not last_user:
+                return ""
+
+            # Hybrid retrieval (Graph + Vector) via OpenMemory
+            memos = self._om.search(last_user, limit=5)
+            if memos:
+                context_parts = []
+                for m in memos:
+                    # openmemory search results vary by version, but usually have 'content' or 'text'
+                    content = m.get("content", m.get("text", ""))
+                    sector = m.get("sector", "unknown")
+                    score = m.get("score", 0)
+                    if content:
+                        context_parts.append(f"- [{sector}] {content} (conf: {score:.2f})")
+                
+                logger.info(f"Retrieved {len(context_parts)} cognitive memories for context")
+                return "\n".join(context_parts)
+                
             return ""
         except Exception as e:
-            # ChromaDB may not be running — non-fatal
-            logger.debug(f"ChromaDB context retrieval skipped: {e}")
+            logger.debug(f"OpenMemory retrieval skipped: {e}")
             return ""
 
     def _stream_claude(self, text: str, agent: str) -> Generator[str, None, None]:

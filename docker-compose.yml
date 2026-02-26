@@ -16,7 +16,7 @@ services:
       - ANONYMIZED_TELEMETRY=FALSE
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -33,7 +33,7 @@ services:
       - "8101:8000"
     restart: unless-stopped
     profiles:
-      - observer  # Only started when observer is enabled (Phase 3+)
+      - observer # Only started when observer is enabled (Phase 3+)
 
   # --- DeepFace Emotion Detection (Observer - Phase 3) ---
   # Isolated due to TensorFlow/protobuf conflicts.
@@ -47,7 +47,7 @@ services:
       - "8102:8000"
     restart: unless-stopped
     profiles:
-      - observer  # Only started when observer is enabled (Phase 3+)
+      - observer # Only started when observer is enabled (Phase 3+)
 
   # --- Local TTS Server (IndexTTS2) ---
   # GPU-accelerated text-to-speech for local/offline mode.
@@ -64,11 +64,25 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [gpu]
+              capabilities: [ gpu ]
     restart: unless-stopped
     profiles:
-      - local-tts  # Only started when local TTS mode is active
+      - local-tts # Only started when local TTS mode is active
+
+  # --- Redis Buffer (Layer 1 Memory) ---
+  # Used for session heartbeats and crash recovery.
+  redis:
+    image: redis:7.2-alpine
+    container_name: archer-redis
+    ports:
+      - "6377:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
 
 volumes:
   chromadb-data:
+    driver: local
+  redis-data:
     driver: local

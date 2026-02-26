@@ -99,6 +99,8 @@ class ArcherConfig(BaseSettings):
     mediapipe_url: str = "http://127.0.0.1:8101"
     deepface_url: str = "http://127.0.0.1:8102"
     indextts_url: str = "http://127.0.0.1:8103"
+    redis_url: str = "redis://127.0.0.1:6377/0"
+    openmemory_db: str = "data/openmemory.db"
 
     # --- HALT ---
     halt_phrase: str = "archer halt"
