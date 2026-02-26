@@ -53,9 +53,24 @@ class ArcherConfig(BaseSettings):
         return v
     audio_chunk_ms: int = 30  # 30ms chunks for VAD
 
+    # --- Camera (Observer) ---
+    # Local webcam (used when GUI is active)
+    webcam_device: int = Field(default=0, alias="ARCHER_WEBCAM_DEVICE")
+    # Network camera RTSP URL (used when GUI is minimized / headless)
+    network_camera_url: str = Field(default="", alias="ARCHER_NETWORK_CAMERA_URL")
+
+    @field_validator("webcam_device", mode="before")
+    @classmethod
+    def _parse_webcam_device(cls, v: Any) -> int:
+        """Parse webcam device index from env."""
+        if isinstance(v, str):
+            stripped = v.strip()
+            return int(stripped) if stripped else 0
+        return v
+
     # --- Voice Pipeline ---
     wake_word: str = "hey_archer"
-    wake_word_threshold: float = 0.5
+    wake_word_threshold: float = 0.3
     vad_aggressiveness: int = 2  # webrtcvad: 0-3. Level 3 rejects speech on low-gain mics.
     stt_model: str = "base.en"  # Faster-Whisper model for local STT
     stt_model_large: str = "large-v3"  # For accuracy mode

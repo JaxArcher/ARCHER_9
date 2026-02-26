@@ -488,6 +488,8 @@ HALT as voice pipeline feature	In PC Control section only	Moved to voice pipelin
 All three documents are required reading for Antigravity
 Main Brief — architecture, agents, memory, voice pipeline, build phases
 Addendum 1 — sprint cadence, communication, phase gates, deliverable format, scope discipline
-Addendum 2 (this document) — artifact pane, orb colors, conversation panel, voice auth, text input, system tray, HALT voice command
-
+Addendum 2  — artifact pane, orb colors, conversation panel, voice auth, text input, system tray, HALT voice command
+Addendum 3 - items to decide: second brain, sever access, deployable app, webcam vs network cam, specialized LLMs       
+(specifically for therapist), skills improvment, R&D protocol, profile for people interacting with, Hallucination Check, TTS tone modulating, 
+Addendum 4 - Observer Refinements & GUI Integration: dynamic camera switching (local/network), webcam widget with real-time detections, scene description events, and ASCII-safe character corrections.
 In any conflict between documents, the most recent addendum takes precedence.	

@@ -276,3 +276,139 @@ class SedentaryTracker:
         if self._sitting_since is not None:
             total += time.monotonic() - self._sitting_since
         return total
+
+
+class SceneAnalyzer:
+    """
+    Semantic scene understanding via Vision Language Model.
+
+    Sends JPEG frames to Claude Vision (cloud mode) to identify objects,
+    describe the scene, and detect notable events. This is the Tier 1
+    Observer layer described in the architecture — deep semantic analysis
+    on a slower cadence than Tier 0 heuristics.
+
+    Runs on a configurable cooldown (default 30s) to manage API costs.
+    """
+
+    def __init__(self, cooldown_seconds: float = 30.0) -> None:
+        self._config = get_config()
+        self._cooldown = cooldown_seconds
+        self._last_analysis: float = 0.0
+        self._available = True
+        self._last_check: float = 0.0
+        self._check_interval = 120.0  # Re-check availability every 2 min
+        self._latest_description: str = ""
+
+    def analyze(self, frame: np.ndarray) -> list[DetectionResult]:
+        """
+        Analyze a frame for scene understanding.
+
+        Returns a DetectionResult with a text description of the scene,
+        identified objects, and any notable observations.
+
+        Respects a cooldown to avoid excessive API calls.
+        """
+        now = time.monotonic()
+
+        # Cooldown — don't analyze too frequently
+        if now - self._last_analysis < self._cooldown:
+            return []
+
+        if not self._is_available():
+            return []
+
+        try:
+            import httpx
+
+            b64_frame = _frame_to_jpeg_b64(frame, quality=60)
+            if not b64_frame:
+                return []
+
+            api_key = self._config.anthropic_api_key
+            if not api_key:
+                logger.debug("Scene analysis unavailable: no Anthropic API key.")
+                self._available = False
+                self._last_check = now
+                return []
+
+            resp = httpx.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": self._config.claude_model,
+                    "max_tokens": 300,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/jpeg",
+                                        "data": b64_frame,
+                                    },
+                                },
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        "You are ARCHER's Observer. Briefly describe what you see "
+                                        "in this webcam frame. Identify: people present (count, "
+                                        "posture, activity), notable objects, and anything unusual "
+                                        "or safety-relevant. Be concise — 2-3 sentences max."
+                                    ),
+                                },
+                            ],
+                        }
+                    ],
+                },
+                timeout=15.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            description = ""
+            for block in data.get("content", []):
+                if block.get("type") == "text":
+                    description += block.get("text", "")
+
+            self._last_analysis = now
+            self._latest_description = description
+
+            if description:
+                return [DetectionResult(
+                    source="webcam",
+                    event_type="scene",
+                    confidence=0.9,
+                    data={
+                        "description": description,
+                        "model": self._config.claude_model,
+                    },
+                )]
+            return []
+
+        except Exception as e:
+            logger.debug(f"Scene analysis failed: {e}")
+            self._available = False
+            self._last_check = time.monotonic()
+            self._last_analysis = now  # Don't hammer on failure
+            return []
+
+    @property
+    def latest_description(self) -> str:
+        """Get the most recent scene description (for GUI display)."""
+        return self._latest_description
+
+    def _is_available(self) -> bool:
+        """Check availability with cooldown retry."""
+        if self._available:
+            return True
+        if time.monotonic() - self._last_check > self._check_interval:
+            self._available = True
+            return True
+        return False
+

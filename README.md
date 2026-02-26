@@ -108,7 +108,8 @@ ARCHER_9/
 │       │   ├── camera.py        # Webcam capture thread
 │       │   ├── analyzers.py     # Frame analyzers (emotion, pose, sedentary)
 │       │   ├── pipeline.py      # Observer pipeline orchestrator
-│       │   └── interventions.py # Proactive intervention engine
+│       │   ├── interventions.py # Proactive intervention engine
+│       │   └── overlay.py       # Visual detection overlay
 │       ├── tools/
 │       │   ├── __init__.py
 │       │   ├── pc_control.py    # Desktop automation (pyautogui, Playwright)
@@ -120,6 +121,7 @@ ARCHER_9/
 │           ├── main_window.py  # PyQt6 four-quadrant main window
 │           ├── orb_widget.py   # 2D animated orb (fallback)
 │           ├── orb_3d.py       # PyVista 3D animated orb
+│           ├── webcam_widget.py # Live webcam feed widget
 │           ├── artifact_pane.py # Tabbed artifact rendering surface
 │           ├── conversation.py # Conversation panel
 │           └── tray.py         # System tray

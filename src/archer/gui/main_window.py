@@ -44,6 +44,7 @@ from archer.gui.orb_widget import OrbWidget
 from archer.gui.conversation import ConversationPanel
 from archer.gui.artifact_pane import ArtifactPane
 from archer.gui.tray import SystemTray
+from archer.gui.webcam_widget import WebcamWidget
 
 # Try to import the 3D orb — falls back to 2D if PyVista is unavailable
 try:
@@ -69,7 +70,9 @@ class MainWindow(QMainWindow):
     update_mode_signal = pyqtSignal(str)       # cloud/local → orb tint
     update_amplitude_signal = pyqtSignal(float) # audio amplitude → orb animation
     update_observer_signal = pyqtSignal(str)   # observer status display
+    update_vision_signal = pyqtSignal(str)     # vision/scene analysis results
     observer_pause_signal = pyqtSignal(bool)   # observer pause/resume from tray
+    gui_visibility_signal = pyqtSignal(bool)   # True=visible, False=hidden → camera switch
     _mode_changed_signal = pyqtSignal(str)
     _system_error_signal = pyqtSignal(str)
 
@@ -100,6 +103,7 @@ class MainWindow(QMainWindow):
         self.update_mode_signal.connect(self._on_mode_update)
         self.update_amplitude_signal.connect(self._on_amplitude_update)
         self.update_observer_signal.connect(self._on_observer_update)
+        self.update_vision_signal.connect(self._on_vision_update)
         self._mode_changed_signal.connect(self._apply_mode_change)
         self._system_error_signal.connect(self._apply_system_error)
 
@@ -302,7 +306,7 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(top_splitter)
 
-        # --- Bottom half ---
+        # --- Bottom half (3-column: Memory | Webcam | Artifacts) ---
         bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # Bottom-left: Memory / Context panel
@@ -324,7 +328,7 @@ class MainWindow(QMainWindow):
         self._memory_label.setAlignment(Qt.AlignmentFlag.AlignTop)
         memory_layout.addWidget(self._memory_label, 1)
 
-        # Observer status (Phase 3)
+        # Observer status
         self._observer_label = QLabel("Observer: Initializing...")
         self._observer_label.setStyleSheet("""
             color: #666666;
@@ -336,6 +340,22 @@ class MainWindow(QMainWindow):
         memory_layout.addWidget(self._observer_label)
 
         bottom_splitter.addWidget(memory_frame)
+
+        # Bottom-center: Webcam feed + Vision
+        webcam_frame = QFrame()
+        webcam_frame.setObjectName("quadrant")
+        webcam_layout = QVBoxLayout(webcam_frame)
+        webcam_layout.setContentsMargins(0, 0, 0, 0)
+        webcam_layout.setSpacing(0)
+
+        webcam_title = QLabel("OBSERVER FEED")
+        webcam_title.setObjectName("section_title")
+        webcam_layout.addWidget(webcam_title)
+
+        self._webcam_widget = WebcamWidget()
+        webcam_layout.addWidget(self._webcam_widget, 1)
+
+        bottom_splitter.addWidget(webcam_frame)
 
         # Bottom-right: Artifact / Response pane
         artifact_frame = QFrame()
@@ -350,7 +370,7 @@ class MainWindow(QMainWindow):
         artifact_layout.addWidget(self._artifact_pane, 1)
 
         bottom_splitter.addWidget(artifact_frame)
-        bottom_splitter.setSizes([500, 500])
+        bottom_splitter.setSizes([350, 350, 350])
 
         splitter.addWidget(bottom_splitter)
         splitter.setSizes([550, 350])
@@ -416,9 +436,14 @@ class MainWindow(QMainWindow):
         """Update observer status display (thread-safe via signal)."""
         self._observer_label.setText(info)
 
+    def _on_vision_update(self, text: str) -> None:
+        """Update the webcam widget with vision analysis results."""
+        self._webcam_widget.update_vision(text)
+
     def _on_observer_paused(self, paused: bool) -> None:
         """Handle observer pause/resume from tray menu."""
         self.observer_pause_signal.emit(paused)
+        self._webcam_widget.set_paused(paused)
         status = "PAUSED (privacy mode)" if paused else "Active"
         self._observer_label.setText(f"Observer: {status}")
 
@@ -473,6 +498,8 @@ class MainWindow(QMainWindow):
         """
         event.ignore()
         self.hide()
+        self._webcam_widget.stop()  # Stop polling frames while hidden
+        self.gui_visibility_signal.emit(False)  # Switch to network cam
         self._tray.showMessage(
             "ARCHER",
             "ARCHER is still running in the background. "
@@ -483,6 +510,7 @@ class MainWindow(QMainWindow):
 
     def _restore_from_tray(self) -> None:
         """Restore the main window from the system tray."""
+        self.gui_visibility_signal.emit(True)  # Switch back to local webcam
         self.show()
         self.raise_()
         self.activateWindow()

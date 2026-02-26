@@ -16,6 +16,7 @@ Usage:
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -95,36 +96,63 @@ def main() -> None:
     orchestrator = AgentOrchestrator()
 
     # Initialize voice pipeline
-    logger.info("Initializing voice pipeline...")
+    logger.info("Creating voice pipeline...")
     from archer.voice.pipeline import VoicePipeline
     pipeline = VoicePipeline(
         agent_callback=orchestrator.process_request,
         agent_streaming_callback=orchestrator.process_request_streaming,
     )
 
-    try:
-        pipeline.initialize()
-    except Exception as e:
-        logger.warning(f"Voice pipeline initialization warning: {e}")
-        logger.info("Continuing with limited voice capabilities...")
-
-    # Start voice pipeline in background thread
-    logger.info("Starting voice pipeline...")
-    try:
-        pipeline.start()
-    except Exception as e:
-        logger.warning(f"Voice pipeline start warning: {e}")
-        logger.info("Voice pipeline will operate in text-only mode.")
-
-    # Pre-cache conversational filler audio clips in a background thread
-    # so they play instantly (no TTS latency) when the agent is slow.
-    def _precache_fillers():
+    # Initialize + start the voice pipeline in a background thread.
+    # SpeechBrain may need to download models from HuggingFace on first run,
+    # which can take 30–120 seconds. Running this off the main thread ensures
+    # the GUI appears immediately without being blocked.
+    def _init_and_start_pipeline():
+        import time as _time
+        # Brief pause so the GUI has time to fully render before heavy I/O.
+        _time.sleep(1.5)
+        try:
+            pipeline.initialize()
+        except Exception as e:
+            logger.warning(f"Voice pipeline initialization warning: {e}")
+            logger.info("Continuing with limited voice capabilities...")
+        try:
+            pipeline.start()
+        except Exception as e:
+            logger.warning(f"Voice pipeline start warning: {e}")
+            logger.info("Voice pipeline will operate in text-only mode.")
+        # Pre-cache conversational filler audio clips so they play instantly.
         try:
             pipeline.precache_fillers()
         except Exception as e:
             logger.warning(f"Filler pre-cache failed (non-fatal): {e}")
 
-    threading.Thread(target=_precache_fillers, daemon=True, name="FillerCache").start()
+    threading.Thread(target=_init_and_start_pipeline, daemon=True, name="PipelineInit").start()
+
+    # Start observer Docker containers (MediaPipe, DeepFace) in the background
+    def _start_observer_containers():
+        compose_file = Path(__file__).resolve().parents[2] / "docker-compose.yml"
+        if not compose_file.exists():
+            logger.debug("docker-compose.yml not found — skipping container startup.")
+            return
+        try:
+            result = subprocess.run(
+                ["docker-compose", "-f", str(compose_file), "--profile", "observer", "up", "-d"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=str(compose_file.parent),
+            )
+            if result.returncode == 0:
+                logger.info("Observer containers started (MediaPipe, DeepFace).")
+            else:
+                logger.debug(f"docker-compose returned {result.returncode}: {result.stderr.strip()}")
+        except FileNotFoundError:
+            logger.debug("docker-compose not found on PATH — observer containers not started.")
+        except Exception as e:
+            logger.debug(f"Observer container startup failed (non-fatal): {e}")
+
+    threading.Thread(target=_start_observer_containers, daemon=True, name="DockerStart").start()
 
     # Initialize Observer pipeline (Phase 3)
     logger.info("Initializing observer pipeline...")
@@ -136,7 +164,6 @@ def main() -> None:
 
         observer = ObserverPipeline(
             analysis_interval=5.0,
-            camera_device=0,
         )
 
         # Create intervention engine with proactive delivery callback
@@ -214,11 +241,8 @@ def main() -> None:
 
     bus.subscribe(EventType.AUDIO_AMPLITUDE, on_audio_amplitude)
 
-    # Wire up text input from GUI to pipeline
-    def on_text_input(event):
-        pipeline.process_text_input(event.data.get("text", ""))
-
-    bus.subscribe(EventType.GUI_TEXT_INPUT, on_text_input)
+    # Text input: VoicePipeline subscribes to GUI_TEXT_INPUT internally
+    # (in __init__), so no additional wiring needed here.
 
     # Wire up TTS mute
     def on_mute_tts(event):
@@ -241,6 +265,33 @@ def main() -> None:
             window.update_observer_signal.emit(info)
 
         bus.subscribe(EventType.OBSERVATION, on_observation)
+
+        # Attach the observer's camera and detection overlay to the GUI webcam widget
+        window._webcam_widget.set_camera(observer.camera)
+        window._webcam_widget.set_detections_source(observer.get_latest_detections)
+
+        # Forward vision/scene analysis results to the GUI
+        def on_scene_observation(event):
+            if event.data.get("event_type") == "scene":
+                description = event.data.get("description", "")
+                if description:
+                    window.update_vision_signal.emit(description)
+
+        bus.subscribe(EventType.OBSERVATION, on_scene_observation)
+
+        # Camera switching: local webcam when GUI visible, network cam when hidden
+        def on_gui_visibility(visible: bool):
+            if visible:
+                # GUI shown → switch to local webcam, re-attach to widget
+                new_cam = observer.switch_to_webcam()
+                window._webcam_widget.set_camera(new_cam)
+                window._webcam_widget.set_detections_source(observer.get_latest_detections)
+            else:
+                # GUI hidden → switch to network cam for background analysis
+                window._webcam_widget.stop()
+                observer.switch_to_network_cam()
+
+        window.gui_visibility_signal.connect(on_gui_visibility)
 
     # Show window
     window.show()

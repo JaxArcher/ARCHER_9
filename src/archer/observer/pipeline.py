@@ -33,6 +33,7 @@ from archer.observer.analyzers import (
     DetectionResult,
     EmotionAnalyzer,
     PoseAnalyzer,
+    SceneAnalyzer,
     SedentaryTracker,
 )
 
@@ -55,28 +56,34 @@ class ObserverPipeline:
     def __init__(
         self,
         analysis_interval: float = 5.0,
-        camera_device: int = 0,
     ) -> None:
         self._config = get_config()
         self._bus = get_event_bus()
         self._store = get_sqlite_store()
         self._analysis_interval = analysis_interval
 
-        # Camera
+        # Camera — start with local webcam (GUI mode default)
         self._camera = WebcamCapture(
-            device_index=camera_device,
+            camera_source=self._config.webcam_device,
             capture_interval=0.5,
         )
+        self._active_source: int | str = self._config.webcam_device
 
         # Analyzers
         self._emotion_analyzer = EmotionAnalyzer()
         self._pose_analyzer = PoseAnalyzer()
+        self._scene_analyzer = SceneAnalyzer(cooldown_seconds=30.0)
         self._sedentary_tracker = SedentaryTracker(threshold_minutes=120.0)
 
         # Control
         self._running = threading.Event()
         self._paused = threading.Event()  # Pause Observer (privacy)
         self._analysis_thread: threading.Thread | None = None
+        self._camera_lock = threading.Lock()  # Protects camera swap during switching
+
+        # Latest detection results for GUI overlay drawing
+        self._latest_detections: list[dict] = []
+        self._detections_lock = threading.Lock()
 
         # State tracking (for change detection — only publish on changes)
         self._last_emotion: str | None = None
@@ -154,6 +161,69 @@ class ObserverPipeline:
     def is_paused(self) -> bool:
         return self._paused.is_set()
 
+    @property
+    def camera(self) -> WebcamCapture:
+        """Expose camera for GUI webcam feed display."""
+        return self._camera
+
+    @property
+    def scene_analyzer(self) -> SceneAnalyzer:
+        """Expose scene analyzer for GUI vision results."""
+        return self._scene_analyzer
+
+    def get_latest_detections(self) -> list[dict]:
+        """Get the latest detection results for GUI overlay drawing."""
+        with self._detections_lock:
+            return self._latest_detections.copy()
+
+    def switch_to_network_cam(self) -> None:
+        """
+        Switch observer to the network RTSP camera.
+
+        Called when the GUI is minimized/hidden. The observer continues
+        analyzing frames from the network cam in the background.
+        """
+        url = self._config.network_camera_url
+        if not url:
+            logger.info("No network camera URL configured — staying on webcam.")
+            return
+        if self._active_source == url:
+            return  # Already on network cam
+
+        logger.info(f"Switching observer to network camera: {url}")
+        with self._camera_lock:
+            self._camera.stop()
+            self._camera = WebcamCapture(camera_source=url, capture_interval=0.5)
+            if self._running.is_set():
+                self._camera.start()
+            self._active_source = url
+        with self._detections_lock:
+            self._latest_detections = []
+
+    def switch_to_webcam(self) -> WebcamCapture:
+        """
+        Switch observer to the local USB webcam.
+
+        Called when the GUI becomes visible. Returns the new camera
+        instance so the GUI webcam widget can re-attach to it.
+        """
+        device = self._config.webcam_device
+        if self._active_source == device:
+            return self._camera  # Already on local webcam
+
+        logger.info(f"Switching observer to local webcam (device {device})")
+        with self._camera_lock:
+            self._camera.stop()
+            self._camera = WebcamCapture(
+                camera_source=device, capture_interval=0.5
+            )
+            if self._running.is_set():
+                self._camera.start()
+            self._active_source = device
+        with self._detections_lock:
+            self._latest_detections = []
+        return self._camera
+
     def _analysis_loop(self) -> None:
         """
         Main analysis loop — runs every analysis_interval seconds.
@@ -177,7 +247,8 @@ class ObserverPipeline:
 
     def _run_analysis_cycle(self) -> None:
         """Run one analysis cycle: grab frame, run analyzers, publish events."""
-        frame, timestamp = self._camera.get_latest_frame()
+        with self._camera_lock:
+            frame, timestamp = self._camera.get_latest_frame()
         self._analyses_run += 1
 
         if frame is None:
@@ -200,6 +271,34 @@ class ObserverPipeline:
         sedentary_result = self._sedentary_tracker.update(pose_for_sedentary)
         if sedentary_result is not None:
             self._publish_observation(sedentary_result)
+
+        # --- Scene Analysis (Tier 1 — slower cadence, VLM-powered) ---
+        scene_results = self._scene_analyzer.analyze(frame)
+        for result in scene_results:
+            self._publish_observation(result)
+
+        # --- Aggregate detections for GUI overlay ---
+        detections: list[dict] = []
+        for result in emotion_results:
+            region = result.data.get("face_region", {})
+            if region:
+                detections.append({
+                    "type": "face",
+                    "face_region": region,
+                    "dominant_emotion": result.data.get("dominant_emotion", ""),
+                    "confidence": result.confidence,
+                })
+        for result in pose_results:
+            landmarks = result.data.get("landmarks", [])
+            if landmarks:
+                detections.append({
+                    "type": "pose",
+                    "landmarks": landmarks,
+                    "posture": result.data.get("posture", ""),
+                    "is_hunched": result.data.get("is_hunched", False),
+                })
+        with self._detections_lock:
+            self._latest_detections = detections
 
     def _process_emotion(self, result: DetectionResult) -> None:
         """

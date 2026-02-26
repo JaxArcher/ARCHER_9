@@ -651,8 +651,12 @@ class AgentOrchestrator:
 
         except Exception as e:
             logger.error(f"Claude API error: {e}")
-            # Fall back to Ollama for this request
-            yield from self._stream_ollama(text, agent)
+            if self._toggle.is_cloud:
+                # In cloud mode, report the actual error — Ollama won't help.
+                yield f"I'm having trouble reaching the Claude API. Error: {type(e).__name__}. Please check your API key and network connection."
+            else:
+                # In local mode, fall back to Ollama for this request
+                yield from self._stream_ollama(text, agent)
 
     def _stream_ollama(self, text: str, agent: str) -> Generator[str, None, None]:
         """Stream sentences from Ollama (local) for a specific agent."""

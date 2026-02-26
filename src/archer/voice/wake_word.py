@@ -1,8 +1,9 @@
 """
 ARCHER Wake Word Detection.
 
-Uses openWakeWord to detect 'Hey ARCHER'. Runs on CPU continuously.
-Does not use GPU. This is the entry point of the voice pipeline.
+Uses openWakeWord. Runs all available built-in models simultaneously
+(alexa, hey_jarvis, hey_mycroft, hey_rhasspy) so you can use any of
+those phrases to wake ARCHER. Runs on CPU continuously.
 
 Wake word detection runs in its own thread, consuming audio from the
 AudioManager queue and publishing WAKE_WORD_DETECTED events.
@@ -44,11 +45,19 @@ class WakeWordDetector:
             # Download default models if not present
             openwakeword.utils.download_models()
 
+            # Run ALL available built-in models simultaneously.
+            # Since there's no "hey_archer" model, any of these phrases will
+            # trigger ARCHER: "Alexa", "Hey Jarvis", "Hey Mycroft", "Hey Rhasspy".
+            _all_models = ["alexa", "hey_jarvis", "hey_mycroft", "hey_rhasspy"]
+
             self._model = Model(
-                wakeword_models=["hey_jarvis"],  # Closest built-in to "hey archer"
+                wakeword_models=_all_models,
                 inference_framework="onnx",
             )
-            logger.info("Wake word model loaded (using 'hey_jarvis' as proxy for 'hey archer')")
+            logger.info(
+                f"Wake word models loaded: {_all_models}. "
+                "Say 'Alexa', 'Hey Jarvis', 'Hey Mycroft', or 'Hey Rhasspy' to wake ARCHER."
+            )
         except Exception as e:
             logger.error(f"Failed to initialize wake word detector: {e}")
             raise
