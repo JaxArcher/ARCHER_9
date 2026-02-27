@@ -5,12 +5,15 @@ Purpose: Graph-based associative memory with temporal knowledge graphs.
 Sectors: Episodic, Semantic, Procedural, Emotional, Reflective.
 """
 
+import os
+import asyncio
 from typing import Any, Literal
-
-from openmemory import OpenMemory
 from loguru import logger
-
 from archer.config import get_config
+
+# Import openmemory after setting env if needed, 
+# but we'll set it in __init__ just to be safe.
+from openmemory import Memory
 
 MemorySector = Literal["episodic", "semantic", "procedural", "emotional", "reflective"]
 
@@ -24,14 +27,23 @@ class OpenMemoryStore:
     def __init__(self) -> None:
         self._config = get_config()
         try:
-            # Initialize OpenMemory with local SQLite storage
-            self._om = OpenMemory(
-                db_path=str(self._config.openmemory_db),
-            )
-            logger.info(f"OpenMemory store initialized at {self._config.openmemory_db}")
+            # Set the database path via environment variable for openmemory SDK
+            os.environ["OM_DB_URL"] = f"sqlite:///{self._config.openmemory_db}"
+            
+            # Initialize Memory - it handles its own internal DB connection
+            self._om = Memory(user="archer_user")
+            logger.info(f"OpenMemory store initialized with DB at {self._config.openmemory_db}")
+            
+            # Helper to run async methods in a sync context
+            self._loop = asyncio.new_event_loop()
+            
         except Exception as e:
             logger.error(f"Failed to initialize OpenMemory: {e}")
             raise
+
+    def _run_async(self, coro):
+        """Helper to run async coroutines in the instance's event loop."""
+        return self._loop.run_until_complete(coro)
 
     def add_memory(
         self,
@@ -48,13 +60,14 @@ class OpenMemoryStore:
             metadata: Optional structured metadata.
         """
         try:
-            # Note: openmemory-py v1.3.2 uses .remember() or .add() depending on the engine
-            # but usually it's .add() for the SDK.
-            memory_id = self._om.add(
+            # openmemory-py v1.3.2 uses async .add()
+            res = self._run_async(self._om.add(
                 content=content,
-                sector=sector,
-                metadata=metadata or {},
-            )
+                primary_sector=sector,
+                meta=metadata or {},
+                tags=[sector]
+            ))
+            memory_id = res.get("id")
             logger.debug(f"Stored {sector} memory: {memory_id}")
             return str(memory_id)
         except Exception as e:
@@ -76,11 +89,11 @@ class OpenMemoryStore:
             min_score: Minimum confidence score.
         """
         try:
-            # Hybrid search is the default in OpenMemory
-            results = self._om.search(
+            # Hybrid search is the default in OpenMemory async .search()
+            results = self._run_async(self._om.search(
                 query=query,
                 limit=limit,
-            )
+            ))
             # Filter by score if needed, though search usually does this
             return [r for r in results if r.get("score", 0) >= min_score]
         except Exception as e:

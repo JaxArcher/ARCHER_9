@@ -102,6 +102,7 @@ class ArcherConfig(BaseSettings):
     redis_url: str = "redis://127.0.0.1:6377/0"
     openmemory_db: str = "data/openmemory.db"
     memory_decay: bool = False
+    observer_analysis_frequency: float = 30.0  # 30 seconds as per spec
 
     # NVIDIA NIM Models
     nvidia_api_key: str = Field(default="", alias="NVIDIA_API_KEY")

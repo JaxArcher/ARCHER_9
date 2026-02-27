@@ -49,13 +49,13 @@ services:
     profiles:
       - observer # Only started when observer is enabled (Phase 3+)
 
-  # --- Local TTS Server (IndexTTS2) ---
-  # GPU-accelerated text-to-speech for local/offline mode.
-  indextts:
+  # --- Local TTS Server (Coqui XTTS-v2) ---
+  # High-quality local voice synthesis with GPU acceleration.
+  coqui-tts:
     build:
-      context: ./docker/indextts
+      context: ./docker/coqui-tts
       dockerfile: Dockerfile
-    container_name: archer-indextts
+    container_name: archer-coqui-tts
     ports:
       - "8103:8000"
     deploy:
@@ -67,7 +67,7 @@ services:
               capabilities: [ gpu ]
     restart: unless-stopped
     profiles:
-      - local-tts # Only started when local TTS mode is active
+      - local-tts
 
   # --- Redis Buffer (Layer 1 Memory) ---
   # Used for session heartbeats and crash recovery.

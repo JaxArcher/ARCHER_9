@@ -163,7 +163,7 @@ def main() -> None:
         from archer.observer.interventions import InterventionEngine
 
         observer = ObserverPipeline(
-            analysis_interval=5.0,
+            analysis_interval=config.observer_analysis_frequency,
         )
 
         # Create intervention engine with proactive delivery callback

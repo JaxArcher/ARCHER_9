@@ -55,7 +55,11 @@ _TRAINER_KEYWORDS = {
     "breakfast", "lunch", "dinner", "snack", "weight", "body fat", "bmi",
     "muscle", "gains", "hydration", "water intake", "dehydrated",
     "sedentary", "sitting too long", "stretch", "stretching", "steps",
-    "fitbit", "fitness", "training",
+    "fitbit", "fitness", "training", "deadlift", "deadlifts", "squats",
+    "bench", "bench press", "pull-up", "pull-ups", "reps", "sets",
+    "hiit", "hypertrophy", "bulking", "cutting", "lean bulk",
+    "body composition", "recovery", "soreness", "overtraining",
+    "rest day", "active recovery", "form", "technique",
 }
 
 _THERAPIST_KEYWORDS = {
@@ -518,6 +522,13 @@ class AgentOrchestrator:
             if observer_context:
                 soul += f"\n\n## Latest Environmental Observations\n{observer_context}"
 
+        # Trainer-specific: Add observer data
+        if agent == "trainer":
+            soul += "\n\n## Current Mode: ACTIVE PERFORMANCE MONITORING"
+            observer_context = self._get_observer_context()
+            if observer_context:
+                soul += f"\n\n## Latest Environmental Observations\n{observer_context}"
+
         # Retrieve relevant context from Tier 3 (ChromaDB) if available
         memory_context = self._retrieve_memory_context(agent)
         if memory_context:
@@ -586,6 +597,22 @@ class AgentOrchestrator:
                             context_parts.append(f"- [KB:{source}] {content}")
                 except Exception as e:
                     logger.debug(f"Psychology KB retrieval skipped: {e}")
+
+            # Specialist Knowledge Retrieval (Trainer)
+            if agent == "trainer":
+                try:
+                    kb_memos = self._chroma.query(
+                        query_text=last_user,
+                        n_results=3,
+                        collection_name="trainer_knowledge"
+                    )
+                    for pm in kb_memos:
+                        content = pm.get("content", "")
+                        source = pm.get("metadata", {}).get("source", "trainer_kb")
+                        if content:
+                            context_parts.append(f"- [KB:{source}] {content}")
+                except Exception as e:
+                    logger.debug(f"Trainer KB retrieval skipped: {e}")
 
             if context_parts:
                 logger.info(f"Retrieved {len(context_parts)} context items for {agent}")

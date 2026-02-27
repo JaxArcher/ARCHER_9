@@ -55,12 +55,12 @@ class ObserverPipeline:
 
     def __init__(
         self,
-        analysis_interval: float = 5.0,
+        analysis_interval: float | None = None,
     ) -> None:
         self._config = get_config()
         self._bus = get_event_bus()
         self._store = get_sqlite_store()
-        self._analysis_interval = analysis_interval
+        self._analysis_interval = analysis_interval or self._config.observer_analysis_frequency
 
         # Camera — start with local webcam (GUI mode default)
         self._camera = WebcamCapture(
