@@ -101,6 +101,22 @@ class ArcherConfig(BaseSettings):
     indextts_url: str = "http://127.0.0.1:8103"
     redis_url: str = "redis://127.0.0.1:6377/0"
     openmemory_db: str = "data/openmemory.db"
+    memory_decay: bool = False
+
+    # NVIDIA NIM Models
+    nvidia_api_key: str = Field(default="", alias="NVIDIA_API_KEY")
+    nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
+
+    # Agent-specific model selection
+    assistant_model: str = Field(default="moonshotai/kimi-k2.5", alias="ARCHER_ASSISTANT_MODEL")
+    therapist_model: str = Field(default="qwen/qwen3.5-397b-a17b", alias="ARCHER_THERAPIST_MODEL")
+    trainer_model: str = Field(default="meta/llama-3.3-70b-instruct", alias="ARCHER_TRAINER_MODEL")
+    investment_model: str = Field(default="qwen/qwen3.5-397b-a17b", alias="ARCHER_INVESTMENT_MODEL")
+    observer_model: str = Field(default="qwen2.5vl:7b", alias="ARCHER_OBSERVER_MODEL")
+
+    # Local Vision (Ollama)
+    ollama_base_url: str = "http://localhost:11434"
+    use_local_vision: bool = True
 
     # --- HALT ---
     halt_phrase: str = "archer halt"

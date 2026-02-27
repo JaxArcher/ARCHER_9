@@ -507,6 +507,73 @@ class SQLiteStore:
             finally:
                 conn.close()
 
+    # --- Configuration / Toggle State ---
+
+    def set_configuration(self, key: str, value: str) -> None:
+        """Set a persistent configuration value."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO toggle_state (key, value, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (key, value, value),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_configuration(self, key: str) -> str | None:
+        """Get a persistent configuration value."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute("SELECT value FROM toggle_state WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return row["value"] if row else None
+        finally:
+            conn.close()
+
+    def get_therapist_status(self) -> dict[str, Any]:
+        """
+        Determine the current phase of the Therapist agent.
+        
+        Phases:
+        - profiling: Week 1-2 (Initial assessment)
+        - baseline: Week 3-4 (Passive observation)
+        - active: Week 5+ (Proactive intervention)
+        """
+        start_date_str = self.get_configuration("therapist_enrollment_date")
+        if not start_date_str:
+            # First time running — set the enrollment date
+            now = datetime.now(timezone.utc).isoformat()
+            self.set_configuration("therapist_enrollment_date", now)
+            start_date = datetime.now(timezone.utc)
+        else:
+            try:
+                start_date = datetime.fromisoformat(start_date_str)
+                if start_date.tzinfo is None:
+                    start_date = start_date.replace(tzinfo=timezone.utc)
+            except ValueError:
+                start_date = datetime.now(timezone.utc)
+
+        elapsed_days = (datetime.now(timezone.utc) - start_date).days
+        
+        if elapsed_days < 14:
+            phase = "profiling"
+        elif elapsed_days < 28:
+            phase = "baseline"
+        else:
+            phase = "active"
+            
+        return {
+            "phase": phase,
+            "days_active": elapsed_days,
+            "start_date": start_date.isoformat()
+        }
+
 
 # Global singleton
 _store: SQLiteStore | None = None

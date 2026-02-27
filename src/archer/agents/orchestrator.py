@@ -5,9 +5,9 @@ Routes every inbound event (voice utterance, observer event, scheduled trigger)
 to the appropriate specialist agent. Agents do not call each other directly —
 all inter-agent communication goes through the Orchestrator.
 
-Phase 4: Supports Assistant, Trainer, Therapist, Finance, and Investment agents
-with keyword + explicit routing. Logs conversations to SQLite (Tier 2) and
-retrieves relevant context from ChromaDB (Tier 3) before each agent call.
+Phase 4: Supports Assistant, Trainer, Therapist, and Investment agents
+as per final specs (Finance removed). Routing uses keyword + explicit triggers.
+Logs conversations to local Tier 2 (SQLite) and Tier 3 (Markdown/OpenMemory).
 
 The Assistant agent has access to PC Control tools (screen capture, browser
 automation, keyboard/mouse) via Anthropic tool_use. Non-read-only tools
@@ -40,6 +40,7 @@ from archer.memory.sqlite_store import get_sqlite_store
 from archer.memory.redis_buffer import get_redis_buffer
 from archer.memory.openmemory_store import get_openmemory_store
 from archer.memory.markdown_logger import get_markdown_logger
+from archer.memory.chromadb_store import get_chromadb_store
 
 
 # Regex to split on sentence-ending punctuation followed by a space or end-of-string.
@@ -66,14 +67,6 @@ _THERAPIST_KEYWORDS = {
     "panic attack", "venting", "vent", "need to talk", "just need to talk",
 }
 
-_FINANCE_KEYWORDS = {
-    "budget", "spending", "expense", "expenses", "transaction", "transactions",
-    "receipt", "receipts", "bill", "bills", "payment", "payments", "savings",
-    "saving", "afford", "cost", "costs", "price", "cheap", "expensive",
-    "over budget", "under budget", "financial", "finances", "money spent",
-    "how much did i spend", "log a purchase", "monthly spending",
-}
-
 _INVESTMENT_KEYWORDS = {
     "stock", "stocks", "portfolio", "market", "markets", "shares", "ticker",
     "dividend", "dividends", "s&p", "nasdaq", "dow", "etf", "index fund",
@@ -93,16 +86,14 @@ _AGENT_NAME_MAP = {
     "trainer": "trainer",
     "therapist": "therapist",
     "assistant": "assistant",
-    "finance": "finance",
     "investment": "investment",
     "coach": "trainer",
     "counselor": "therapist",
-    "accountant": "finance",
     "investor": "investment",
 }
 
 # Active agents and their SOUL.md files
-_ACTIVE_AGENTS = ("assistant", "trainer", "therapist", "finance", "investment", "observer")
+_ACTIVE_AGENTS = ("assistant", "trainer", "therapist", "investment", "observer")
 
 
 class AgentOrchestrator:
@@ -121,6 +112,19 @@ class AgentOrchestrator:
         self._redis = get_redis_buffer()
         self._om = get_openmemory_store()
         self._md = get_markdown_logger()
+        self._chroma = get_chromadb_store()
+
+        # NVIDIA NIM client
+        self._nvidia_client = None
+        if self._config.nvidia_api_key:
+            try:
+                from openai import OpenAI
+                self._nvidia_client = OpenAI(
+                    api_key=self._config.nvidia_api_key,
+                    base_url=self._config.nvidia_base_url,
+                )
+            except ImportError:
+                logger.warning("openai package not found — NVIDIA NIM disabled.")
 
         # Load SOUL.md for all active agents
         self._souls: dict[str, str] = {}
@@ -280,7 +284,6 @@ class AgentOrchestrator:
         scores = {
             "trainer": _score(_TRAINER_KEYWORDS),
             "therapist": _score(_THERAPIST_KEYWORDS),
-            "finance": _score(_FINANCE_KEYWORDS),
             "investment": _score(_INVESTMENT_KEYWORDS),
         }
 
@@ -479,24 +482,66 @@ class AgentOrchestrator:
 
     def _stream_agent(self, text: str, agent: str) -> Generator[str, None, None]:
         """Stream sentences from the specified agent."""
-        if self._toggle.is_cloud:
-            yield from self._stream_claude(text, agent)
-        else:
+        if not self._toggle.is_cloud:
             yield from self._stream_ollama(text, agent)
+            return
+
+        # Special agents (Therapist, Trainer, Investment) always use NVIDIA NIM if available
+        is_specialist = agent in ("therapist", "trainer", "investment")
+        if self._nvidia_client and (is_specialist or self._config.claude_model == "nvidia"):
+            yield from self._stream_nvidia(text, agent)
+        else:
+            yield from self._stream_claude(text, agent)
 
     def _build_system_prompt(self, agent: str) -> str:
         """Build the system prompt for an agent, including SOUL.md and memory context."""
         soul = self._souls.get(agent, f"You are ARCHER's {agent} agent.")
 
+        # Therapist-specific: Add profiling status and observer data
+        if agent == "therapist":
+            status = self._sqlite.get_therapist_status()
+            phase = status["phase"]
+            soul += f"\n\n## Current Mode: {phase.upper()} (Day {status['days_active']})"
+            
+            if phase == "profiling":
+                soul += "\nPhase 1: Your primary goal is to establish a behavioral baseline. Ask profiling questions to understand Colby's norms."
+                soul += "\n\nREQUIRED PROFILING QUESTIONS (weave into conversation):"
+                soul += "\n- On a scale of 1-10, how would you describe your typical stress levels?"
+                soul += "\n- Tell me about your sleep patterns in a normal week."
+                soul += "\n- When you're stressed, what do you tend to do?"
+                soul += "\n- How often do you typically socialize or have visitors?"
+                soul += "\n- What does a 'good day' look like for you emotionally?"
+            elif phase == "baseline":
+                soul += "\nPhase 2: Establish baseline. Monitor environmental data but DO NOT intervene yet unless specifically asked."
+            
+            observer_context = self._get_observer_context()
+            if observer_context:
+                soul += f"\n\n## Latest Environmental Observations\n{observer_context}"
+
         # Retrieve relevant context from Tier 3 (ChromaDB) if available
         memory_context = self._retrieve_memory_context(agent)
         if memory_context:
-            soul += f"\n\n## Current Context\n{memory_context}"
+            soul += f"\n\n## Semantic Memory Context\n{memory_context}"
 
         return soul
 
+    def _get_observer_context(self) -> str:
+        """Retrieve latest signals from the Observer via Tier 2 (SQLite)."""
+        try:
+            obs = self._sqlite.get_recent_observations(limit=5)
+            if not obs:
+                return ""
+            
+            lines = []
+            for o in obs:
+                lines.append(f"- [{o['source']}] {o['event_type']} (conf: {o['confidence']:.2f}): {o['payload']}")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.debug(f"Failed to retrieve observer context: {e}")
+            return ""
+
     def _retrieve_memory_context(self, agent: str) -> str:
-        """Retrieve relevant context from Layer 3 (OpenMemory hybrid search)."""
+        """Retrieve relevant context from Tier 3 (OpenMemory + ChromaDB)."""
         try:
             # Get last user message for context query
             last_user = None
@@ -510,24 +555,45 @@ class AgentOrchestrator:
             if not last_user:
                 return ""
 
+            context_parts = []
+
             # Hybrid retrieval (Graph + Vector) via OpenMemory
-            memos = self._om.search(last_user, limit=5)
-            if memos:
-                context_parts = []
-                for m in memos:
-                    # openmemory search results vary by version, but usually have 'content' or 'text'
-                    content = m.get("content", m.get("text", ""))
-                    sector = m.get("sector", "unknown")
-                    score = m.get("score", 0)
-                    if content:
-                        context_parts.append(f"- [{sector}] {content} (conf: {score:.2f})")
-                
-                logger.info(f"Retrieved {len(context_parts)} cognitive memories for context")
+            try:
+                memos = self._om.search(last_user, limit=5)
+                if memos:
+                    for m in memos:
+                        content = m.get("content", m.get("text", ""))
+                        sector = m.get("sector", "unknown")
+                        score = m.get("score", 0)
+                        if content:
+                            context_parts.append(f"- [OM:{sector}] {content} (conf: {score:.2f})")
+            except Exception as e:
+                logger.debug(f"OpenMemory retrieval skipped: {e}")
+
+            # Specialist Knowledge Retrieval (ChromaDB)
+            if agent == "therapist":
+                try:
+                    kb_memos = self._chroma.query(
+                        query_text=last_user,
+                        n_results=3,
+                        collection_name="psychology_knowledge"
+                    )
+                    for pm in kb_memos:
+                        content = pm.get("content", "")
+                        source = pm.get("metadata", {}).get("source", "psych_kb")
+                        if content:
+                            # Keep knowledge base context distinct
+                            context_parts.append(f"- [KB:{source}] {content}")
+                except Exception as e:
+                    logger.debug(f"Psychology KB retrieval skipped: {e}")
+
+            if context_parts:
+                logger.info(f"Retrieved {len(context_parts)} context items for {agent}")
                 return "\n".join(context_parts)
                 
             return ""
         except Exception as e:
-            logger.debug(f"OpenMemory retrieval skipped: {e}")
+            logger.error(f"Memory context retrieval failed: {e}")
             return ""
 
     def _stream_claude(self, text: str, agent: str) -> Generator[str, None, None]:
@@ -712,6 +778,95 @@ class AgentOrchestrator:
                 # In local mode, fall back to Ollama for this request
                 yield from self._stream_ollama(text, agent)
 
+    def _stream_nvidia(self, text: str, agent: str) -> Generator[str, None, None]:
+        """Stream sentences from NVIDIA NIM (OpenAI-compatible) for an agent."""
+        if not self._nvidia_client:
+            yield "NVIDIA NIM is not configured. Please check your API key."
+            return
+
+        try:
+            model = getattr(self._config, f"{agent}_model", "meta/llama-3.3-70b-instruct")
+            system_prompt = self._build_system_prompt(agent)
+
+            with self._history_lock:
+                # Specialist agents get more context
+                history_limit = 30 if agent != "assistant" else 20
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                ] + list(self._conversation_history[-history_limit:])
+
+            # Tool support (Assistant only)
+            tools = None
+            tool_executor = None
+            if agent == "assistant":
+                try:
+                    from archer.tools.pc_tools import PC_TOOLS, PCToolExecutor
+                    # Map Anthropic schemas to OpenAI schemas if needed, 
+                    # but NIM often supports the basic structure.
+                    tools = PC_TOOLS
+                    tool_executor = PCToolExecutor()
+                except ImportError:
+                    pass
+
+            max_tool_rounds = 3
+            for _round in range(max_tool_rounds):
+                buffer = ""
+                full_content = ""
+                
+                # Create the stream
+                stream = self._nvidia_client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    stream=True,
+                    temperature=self._config.agent_temperature,
+                    max_tokens=self._config.max_tokens,
+                )
+
+                for chunk in stream:
+                    if self._cancelled.is_set():
+                        break
+                    
+                    if not chunk.choices:
+                        continue
+                        
+                    delta = chunk.choices[0].delta
+                    if delta.content:
+                        text_chunk = delta.content
+                        buffer += text_chunk
+                        full_content += text_chunk
+                        
+                        self._bus.publish(Event(
+                            type=EventType.AGENT_RESPONSE_CHUNK,
+                            source="orchestrator",
+                            data={
+                                "agent": agent,
+                                "chunk": text_chunk,
+                                "accumulated": full_content,
+                            },
+                        ))
+
+                        while True:
+                            match = _SENTENCE_BOUNDARY.search(buffer)
+                            if match is None:
+                                break
+                            sentence = buffer[:match.start()].strip()
+                            buffer = buffer[match.end():]
+                            if sentence:
+                                yield sentence
+
+                if buffer.strip():
+                    yield buffer.strip()
+
+                # NVIDIA NIM tool use implementation would go here if needed.
+                # Currently focus on specialist agents (no tools).
+                break
+
+        except Exception as e:
+            logger.error(f"NVIDIA NIM error ({agent}): {e}")
+            # Fall back to local Qwen as per spec
+            yield "NVIDIA NIM limits reached or error occurred — falling back to local Qwen."
+            yield from self._stream_ollama(text, agent)
+
     def _stream_ollama(self, text: str, agent: str) -> Generator[str, None, None]:
         """Stream sentences from Ollama (local) for a specific agent."""
         try:
@@ -730,7 +885,7 @@ class AgentOrchestrator:
                 "POST",
                 "http://127.0.0.1:11434/api/chat",
                 json={
-                    "model": "llama3.2",
+                    "model": "qwen2.5:7b",
                     "messages": messages,
                     "stream": True,
                 },

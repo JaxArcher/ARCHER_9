@@ -362,7 +362,7 @@ class MainWindow(QMainWindow):
         artifact_frame.setObjectName("quadrant")
         artifact_layout = QVBoxLayout(artifact_frame)
 
-        artifact_title = QLabel("ARTIFACT PANE")
+        artifact_title = QLabel("MISSION LOG")
         artifact_title.setObjectName("section_title")
         artifact_layout.addWidget(artifact_title)
 
@@ -410,8 +410,7 @@ class MainWindow(QMainWindow):
         agent_info = {
             "assistant": ("Assistant", "#2E6DA4", "General tasks, calendar, reminders, knowledge"),
             "trainer": ("Trainer", "#1A6B3C", "Fitness, nutrition, exercise, health"),
-            "therapist": ("Therapist", "#5B2A8C", "Emotional support, stress, mental health"),
-            "finance": ("Finance", "#8C6B00", "Budget, spending, financial planning"),
+            "therapist": ("Therapist", "#5B2A8C", "Clinical psychology, confrontational mirroring, profiling"),
             "investment": ("Investment", "#C75B00", "Portfolio, markets, investment analysis"),
         }
         name, color, desc = agent_info.get(agent, (agent.capitalize(), "#888888", ""))

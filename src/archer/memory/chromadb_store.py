@@ -30,57 +30,72 @@ class ChromaDBStore:
     as vector embeddings for semantic retrieval.
     """
 
-    COLLECTION_NAME = "archer_memory"
-
     def __init__(self) -> None:
         self._config = get_config()
         self._client = None
-        self._collection = None
+        self._collections = {}
         self._lock = threading.Lock()
         self._available = False
         self._connect()
 
     def _connect(self) -> None:
-        """Connect to the ChromaDB container."""
+        """Connect to the ChromaDB container or a local persistent store."""
         try:
             import chromadb
+
+            # Try Docker HTTP connection first
+            try:
+                self._client = chromadb.HttpClient(
+                    host="127.0.0.1",
+                    port=8100,
+                )
+                self._client.heartbeat()
+                self._available = True
+                logger.info("ChromaDB connected (HTTP 127.0.0.1:8100)")
+            except Exception:
+                # Fallback to local persistent client
+                local_path = self._config.data_dir / "chromadb"
+                local_path.mkdir(parents=True, exist_ok=True)
+                self._client = chromadb.PersistentClient(
+                    path=str(local_path)
+                )
+                self._available = True
+                logger.info(f"ChromaDB using local storage at {local_path}")
+
+        except Exception as e:
+            self._available = False
+            logger.warning(
+                f"ChromaDB not available: {e}. "
+                f"Tier 3 memory disabled."
+            )
+
+    def _get_collection(self, name: str = "archer_memory"):
+        """Get or create a named collection."""
+        if not self._available or self._client is None:
+            return None
+        
+        if name in self._collections:
+            return self._collections[name]
+        
+        try:
             from chromadb.utils.embedding_functions import (
                 SentenceTransformerEmbeddingFunction,
             )
-
-            self._client = chromadb.HttpClient(
-                host="127.0.0.1",
-                port=8100,
-            )
-
-            # Verify connection
-            self._client.heartbeat()
-
             # Use all-MiniLM-L6-v2 for embeddings (spec requirement)
             embedding_fn = SentenceTransformerEmbeddingFunction(
                 model_name="all-MiniLM-L6-v2",
             )
 
-            # Get or create the main collection with embedding function
-            self._collection = self._client.get_or_create_collection(
-                name=self.COLLECTION_NAME,
+            collection = self._client.get_or_create_collection(
+                name=name,
                 metadata={"hnsw:space": "cosine"},
                 embedding_function=embedding_fn,
             )
-
-            self._available = True
-            count = self._collection.count()
-            logger.info(
-                f"ChromaDB connected — collection '{self.COLLECTION_NAME}' "
-                f"({count} documents)"
-            )
-
+            self._collections[name] = collection
+            return collection
         except Exception as e:
-            self._available = False
-            logger.warning(
-                f"ChromaDB not available (is Docker running?): {e}. "
-                f"Tier 3 memory disabled — will retry on next access."
-            )
+            logger.error(f"Failed to get collection {name}: {e}")
+            return None
 
     @property
     def is_available(self) -> bool:
@@ -89,7 +104,7 @@ class ChromaDBStore:
 
     def _ensure_connected(self) -> bool:
         """Reconnect if needed. Returns True if connected."""
-        if self._available and self._collection is not None:
+        if self._available and self._client is not None:
             return True
         self._connect()
         return self._available
@@ -100,6 +115,7 @@ class ChromaDBStore:
         agent: str,
         session_id: str = "",
         metadata: dict[str, Any] | None = None,
+        collection_name: str = "archer_memory",
     ) -> bool:
         """
         Store a piece of information in semantic memory.
@@ -109,6 +125,7 @@ class ChromaDBStore:
             agent: Which agent created this memory.
             session_id: The session this memory came from.
             metadata: Additional metadata to attach.
+            collection_name: Target collection.
 
         Returns:
             True if stored successfully, False otherwise.
@@ -116,9 +133,13 @@ class ChromaDBStore:
         if not self._ensure_connected():
             return False
 
+        collection = self._get_collection(collection_name)
+        if not collection:
+            return False
+
         with self._lock:
             try:
-                doc_id = f"{agent}_{int(time.time() * 1000)}"
+                doc_id = f"{agent}_{int(time.time() * 1000)}_{hash(content) % 1000}"
                 now = datetime.now(timezone.utc).isoformat()
 
                 doc_metadata = {
@@ -129,14 +150,14 @@ class ChromaDBStore:
                 if metadata:
                     doc_metadata.update(metadata)
 
-                self._collection.add(
+                collection.add(
                     documents=[content],
                     ids=[doc_id],
                     metadatas=[doc_metadata],
                 )
 
                 logger.debug(
-                    f"Stored in ChromaDB: [{agent}] '{content[:60]}...' (id={doc_id})"
+                    f"Stored in ChromaDB [{collection_name}]: [{agent}] '{content[:60]}...' (id={doc_id})"
                 )
                 return True
 
@@ -150,6 +171,7 @@ class ChromaDBStore:
         query_text: str,
         agent: str | None = None,
         n_results: int = 3,
+        collection_name: str = "archer_memory",
     ) -> list[dict[str, Any]]:
         """
         Query semantic memory by similarity.
@@ -158,11 +180,16 @@ class ChromaDBStore:
             query_text: The text to search for similar memories.
             agent: Optional — filter to only this agent's memories.
             n_results: Number of results to return.
+            collection_name: Collection to query.
 
         Returns:
             List of dicts with 'content', 'agent', 'timestamp', 'distance'.
         """
         if not self._ensure_connected():
+            return []
+
+        collection = self._get_collection(collection_name)
+        if not collection:
             return []
 
         with self._lock:
@@ -172,12 +199,12 @@ class ChromaDBStore:
                     where_filter = {"agent": agent}
 
                 # Check if collection has any documents
-                if self._collection.count() == 0:
+                if collection.count() == 0:
                     return []
 
-                results = self._collection.query(
+                results = collection.query(
                     query_texts=[query_text],
-                    n_results=min(n_results, self._collection.count()),
+                    n_results=min(n_results, collection.count()),
                     where=where_filter,
                 )
 
@@ -194,6 +221,7 @@ class ChromaDBStore:
                             "timestamp": meta.get("timestamp", ""),
                             "session_id": meta.get("session_id", ""),
                             "distance": distance,
+                            "metadata": meta,
                         })
 
                 return memories
@@ -211,9 +239,6 @@ class ChromaDBStore:
     ) -> bool:
         """
         Store a conversation summary for long-term retrieval.
-
-        Called after significant interactions to build up the
-        semantic context that agents can query later.
         """
         return self.store(
             content=summary,
@@ -229,10 +254,7 @@ class ChromaDBStore:
         confidence: float = 1.0,
     ) -> bool:
         """
-        Store a fact about the user (preference, habit, relationship).
-
-        These are the core of Tier 3 — things ARCHER learns about the user
-        over time that any agent can retrieve.
+        Store a fact about the user.
         """
         return self.store(
             content=fact,
@@ -243,12 +265,15 @@ class ChromaDBStore:
             },
         )
 
-    def count(self) -> int:
-        """Get the number of documents in the collection."""
+    def count(self, collection_name: str = "archer_memory") -> int:
+        """Get the number of documents in a collection."""
         if not self._ensure_connected():
             return 0
+        collection = self._get_collection(collection_name)
+        if not collection:
+            return 0
         try:
-            return self._collection.count()
+            return collection.count()
         except Exception:
             return 0
 
