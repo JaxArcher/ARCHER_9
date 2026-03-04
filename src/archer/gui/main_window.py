@@ -42,6 +42,7 @@ from archer.core.event_bus import Event, EventType, get_event_bus
 from archer.core.toggle import get_toggle_service
 from archer.gui.orb_widget import OrbWidget
 from archer.gui.conversation import ConversationPanel
+from archer.gui.canvas_widget import CanvasWidget
 from archer.gui.artifact_pane import ArtifactPane
 from archer.gui.tray import SystemTray
 from archer.gui.webcam_widget import WebcamWidget

@@ -485,6 +485,7 @@ class AgentOrchestrator:
         elapsed = (time.monotonic() - start_time) * 1000
         logger.info(f"Orchestrator response ({elapsed:.0f}ms): '{full_response[:80]}...'")
 
+
     def _stream_agent(self, text: str, agent: str) -> Generator[str, None, None]:
         """Stream sentences from the specified agent."""
         if not self._toggle.is_cloud:
@@ -968,6 +969,40 @@ class AgentOrchestrator:
     # ------------------------------------------------------------------
     # Proactive Intervention API (used by the Observer intervention engine)
     # ------------------------------------------------------------------
+
+
+    def _publish_investment_artifact(self, response_text: str, agent: str) -> None:
+        """Publish portfolio chart artifact if Investment agent mentions portfolio."""
+        if agent != "investment" or "portfolio" not in response_text.lower():
+            return
+        
+        try:
+            from archer.canvas.renderer import render_portfolio_chart
+            
+            # Example portfolio data (in production, extract from response or memory)
+            portfolio_data = {
+                "Tech Stocks": 45,
+                "Bonds": 25,
+                "Real Estate": 15,
+                "Cash": 10,
+                "Commodities": 5
+            }
+            
+            html_path = render_portfolio_chart(portfolio_data)
+            
+            self._bus.publish(Event(
+                type=EventType.ARTIFACT_DISPLAY,
+                source="orchestrator",
+                data={
+                    "html_path": html_path,
+                    "title": "Portfolio Breakdown",
+                    "agent": agent
+                }
+            ))
+            
+            logger.info(f"Published portfolio artifact: {html_path}")
+        except Exception as e:
+            logger.error(f"Failed to publish portfolio artifact: {e}")
 
     def deliver_proactive_message(self, agent: str, prompt: str) -> None:
         """

@@ -43,6 +43,7 @@ class EventType(str, Enum):
     AGENT_RESPONSE_CHUNK = "agent.response_chunk"
     AGENT_RESPONSE_END = "agent.response_end"
     AGENT_SWITCH = "agent.switch"
+    ARTIFACT_DISPLAY = "agent.artifact_display"
 
     # Toggle events
     MODE_CHANGED = "system.mode_changed"

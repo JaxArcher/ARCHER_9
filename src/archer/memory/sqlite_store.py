@@ -337,7 +337,26 @@ class SQLiteStore:
             return [dict(row) for row in reversed(rows)]
         finally:
             conn.close()
-
+    def search_conversations_fts(self, query: str, limit: int = 10) -> list:
+        """Fast full-text search using FTS5."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute(
+                """
+                SELECT c.id, c.session_id, c.role, c.agent_name, c.content, 
+                       c.metadata, c.timestamp, fts.rank 
+                FROM conversation_logs_fts fts
+                JOIN conversation_logs c ON c.id = fts.rowid
+                WHERE conversation_logs_fts MATCH ?
+                ORDER BY fts.rank
+                LIMIT ?
+                """,
+                (query, limit)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+            
     # --- Observation Events ---
 
     def log_observation(

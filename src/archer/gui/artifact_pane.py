@@ -146,6 +146,24 @@ class ArtifactPane(QWidget):
         """Connect event bus and signals."""
         self.artifact_received_signal.connect(self._handle_artifact)
         self._bus.subscribe(EventType.ARTIFACT_PUSH, self._on_artifact_event)
+        self._bus.subscribe(EventType.ARTIFACT_DISPLAY, self._on_artifact_display_event)
+
+    
+    def _on_artifact_display_event(self, event: Event) -> None:
+        '''Handle ARTIFACT_DISPLAY event (from canvas renderer).'''
+        try:
+            html_path = event.data.get('html_path')
+            if html_path:
+                # Create web artifact payload
+                payload = ArtifactPayload(
+                    type='web',
+                    title=event.data.get('title', 'Chart'),
+                    content=html_path,
+                    agent=event.data.get('agent', 'assistant'),
+                )
+                self.artifact_received_signal.emit(payload)
+        except Exception as e:
+            logger.error(f'ARTIFACT_DISPLAY event handling failed: {e}')
 
     def _on_artifact_event(self, event: Event) -> None:
         """Handle artifact push from event bus (background thread)."""
