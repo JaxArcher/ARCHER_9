@@ -44,3 +44,6 @@ docker/indextts/
 
 # Previous codebase
 ARCHER_v2/
+
+# Special files
+nul
