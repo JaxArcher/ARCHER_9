@@ -113,6 +113,7 @@ class AgentOrchestrator:
         self._bus = get_event_bus()
         self._toggle = get_toggle_service()
         self._store = get_sqlite_store()
+        self._sqlite = self._store  # Alias for backward compatibility
         self._redis = get_redis_buffer()
         self._om = get_openmemory_store()
         self._md = get_markdown_logger()

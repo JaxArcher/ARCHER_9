@@ -575,6 +575,130 @@ class SQLiteStore:
         }
 
 
+            # ====== ADD ALL THE NEW METHODS HERE ======
+            
+    def log_pending_confirmation(self, emotion: str, confidence: float, observation_id: int) -> int:
+        """Log a pending emotion confirmation."""
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO emotion_confirmations 
+            (timestamp, detected_emotion, confidence, observation_id)
+            VALUES (?, ?, ?, ?)
+            """,
+            (time.time(), emotion, confidence, observation_id),
+        )
+        self._conn.commit()
+        return cursor.lastrowid
+
+    def update_emotion_confirmation(self, emotion: str, confidence: float, user_confirmed: bool, actual_emotion: str = None) -> None:
+        """Update emotion confirmation with user response."""
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            UPDATE emotion_confirmations
+            SET user_confirmed = ?, user_actual_emotion = ?
+            WHERE detected_emotion = ? AND confidence = ?
+            AND user_confirmed IS NULL
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """,
+            (user_confirmed, actual_emotion, emotion, confidence),
+        )
+        self._conn.commit()
+
+    def get_emotion_confirmation_stats(self, emotion: str) -> dict:
+        """Get confirmation accuracy stats for an emotion."""
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM emotion_confirmation_stats
+            WHERE detected_emotion = ?
+            """,
+            (emotion,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return {"total_detections": 0, "confirmed": 0, "accuracy": 0.0}
+        return {
+            "total_detections": row[1],
+            "confirmed": row[2],
+            "rejected": row[3],
+            "accuracy": row[4],
+            "avg_confidence": row[5],
+        }
+
+    def get_therapist_status(self) -> dict:
+        """Get current therapist profiling status."""
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            SELECT phase, current_week, days_active, baseline_established
+            FROM therapist_profiling
+            WHERE id = 1
+            """
+        )
+        row = cursor.fetchone()
+        if not row:
+            cursor.execute(
+                """
+                INSERT INTO therapist_profiling 
+                (id, start_date, phase, current_week, last_updated)
+                VALUES (1, ?, 'profiling', 1, ?)
+                """,
+                (time.time(), time.time()),
+            )
+            self._conn.commit()
+            return {"phase": "profiling", "days_active": 0, "current_week": 1, "baseline_established": False}
+        
+        start_date = cursor.execute("SELECT start_date FROM therapist_profiling WHERE id = 1").fetchone()[0]
+        days_active = int((time.time() - start_date) / 86400)
+        
+        return {
+            "phase": row[0],
+            "current_week": row[1],
+            "days_active": days_active,
+            "baseline_established": bool(row[3]),
+        }
+
+    def save_exercise_response(self, segment_id: str, question_id: str, response: str) -> None:
+        """Save exercise response."""
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO exercise_responses
+            (segment_id, question_id, response, timestamp)
+            VALUES (?, ?, ?, ?)
+            """,
+            (segment_id, question_id, response, time.time()),
+        )
+        cursor.execute(
+            """
+            UPDATE exercise_segments
+            SET questions_answered = questions_answered + 1
+            WHERE segment_id = ?
+            """,
+            (segment_id,),
+        )
+        self._conn.commit()
+
+    def get_profiling_start_date(self) -> float:
+        """Get profiling start date timestamp."""
+        cursor = self._conn.cursor()
+        cursor.execute("SELECT start_date FROM therapist_profiling WHERE id = 1")
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def get_last_profiling_question_time(self) -> float:
+        """Get timestamp of last profiling question."""
+        cursor = self._conn.cursor()
+        cursor.execute("SELECT MAX(timestamp) FROM exercise_responses")
+        row = cursor.fetchone()
+        return row[0] if row and row[0] else None
+
+# ====== END OF NEW METHODS ======
+
+
 # Global singleton
 _store: SQLiteStore | None = None
 _store_lock = threading.Lock()

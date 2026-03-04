@@ -27,7 +27,7 @@ import time
 from typing import Any, Callable
 
 from loguru import logger
-
+from archer.observer.emotion_confirmation import EmotionConfirmationManager
 from archer.core.event_bus import Event, EventType, get_event_bus
 from archer.memory.sqlite_store import get_sqlite_store
 
@@ -77,6 +77,9 @@ class InterventionEngine:
 
         # Subscribe to observation events
         self._bus.subscribe(EventType.OBSERVATION, self._on_observation)
+
+        # Add emotion confirmation manager
+        self._confirmation_mgr = EmotionConfirmationManager(self._store)
 
         logger.info("Intervention engine initialized.")
 
@@ -145,37 +148,30 @@ class InterventionEngine:
 
     def _handle_sustained_emotion(self, data: dict[str, Any]) -> None:
         """
-        Handle sustained emotional distress — routes to Therapist.
-
-        Rules:
-        - Fire after 20+ minutes of sustained negative emotion
-        - Never more than once per 2 hours on the same emotional topic
+        Handle sustained emotional distress — routes to Therapist with confirmation.
+        
+        NEW: Always asks for confirmation before intervening (per user requirement)
         """
         dominant = data.get("dominant_emotion", "neutral")
-
         if dominant not in _DISTRESS_EMOTIONS:
             return
-
-        agent = "therapist"
-        topic = f"emotion_{dominant}"
-
-        # Therapist cooldown: 2 hours per emotional topic
-        if self._store.check_cooldown(agent, topic, _THERAPIST_EMOTION_COOLDOWN):
-            logger.debug(f"Therapist emotion intervention in cooldown for {topic}")
-            return
-
-        sustained_seconds = data.get("sustained_seconds", 0)
-        sustained_minutes = sustained_seconds / 60.0
-
-        prompt = (
-            f"[SYSTEM: Observer detected that the user has appeared "
-            f"{dominant} for about {sustained_minutes:.0f} minutes. "
-            f"Generate a brief, warm check-in in your Therapist voice. "
-            f"Start with an observation, not a question. Keep it to one "
-            f"or two sentences. Leave space for the user to engage or not.]"
-        )
-
-        self._deliver_intervention(agent, topic, prompt)
+        
+        confidence = data.get("confidence", 0.0)
+    
+    # Generate confirmation question
+        question = self._confirmation_mgr.generate_confirmation_question(dominant, confidence)
+        
+        # Create pending confirmation
+        obs_id = data.get("observation_id", 0)
+        self._confirmation_mgr.create_pending_confirmation(dominant, confidence, obs_id)
+        
+        # Deliver confirmation question via Therapist (NOT full intervention yet)
+        if self._speak_callback is not None:
+            try:
+                self._speak_callback("therapist", question)
+                logger.info(f"Emotion confirmation question sent: {dominant} (conf: {confidence:.2f})")
+            except Exception as e:
+                logger.error(f"Confirmation question delivery failed: {e}")
 
     def _handle_hunched_posture(self, data: dict[str, Any]) -> None:
         """

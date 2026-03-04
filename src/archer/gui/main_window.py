@@ -18,7 +18,7 @@ Rules:
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer
 from PyQt6.QtGui import QCloseEvent, QFont, QColor, QAction
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -49,7 +49,7 @@ from archer.gui.webcam_widget import WebcamWidget
 # Try to import the 3D orb — falls back to 2D if PyVista is unavailable
 try:
     from archer.gui.orb_3d import Orb3DWidget
-    _HAS_3D_ORB = True
+    _HAS_3D_ORB = False # Temporarily disabled for stability
 except ImportError:
     _HAS_3D_ORB = False
 
