@@ -262,9 +262,16 @@ class ConversationPanel(QWidget):
         self._bus.subscribe(EventType.HALT, self._on_halt)
         self._bus.subscribe(EventType.MODE_CHANGED, self._on_mode_changed)
         self._bus.subscribe(EventType.SYSTEM_START, self._on_system_start)
+        self._bus.subscribe(EventType.AGENT_REQUEST, self._on_agent_request)
+        self._bus.subscribe(EventType.AGENT_RESPONSE_START, self._on_agent_response_start)
+        
+        import time # Needed for timestamps if we use time.time()
+        self._time = time
 
         # Track current active agent for labeling responses
         self._current_agent = "assistant"
+        self._last_request_start = 0
+        self._request_model = "Claude API"
 
     # --- Thread-safe update methods ---
 
@@ -340,6 +347,21 @@ class ConversationPanel(QWidget):
         text = event.data.get("text", "")
         self.append_message("user", "", text)
         self.update_stt_signal.emit("")
+        self._last_request_start = time.time()
+
+    def _on_agent_request(self, event: Event) -> None:
+        """Handle AGENT_REQUEST to show system model info."""
+        self._request_model = event.data.get("model", "Claude API")
+        if "Local" in self._request_model:
+            self.append_message("system", "", f"Using local model ({self._request_model})")
+        
+        # Show processing message
+        self.append_message("system", "", "Processing...")
+
+    def _on_agent_response_start(self, event: Event) -> None:
+        """Handle AGENT_RESPONSE_START to show elapsed time."""
+        elapsed = event.data.get("elapsed", 0.0)
+        self.append_message("system", "", f"Processing... ({elapsed:.1f}s elapsed)")
 
     def _on_stt_partial(self, event: Event) -> None:
         text = event.data.get("text", "")

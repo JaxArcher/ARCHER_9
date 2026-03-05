@@ -113,6 +113,10 @@ class MainWindow(QMainWindow):
         self._perf_timer.timeout.connect(self._update_perf_metrics)
         self._perf_timer.start(5000) # Every 5 seconds
 
+        # Session tracking
+        self._last_user_time = 0
+        self._model_start_time = 0
+
         # Subscribe to events
         self._subscribe_events()
 
@@ -399,7 +403,20 @@ class MainWindow(QMainWindow):
         self._mem_status_label = QLabel("MEM: ACTIVE")
         self._mem_status_label.setToolTip("Memory Service (Redis/SQLite/Chroma)")
 
+        # AI Status Metrics
+        self._model_info_label = QLabel("MODEL: CLAUDE")
+        self._model_info_label.setStyleSheet("color: #AAAAAA; font-weight: bold; padding-left: 10px;")
+        
+        self._agent_state_label = QLabel("STATE: IDLE")
+        self._agent_state_label.setStyleSheet("color: #888888; padding-left: 10px;")
+        
+        self._response_time_label = QLabel("RT: 0s")
+        self._response_time_label.setStyleSheet("color: #666666; padding-left: 10px;")
+
         # Add to status bar
+        self._status_bar.addWidget(self._model_info_label)
+        self._status_bar.addWidget(self._agent_state_label)
+        self._status_bar.addWidget(self._response_time_label)
         self._status_bar.addPermanentWidget(self._vram_label)
         self._status_bar.addPermanentWidget(self._cost_label)
         self._status_bar.addPermanentWidget(self._mem_status_label)
@@ -450,6 +467,10 @@ class MainWindow(QMainWindow):
         """Subscribe to event bus events."""
         self._bus.subscribe(EventType.MODE_CHANGED, self._on_mode_event)
         self._bus.subscribe(EventType.SYSTEM_ERROR, self._on_system_error)
+        self._bus.subscribe(EventType.AGENT_REQUEST, self._on_agent_request_event)
+        self._bus.subscribe(EventType.AGENT_RESPONSE_START, self._on_agent_start_event)
+        self._bus.subscribe(EventType.AGENT_RESPONSE_CHUNK, self._on_agent_chunk_event)
+        self._bus.subscribe(EventType.AGENT_RESPONSE_END, self._on_agent_end_event)
 
     # --- Event handlers ---
 
@@ -542,6 +563,47 @@ class MainWindow(QMainWindow):
     def _apply_system_error(self, message: str) -> None:
         """Apply system error display on the GUI thread (connected via signal)."""
         self._status_bar.showMessage(f"⚠ {message}", 10000)
+
+    def _on_agent_request_event(self, event: Event) -> None:
+        """Handle AGENT_REQUEST."""
+        model = event.data.get("model", "Claude API")
+        self.update_status_signal.emit(f"processing_start:{model}")
+
+    def _on_agent_start_event(self, event: Event) -> None:
+        """Handle AGENT_RESPONSE_START."""
+        elapsed = event.data.get("elapsed", 0.0)
+        model = event.data.get("model", "Claude API")
+        self.update_status_signal.emit(f"response_start:{model}:{elapsed}")
+
+    def _on_agent_chunk_event(self, event: Event) -> None:
+        """Update processing state if tool call detected."""
+        pass
+
+    def _on_agent_end_event(self, event: Event) -> None:
+        """Handle AGENT_RESPONSE_END."""
+        self.update_status_signal.emit("processing_end")
+
+    def _on_status_update(self, status: str) -> None:
+        """Update the status bar components."""
+        if status.startswith("processing_start:"):
+            model = status.split(":", 1)[1]
+            self._model_info_label.setText(f"MODEL: {model.upper()}")
+            self._agent_state_label.setText("STATE: THINKING...")
+            self._response_time_label.setText("RT: ---")
+        elif status.startswith("response_start:"):
+            parts = status.split(":")
+            model = parts[1]
+            elapsed = float(parts[2])
+            self._model_info_label.setText(f"MODEL: {model.upper()}")
+            self._agent_state_label.setText("STATE: RESPONDING")
+            self._response_time_label.setText(f"RT: {elapsed:.1f}s")
+            self._response_time_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+        elif status == "processing_end":
+            self._agent_state_label.setText("STATE: COMPLETE")
+            # QTimer.singleShot(5000, lambda: self._agent_state_label.setText("STATE: IDLE"))
+            self._response_time_label.setStyleSheet("color: #666666;")
+        else:
+            self._status_bar.showMessage(status)
 
     # --- Window management ---
 

@@ -119,6 +119,10 @@ class ArcherConfig(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     use_local_vision: bool = True
 
+    # Local Fallback
+    local_fallback_model: str = Field(default="qwen3.5:4b", alias="ARCHER_LOCAL_MODEL")
+    enable_auto_fallback: bool = Field(default=True, alias="ARCHER_ENABLE_FALLBACK")
+
     # --- HALT ---
     halt_phrase: str = "archer halt"
     halt_response_ms: int = 150  # Max time to respond to HALT

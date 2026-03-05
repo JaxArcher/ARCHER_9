@@ -441,10 +441,12 @@ class AgentOrchestrator:
             data={
                 "text": text,
                 "agent": target_agent,
+                "model": "Local (Fallback)" if self._config.enable_auto_fallback else ("Claude API" if self._toggle.is_cloud else "Ollama Local")
             },
         ))
 
         full_response = ""
+        self._last_request_time = time.monotonic()
         try:
             for sentence in self._stream_agent(text, target_agent):
                 full_response += sentence + " "
@@ -647,9 +649,10 @@ class AgentOrchestrator:
             tool_executor = None
             if agent == "assistant":
                 try:
-                    from archer.tools.pc_tools import PC_TOOLS, PCToolExecutor
-                    tools = PC_TOOLS
-                    tool_executor = PCToolExecutor()
+                    from archer.skills.skills_registry import get_all_tools
+                    from archer.skills.tool_executor import UniversalToolExecutor
+                    tools = get_all_tools()
+                    tool_executor = UniversalToolExecutor()
                 except ImportError:
                     pass
 
@@ -709,6 +712,18 @@ class AgentOrchestrator:
                                             sentence = buffer[:match.start()].strip()
                                             buffer = buffer[match.end():]
                                             if sentence:
+                                                if not full_response:
+                                                    # First chunk received: publish START event with timing
+                                                    elapsed = time.monotonic() - self._last_request_time
+                                                    self._bus.publish(Event(
+                                                        type=EventType.AGENT_RESPONSE_START,
+                                                        source="orchestrator",
+                                                        data={
+                                                            "agent": agent,
+                                                            "model": "Claude API",
+                                                            "elapsed": elapsed
+                                                        }
+                                                    ))
                                                 yield sentence
 
                                     elif delta.type == "input_json_delta":
@@ -799,13 +814,26 @@ class AgentOrchestrator:
                 # Loop back to get the model's follow-up response
 
         except Exception as e:
-            logger.error(f"Claude API error: {e}")
-            if self._toggle.is_cloud:
-                # In cloud mode, report the actual error — Ollama won't help.
-                yield f"I'm having trouble reaching the Claude API. Error: {type(e).__name__}. Please check your API key and network connection."
-            else:
-                # In local mode, fall back to Ollama for this request
+            logger.warning(f"Claude API failed: {e}. Falling back to local model.")
+            
+            # Fall back to local Ollama model if enabled
+            if self._config.enable_auto_fallback:
+                # Signal the model switch to the GUI
+                self._bus.publish(Event(
+                    type=EventType.AGENT_REQUEST,
+                    source="orchestrator",
+                    data={
+                        "text": text,
+                        "agent": agent,
+                        "model": f"Local ({self._config.local_fallback_model})"
+                    }
+                ))
+                yield from self._stream_local(agent, text)
+            elif not self._toggle.is_cloud:
+                # In local mode, fall back to default Ollama handler
                 yield from self._stream_ollama(text, agent)
+            else:
+                yield f"Claude API failed: {type(e).__name__}. Local fallback is disabled."
 
     def _stream_nvidia(self, text: str, agent: str) -> Generator[str, None, None]:
         """Stream sentences from NVIDIA NIM (OpenAI-compatible) for an agent."""
@@ -829,11 +857,12 @@ class AgentOrchestrator:
             tool_executor = None
             if agent == "assistant":
                 try:
-                    from archer.tools.pc_tools import PC_TOOLS, PCToolExecutor
+                    from archer.skills.skills_registry import get_all_tools
+                    from archer.skills.tool_executor import UniversalToolExecutor
                     # Map Anthropic schemas to OpenAI schemas if needed, 
                     # but NIM often supports the basic structure.
-                    tools = PC_TOOLS
-                    tool_executor = PCToolExecutor()
+                    tools = get_all_tools()
+                    tool_executor = UniversalToolExecutor()
                 except ImportError:
                     pass
 
@@ -895,6 +924,88 @@ class AgentOrchestrator:
             # Fall back to local Qwen as per spec
             yield "NVIDIA NIM limits reached or error occurred — falling back to local Qwen."
             yield from self._stream_ollama(text, agent)
+
+    def _split_sentences(self, buffer: str) -> list[str]:
+        """Split a buffer into sentences based on _SENTENCE_BOUNDARY."""
+        parts = []
+        last_pos = 0
+        for match in _SENTENCE_BOUNDARY.finditer(buffer):
+            parts.append(buffer[last_pos:match.start()].strip())
+            last_pos = match.end()
+        parts.append(buffer[last_pos:])
+        return parts
+
+    def _stream_local(self, agent: str, text: str) -> Generator[str, None, None]:
+        """Stream response from local Ollama model (Fallback)."""
+        import requests
+        import json
+        
+        system_prompt = self._build_system_prompt(agent)
+        
+        # Get conversation history
+        with self._history_lock:
+            # Match the limit used in _stream_claude
+            messages = list(self._conversation_history[-10:])
+        
+        # Format for Ollama (api/generate expects a raw prompt often, or we use api/chat)
+        # Using the prompt format from instructions:
+        prompt = f"{system_prompt}\n\n"
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            prompt += f"{role.upper()}: {content}\n"
+        prompt += f"USER: {text}\nASSISTANT:"
+        
+        # Call Ollama API
+        url = f"{self._config.ollama_base_url}/api/generate"
+        payload = {
+            "model": self._config.local_fallback_model,
+            "prompt": prompt,
+            "stream": True,
+            "options": {
+                "temperature": self._config.agent_temperature,
+                "num_ctx": 4096
+            }
+        }
+        
+        try:
+            response = requests.post(url, json=payload, stream=True, timeout=60)
+            response.raise_for_status()
+            
+            buffer = ""
+            for line in response.iter_lines():
+                if self._cancelled.is_set():
+                    break
+                if line:
+                    data = json.loads(line)
+                    token = data.get("response", "")
+                    buffer += token
+                    
+                    # Yield complete sentences
+                    sentences = self._split_sentences(buffer)
+                    for sentence in sentences[:-1]:
+                        if sentence:
+                            if not full_response: # Assumes outer scope var if possible, but _stream_local is called within loops
+                                elapsed = time.monotonic() - self._last_request_time
+                                self._bus.publish(Event(
+                                    type=EventType.AGENT_RESPONSE_START,
+                                    source="orchestrator",
+                                    data={
+                                        "agent": agent,
+                                        "model": f"Local ({self._config.local_fallback_model})",
+                                        "elapsed": elapsed
+                                    }
+                                ))
+                            yield sentence.strip()
+                    buffer = sentences[-1]
+            
+            # Yield remaining text
+            if buffer.strip():
+                yield buffer.strip()
+                
+        except Exception as e:
+            logger.error(f"Local model fallback failed: {e}")
+            yield "I'm experiencing technical difficulties. Please try again."
 
     def _stream_ollama(self, text: str, agent: str) -> Generator[str, None, None]:
         """Stream sentences from Ollama (local) for a specific agent."""
