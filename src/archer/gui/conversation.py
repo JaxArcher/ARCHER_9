@@ -15,6 +15,7 @@ Each conversation entry shows:
 from __future__ import annotations
 
 from datetime import datetime
+import time
 
 from loguru import logger
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer

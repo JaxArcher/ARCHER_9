@@ -76,7 +76,7 @@ class InterventionEngine:
         self._lock = threading.Lock()
 
         # Subscribe to observation events
-        self._bus.subscribe(EventType.OBSERVATION, self._on_observation)
+        self._bus.subscribe(EventType.OBSERVATION_EVENT, self._on_observation)
 
         # Add emotion confirmation manager
         self._confirmation_mgr = EmotionConfirmationManager(self._store)

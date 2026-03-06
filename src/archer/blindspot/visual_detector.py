@@ -78,6 +78,9 @@ class AestheticEvaluator:
 class PlantMonitor:
     """Monitors plant health."""
     
+    def __init__(self, db_store: Any):
+        self.db = db_store
+    
     def assess_plants(self, frame_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Detect plants and check for wilting/yellowing.

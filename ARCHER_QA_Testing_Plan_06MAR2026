@@ -1,0 +1,491 @@
+ARCHER
+Quality Assurance Master Plan
+Advanced Responsive Computing Helper & Executive Resource
+Field	Value
+Document	ARCHER QA / Testing Master Plan — v1.0
+Date	March 2026
+Prepared For	Antigravity Development Team
+Repo	ARCHER_9
+Hardware Target	RTX 5080 16GB | i9-10900K | 256GB RAM | Windows
+Core Stack	Python 3.12 · PyQt6 · FastAPI · LangGraph · Docker
+Services	Ollama/LMStudio · ChromaDB · Mem0 · Chatterbox/Kokoro TTS · Faster-Whisper STT
+Test Coverage	10 Audit Phases · 200+ test cases · 5 Phase Gates
+
+Phase 0: Environment  ·  Phase 1: Backend API  ·  Phase 2: Database & Memory  ·  Phase 3: Voice Pipeline
+Phase 4: GUI  ·  Phase 5: Observer  ·  Phase 6: Agents  ·  Phase 7: PC Control  ·  Phase 8: Stability  ·  Phase 9: Privacy
+ 
+1  How to Use This Document
+Work through each phase in order — each phase gates the next. Every test has a checkbox (☐ open / ☑ pass / ☒ fail). Record results as you go. A Phase Gate table at the end of each phase must be fully signed off before proceeding.
+The document was built from a full review of the ARCHER_9 repository plus the complete conversation history with the Antigravity team. It reflects the final agreed system design.
+
+Symbol	Status	Meaning	Action Required
+☐	OPEN	Not yet tested	Run test, record outcome
+☑	PASS	Completed and passed	Log date + tester initials
+☒	FAIL	Completed and failed	Open bug ticket; block phase advance
+⚠	OBSERVE	Requires human judgment	Reviewer must evaluate manually
+ 
+2  System Baseline — What ARCHER Is (Final Design)
+The following summarises the agreed final architecture derived from the ARCHER_9 repo and full project conversation history. This is the ground truth against which all tests are written.
+
+2.1  Repository File Map
+File	Purpose	Audit Status
+main.py	FastAPI backend: /agent/invoke, /agent/reminders, /agent/log_passive, /agent/proactive	Implemented — stub LLM
+graph.py	MCPApp triage + orchestrator: URL/app/volume/events routing	Implemented
+master_graph.py	Full LangGraph SessionState multi-agent routing	Partial — imports may be broken
+gui_main.py	PyQt6 app entry point with DPI, logging, state + Mem0 init	Implemented
+main_window.py	Main window: webcam · console · orb · canvas · STT/TTS wiring	Implemented
+stt_service.py	Faster-Whisper + WebRTC VAD + wake-word gate ('archer')	Implemented
+tts_service.py	pyttsx3 via QThreadPool (runtime fallback)	Implemented — Kokoro/Chatterbox preferred
+observer_daemon.py	Passive observer: mic VAD + OpenCV face + MediaPipe + state mgr coordination	Implemented
+observer.py	Social-isolation nudge logic: speech minutes + face streak analysis	Implemented
+memory.py	ChromaDB + Ollama embeddings: episode capture, safe fact extraction	Implemented
+memory_integration.py	ArcherMemoryManager: Mem0 high-level layer for conversations + ambient	Implemented
+memory_ops.py	Hybrid memory ops tools: save_observation bridging DB + Mem0	Implemented
+database_manager.py	SQLite: reminders · episodes · passives · semantic_profiles · files	Implemented
+state_manager.py	System state machine: WAKE/GUI/DORMANT + Mem0 + monitor thread	Implemented
+voice_launcher.py	Background wake-word listener: launches / wakes GUI	Implemented
+launcher.py	Universal launcher: voice | gui | observer | docker modes	Implemented
+pc_control.py	ControlPlan executor: open_url · open_app · Windows fallbacks + site aliases	Implemented
+reminders.py	Reminder CRUD tools wrapping DB; normalises method name variants	Implemented
+quality_gate.py	Hallucination heuristic + risky-tool confirmation gate	Implemented
+filter.py	Content / event filtering (760 lines)	Implemented
+events.py	Eventbrite event search integration	Implemented
+schemas.py / models.py	Pydantic data models: TriageResult, ControlPlan, SessionState, QualityReport…	Implemented
+orb_widget.py	Animated agent orb with colour coding per agent	Implemented
+canvas_widget.py	Artifact pane for rich content rendering (Claude-style right panel)	Implemented
+webcam_widget.py	Live webcam feed with face detection overlay	Implemented
+console_widget.py	Chat console: history · prompt · mic/cam buttons · theme switcher	Implemented
+docker-compose.yml	Services: ollama · chroma · archer-backend (archer-net bridge)	Implemented
+skills.yaml	Skill risk registry: open_url (low) · open_app (low) · run_command (medium)	Implemented
+_env	Environment template: API, LLM, TTS (Kokoro), ONNX GPU provider	Template ready — not committed as .env
+
+2.2  Agent Personalities (Final Agreed Set)
+Agent	Orb Colour	Personality & Style	Primary Intervention Triggers
+Observer	Grey/neutral	Silent background — no voice, no personality	Feeds data to all other agents
+Assistant	Blue	Helpful, practical, organised — productivity partner	Task requests, scheduling, email, reminders
+Therapist	Warm purple	Warm, empathetic, non-judgmental — 'concerned friend'	Social isolation, stress keywords, mood dips, self-care decline
+Trainer	Bright orange	Direct, stern, tough love — no excuses	Sedentary >2hr, nutrition patterns, sleep issues, no exercise
+Investment & Markets	Gold	Analytical, data-driven — no disclaimers (personal use)	Market triggers, portfolio queries, financial research
+R&D	Cyan	Technical, curious — system improvement specialist	System errors, capability gaps, new feature opportunities
+Blindspot	Red/alert	Candid, pattern-aware — surfaces what you consistently miss	ADHD patterns, grooming, clutter, time blindness, social gaps
+ℹ  Finance Agent was explicitly removed from scope. Do not implement or test for it.
+ℹ  Blindspot Agent and Inventory Manager were fully specced — verify implementation status in Phase 6.
+
+2.3  Tech Stack Summary
+Layer	Component	Notes
+GUI	PyQt6 + Python 3.12	gui_main.py → main_window.py → widgets
+Backend	FastAPI on port 8000	main.py; Docker container or native
+Orchestration	LangGraph (graph.py + master_graph.py)	master_graph is the full implementation; graph.py is the current active simple version
+LLM	Ollama (GPU) or LMStudio (CPU fallback)	Default: llama3:8b via Ollama; env-configurable
+STT	Faster-Whisper base.en + WebRTC VAD	GPU CUDA inference; wake word 'archer'
+TTS	Kokoro ONNX (primary) / pyttsx3 (fallback) / Chatterbox Docker (alt)	env: ARCHER_TTS_BACKEND=kokoro
+Memory Tier 1–2	SQLite (database_manager.py)	reminders, episodes, passives, semantic_profiles
+Memory Tier 3	ChromaDB on port 8001 (Docker)	Vector embeddings via nomic-embed-text (Ollama)
+Memory Tier 4	Mem0 (memory_integration.py)	Conversation + ambient memory graph; local config
+Observer	observer_daemon.py + mic_observer.py	OpenCV face · MediaPipe pose · WebRTC VAD mic
+PC Control	pc_control.py + graph.py	open_url · open_app · volume · shell commands
+State	state_manager.py	WAKE_LISTENING → GUI_ACTIVE → GUI_DORMANT → TRANSITION
+ 
+3  Audit Phase 0 — Environment & Prerequisites
+⚠  ALL items in this phase must pass before ANY functional testing begins. Do not skip.
+
+3.1  Docker Services
+ℹ  Run: docker compose up -d   then:   docker compose ps
+#	ID	Test	Command / Method	Expected	✓?
+1	D-01	Ollama container running	docker compose ps archer-ollama	running, port 11434 mapped	☐
+2	D-02	ChromaDB container running	docker compose ps archer-chroma	running, port 8001 mapped	☐
+3	D-03	Backend container running	docker compose ps archer-backend	running, port 8000 mapped	☐
+4	D-04	Ollama API responds	curl http://localhost:11434/api/version	JSON with version key	☐
+5	D-05	ChromaDB heartbeat	curl http://localhost:8001/api/v1/heartbeat	HTTP 200	☐
+6	D-06	Backend proactive ping	curl http://localhost:8000/agent/proactive	{status:ok}	☐
+7	D-07	No container crash-loops	docker compose logs --tail=50	No ERROR / EXITED / restarting	☐
+8	D-08	Chatterbox TTS container (if deployed)	docker compose ps | findstr chatterbox	running, port 5500 — OR document as absent	☐
+
+3.2  Python Dependencies
+#	ID	Package	One-Line Check	Expected	✓?
+1	P-01	PyQt6	python -c "import PyQt6; print('ok')"	ok	☐
+2	P-02	faster-whisper	python -c "from faster_whisper import WhisperModel; print('ok')"	ok	☐
+3	P-03	webrtcvad	python -c "import webrtcvad; print('ok')"	ok	☐
+4	P-04	mediapipe 0.10.9	python -c "import mediapipe as mp; print(mp.__version__)"	0.10.9	☐
+5	P-05	opencv	python -c "import cv2; print(cv2.__version__)"	Version number, no error	☐
+6	P-06	sounddevice	python -c "import sounddevice; sounddevice.query_devices()"	Device list, no error	☐
+7	P-07	mem0	python -c "from mem0 import Memory; print('ok')"	ok  OR document graceful failure	☐
+8	P-08	chromadb	python -c "from chromadb import Client; print('ok')"	ok	☐
+9	P-09	numpy ≤ 1.26.x	python -c "import numpy as np; print(np.__version__)"	1.26.x (mediapipe compat req)	☐
+10	P-10	LLM model in Ollama	curl http://localhost:11434/api/tags	llama3:8b (or env model) listed	☐
+11	P-11	Embed model in Ollama	curl http://localhost:11434/api/tags | findstr nomic	nomic-embed-text present	☐
+12	P-12	Kokoro ONNX model file	dir %ARCHER_TTS_MODEL_PATH%	File exists (.onnx), non-zero size	☐
+
+3.3  Hardware Verification
+#	ID	Test	Command	Expected	✓?
+1	H-01	CUDA visible	python -c "import torch; print(torch.cuda.is_available())"	True	☐
+2	H-02	VRAM available	nvidia-smi --query-gpu=memory.free --format=csv,noheader	≥ 8000 MiB free	☐
+3	H-03	Webcam opens	python -c "import cv2; cap=cv2.VideoCapture(0); print(cap.isOpened())"	True	☐
+4	H-04	Microphone present	python -c "import sounddevice as sd; sd.check_input_settings()"	No exception	☐
+5	H-05	Audio output	python -c "import pyttsx3; e=pyttsx3.init(); e.say('test'); e.runAndWait()"	Audible beep/word through speakers	☐
+6	H-06	DB directory writable	python -c "open('D:/AI/ARCHER/backend_data/test.tmp','w').close()"	No permission error	☐
+
+
+Phase Gate 0 — ENVIRONMENT READY	Tests	Pass Date	Tester
+All Docker services healthy	D-01 – D-08		  
+All Python packages importable	P-01 – P-12		  
+Hardware verified (GPU, mic, cam, audio, disk)	H-01 – H-06		  
+ 
+4  Phase 1 — Backend API Audit
+The FastAPI backend (main.py, port 8000) is the integration hub. All higher-level components call it. Validate endpoints independently of the GUI.
+
+4.1  /agent/invoke
+#	ID	Test	Request Body	Expected Response	✓?
+1	B-01	Basic message round-trip	{messages:[{role:user,content:Hello}]}	final_response is non-empty string	☐
+2	B-02	Empty messages rejected	{messages:[]}	HTTP 422	☐
+3	B-03	PC control — open URL	{…content:'open youtube.com'}	control_plan.actions[0].kind = open_url	☐
+4	B-04	PC control — YouTube search	{…content:'open youtube lo-fi music'}	URL includes youtube.com/results	☐
+5	B-05	Volume control	{…content:'volume 60'}	control_plan.kind=volume_set level=60	☐
+6	B-06	Mute	{…content:'mute'}	control_plan.kind=volume_mute	☐
+7	B-07	Therapist trigger	{…content:'I feel stressed'}	final_response contains wellness language	☐
+8	B-08	Reminder intent	{…content:'remind me to call Alex'}	final_response acknowledges reminder intent	☐
+9	B-09	Events search	{…content:'show events tonight in SF'}	final_response lists events or fallback message	☐
+10	B-10	Response time < 5s	Time entire POST from send to response	< 5000ms at rest	☐
+11	B-11	Dangerous URL blocked	{…content:'open javascript:alert(1)'}	Action rejected; no control_plan with dangerous URL	☐
+12	B-12	Amazon search	{…content:'open amazon wireless headphones'}	URL includes amazon.com	☐
+
+4.2  /agent/reminders
+#	ID	Test	Method	Expected	✓?
+1	R-01	List reminders on startup	GET /agent/reminders	Array with ≥1 seeded reminder	☐
+2	R-02	Seeded reminder has correct fields	Inspect item	id, text, time keys present	☐
+3	R-03	Complete a reminder	POST /agent/reminders/1/complete	{status:ok}	☐
+4	R-04	Completed reminder removed from list	GET after R-03	Reminder 1 absent	☐
+5	R-05	Unknown ID returns 404	POST /agent/reminders/9999/complete	HTTP 404	☐
+
+4.3  /agent/log_passive
+#	ID	Test	Request	Expected	✓?
+1	L-01	Log speech activity	{kind:speech_activity,value:0.8}	{status:ok,received:{…}}	☐
+2	L-02	Log face present	{kind:face_present,value:true}	{status:ok}	☐
+3	L-03	Extra fields accepted	{kind:posture,value:sitting,meta:{confidence:0.9}}	status:ok — extra fields allowed	☐
+4	L-04	Missing kind rejected	{value:something}	HTTP 422	☐
+
+
+Phase Gate 1 — BACKEND VERIFIED	Tests	Pass Date	Tester
+All /agent/* endpoints behave correctly	B-01–B-12, R-01–R-05, L-01–L-04		  
+ 
+5  Phase 2 — Database & Memory Audit
+ARCHER uses a four-tier memory system. Each tier is tested independently.
+
+5.1  SQLite — database_manager.py
+#	ID	Test	Method	Expected	✓?
+1	DB-01	DB file created on first run	Check backend_data/archer.sqlite3 after startup	File exists	☐
+2	DB-02	All tables present	sqlite3 archer.sqlite3 .tables	reminders · episodes · passives · semantic_profiles · files	☐
+3	DB-03	Save episode	DB().save_episode(user_id='t1', text='test episode')	Returns integer ID	☐
+4	DB-04	Retrieve episode	DB().get_episode(id_from_DB03)	Dict with matching text	☐
+5	DB-05	Save reminder	DB().save_reminder(user_id='t1', text='call Alex', time='3:00 PM')	Returns reminder ID	☐
+6	DB-06	Get pending reminders	DB().get_all_pending_reminders()	List includes reminder from DB-05	☐
+7	DB-07	Complete reminder	DB().mark_reminder_complete(id)	Absent from pending list afterwards	☐
+8	DB-08	Save passive log	DB().save_passive(kind='face_present', value='true')	No exception; row in passives table	☐
+9	DB-09	Concurrent write integrity	10 threads calling save_episode simultaneously	All 10 rows present; no SQLite lock error	☐
+10	DB-10	Rollup and streak analysis	DB().rollup_today(); observer.assess_metrics_and_nudges()	Returns nudge list (may be empty for fresh DB)	☐
+
+5.2  ChromaDB Vector Memory — memory.py
+#	ID	Test	Method	Expected	✓?
+1	M-01	Embedding generation	embed_text('hello world')	List of floats, length > 0	☐
+2	M-02	Episodes collection accessible	_episodes_col()	Returns collection; no exception	☐
+3	M-03	Facts collection accessible	_facts_col()	Returns collection; no exception	☐
+4	M-04	Capture & index episode	capture_episode_and_index('u1','I enjoy hiking')	Returns episode ID; indexed in Chroma	☐
+5	M-05	Semantic search retrieves episode	Search for 'hiking' after M-04	Returns M-04 episode in results	☐
+6	M-06	Safe fact extraction — preference	extract_safe_facts('I really like coffee in the mornings')	pref.like fact with 'coffee' extracted	☐
+7	M-07	Safe fact extraction — address NOT stored	extract_safe_facts('I live at 123 Main St')	Address NOT in output (not in SAFE_KEYS)	☐
+
+5.3  Mem0 Memory Integration — memory_integration.py
+#	ID	Test	Method	Expected	✓?
+1	MM-01	ArcherMemoryManager initialises	ArcherMemoryManager()	No exception; self.memory set	☐
+2	MM-02	add_conversation stores messages	add_conversation([{role:user,content:I like hiking}],'u1')	Returns True	☐
+3	MM-03	Mem0 graceful fallback if unavailable	If mem0 not installed — Memory() fails safely	HYBRID_MEMORY_AVAILABLE=False; no crash	☐
+4	MM-04	save_observation hybrid write	memory_ops.save_observation('u1',None,None,'test')	Writes to both DB (episode) and Mem0	☐
+
+5.4  State Manager — state_manager.py
+#	ID	Test	Method	Expected	✓?
+1	SM-01	Initialises to WAKE_LISTENING	get_state_manager()	state.current_state = WAKE_LISTENING	☐
+2	SM-02	Transition: WAKE → GUI_ACTIVE	Trigger GUI launch event	state = GUI_ACTIVE	☐
+3	SM-03	Transition: GUI_ACTIVE → GUI_DORMANT	Simulate 10-min inactivity or manual trigger	state = GUI_DORMANT	☐
+4	SM-04	Observer active in DORMANT	should_observer_be_active() in DORMANT	True	☐
+5	SM-05	Observer paused in GUI_ACTIVE	should_observer_be_active() in GUI_ACTIVE	False	☐
+6	SM-06	State persists across restart	Save state, re-init StateManager, read back	Saved values match loaded values	☐
+
+
+Phase Gate 2 — MEMORY VERIFIED	Tests	Pass Date	Tester
+SQLite CRUD fully functional	DB-01–DB-10		  
+ChromaDB vector search working	M-01–M-07		  
+Mem0 integration working or gracefully skipped	MM-01–MM-04		  
+State machine transitions correct	SM-01–SM-06		  
+ 
+6  Phase 3 — Voice Pipeline Audit
+The voice pipeline is ARCHER's primary interaction channel: wake word → STT (Faster-Whisper + VAD) → LLM → TTS (Kokoro ONNX / pyttsx3 fallback). Test each link before end-to-end testing.
+
+6.1  STT Service — stt_service.py
+#	ID	Test	Method	Expected	✓?
+1	V-01	Whisper model loads (GPU)	STTService()	Model loaded on CUDA; no OOM error	☐
+2	V-02	VAD initialises	webrtcvad.Vad(2)	No exception	☐
+3	V-03	Audio stream opens	stt.start()	No PortAudio / sounddevice error	☐
+4	V-04	Wake word gate — blocked without trigger	Speak random phrase (no 'archer')	final_text NOT emitted	☐
+5	V-05	Wake word gate — passes with trigger	Say 'archer what time is it'	final_text emits 'what time is it'	☐
+6	V-06	Follow-up window stays open	Trigger → follow-up within 10s without wake word	Follow-up transcribed and emitted	☐
+7	V-07	Silence → no spurious transcription	30-second quiet room test	No false positives in 30s	☐
+8	V-08	STT latency < 500ms for 5-word phrase	Time from end-of-speech to final_text	< 500ms on GPU	☐
+9	V-09	pause() / resume() controls	Call pause(); verify no processing; call resume()	Processing halts then resumes cleanly	☐
+
+6.2  TTS Service — tts_service.py + Kokoro ONNX
+#	ID	Test	Method	Expected	✓?
+1	T-01	Kokoro ONNX model loads	Init with ARCHER_TTS_BACKEND=kokoro	No exception; model on GPU via CUDAExecutionProvider	☐
+2	T-02	pyttsx3 fallback speaks	TTSService().speak('hello ARCHER test')	Audible output; no GUI thread block	☐
+3	T-03	speaking_started / finished signals fire	Connect signals; call speak()	Both signals received in correct order	☐
+4	T-04	Busy guard prevents overlap	Call speak() twice rapidly	Second call ignored while first is active	☐
+5	T-05	Chatterbox TTS responds (if deployed)	POST http://localhost:5500/synthesize {text:hello}	Audio bytes or 200 OK	☐
+6	T-06	AEC: TTS does not trigger wake word (⚠)	Run STT while ARCHER speaks via TTS	STT does NOT transcribe ARCHER's own voice	⚠
+⚠  T-06 requires Acoustic Echo Cancellation (AEC) to be implemented in stt_service.py. If AEC is not yet wired, mark FAIL and log as a critical blocker — ARCHER will hear itself and loop.
+
+6.3  Voice Launcher — voice_launcher.py
+#	ID	Test	Method	Expected	✓?
+1	VL-01	Voice launcher starts without error	python voice_launcher.py	Process running; no import error	☐
+2	VL-02	WAKE_LISTENING state while idle	Check state_manager in WAKE_LISTENING state	should_observer_be_active() returns True	☐
+3	VL-03	GUI launches on wake phrase	Say 'archer' or 'launch archer'	GUI process starts; state transitions to GUI_ACTIVE	☐
+4	VL-04	Voice launcher pauses mic when GUI active	State = GUI_ACTIVE	Voice launcher STT stops competing with GUI STT	☐
+
+6.4  End-to-End Voice Round-Trip
+#	ID	Test	Procedure	Expected	✓?
+1	E2V-01	Basic voice round-trip latency	Say 'archer hello' — measure wake to TTS output	Full round-trip < 4000ms	☐
+2	E2V-02	Voice PC control	Say 'archer open youtube'	Browser opens OR confirmation prompt shown	☐
+3	E2V-03	Voice reminder creation	Say 'archer remind me to drink water at 3pm'	Reminder created; verbal confirmation	☐
+4	E2V-04	Voice therapist trigger	Say 'archer I feel really anxious today'	Empathetic Therapist-style response via TTS	☐
+5	E2V-05	5-minute voice endurance session	10 varied commands over 5 minutes	No crashes; wake word responsive throughout	☐
+
+
+Phase Gate 3 — VOICE PIPELINE VERIFIED	Tests	Pass Date	Tester
+STT + wake word working correctly	V-01–V-09, VL-01–VL-04		  
+TTS speaking without blocking GUI	T-01–T-05		  
+AEC resolved or documented as blocker	T-06		  
+End-to-end voice round-trip < 4s	E2V-01–E2V-05		  
+ 
+7  Phase 4 — GUI Audit
+The PyQt6 GUI has five main components: main_window.py, orb_widget.py, console_widget.py, webcam_widget.py, canvas_widget.py. Each is tested independently then as an integrated system.
+
+7.1  Application Launch — gui_main.py
+#	ID	Test	Method	Expected	✓?
+1	G-01	GUI launches without error	python gui_main.py	Window appears; no Python exception in terminal	☐
+2	G-02	Log file created	Check backend_data/gui.log	File exists; contains startup entry	☐
+3	G-03	DPI handling correct	Visual check on 4K / HiDPI display	No blurry text; correct scaling	☐
+4	G-04	Window maximised on launch	Visual check	Window fills screen on launch	☐
+5	G-05	Backend connection established	Check logs for connection errors on startup	No 'API Error' in first 5 seconds	☐
+6	G-06	Survives offline backend	Launch with backend container stopped	Shows graceful error; does NOT crash	☐
+7	G-07	StateManager + MemoryManager init	Check gui.log for init messages	Both systems initialised without exception	☐
+
+7.2  Orb Widget — orb_widget.py
+#	ID	Test	Method	Expected	✓?
+1	O-01	Orb renders on startup	Visual check	Animated orb visible; no blank widget	☐
+2	O-02	Orb colour changes per agent	Trigger each agent personality	Orb changes to agent's defined colour	☐
+3	O-03	Orb animates during TTS output	Trigger TTS; observe orb	Orb pulses/animates while speaking	☐
+4	O-04	Orb returns to idle	Wait for TTS to finish	Returns to calm idle animation	☐
+
+7.3  Console Widget — console_widget.py
+#	ID	Test	Method	Expected	✓?
+1	C-01	Text input → backend → response	Type message, press Enter	ARCHER reply appears in history	☐
+2	C-02	API call non-blocking	Type; observe GUI during wait	UI stays responsive while backend processes	☐
+3	C-03	Chat history scrollable	Send 5 messages; scroll up	All 5 messages visible	☐
+4	C-04	Mic toggle button functional	Click mic icon	State toggles on/off; visual indicator changes	☐
+5	C-05	Cam toggle button functional	Click cam icon	Camera feed enable/disable	☐
+6	C-06	Theme switcher works	Open theme dropdown; select different theme	Console colours change without crash	☐
+
+7.4  Webcam Widget — webcam_widget.py
+#	ID	Test	Method	Expected	✓?
+1	W-01	Live feed displays	Visual check	Webcam feed visible in widget	☐
+2	W-02	Face bounding box overlaid	Sit in front of camera	Green box drawn around detected face	☐
+3	W-03	Webcam toggle off → no crash	Click cam disable button	Feed pauses; no exception	☐
+4	W-04	No VRAM leak over 10 minutes	Monitor GPU mem with nvidia-smi	VRAM stable ± 200 MB	☐
+
+7.5  Canvas / Artifact Pane — canvas_widget.py
+#	ID	Test	Method	Expected	✓?
+1	CA-01	Canvas widget renders	Visual check on launch	Artifact pane visible in layout (right side)	☐
+2	CA-02	Canvas displays text / markdown content	Send structured content to canvas	Content renders correctly in pane	☐
+3	CA-03	Canvas non-blocking	Render content; then type in console	Console remains responsive during render	☐
+
+
+Phase Gate 4 — GUI VERIFIED	Tests	Pass Date	Tester
+GUI launches and all widgets render	G-01–G-07		  
+Console send/receive working; non-blocking	C-01–C-06		  
+Orb colours + animations correct	O-01–O-04		  
+Webcam feed + face detection working	W-01–W-04		  
+ 
+8  Phase 5 — Observer Daemon Audit
+The Observer (observer_daemon.py) runs continuously as a background process, logging speech activity, face presence, and posture to the backend. It must not interfere with the voice pipeline or consume excessive resources.
+
+8.1  Observer Daemon Core
+#	ID	Test	Method	Expected	✓?
+1	OB-01	Daemon starts without error	python observer_daemon.py	Process running; no immediate exception	☐
+2	OB-02	Pauses when GUI_ACTIVE	Launch GUI; check observer	Audio processing stops in GUI_ACTIVE state	☐
+3	OB-03	Resumes in GUI_DORMANT	GUI goes dormant; check observer	Audio processing resumes	☐
+4	OB-04	Mic VAD detects speech	Speak near microphone	speech_activity log POSTed to /agent/log_passive	☐
+5	OB-05	Silence → no spurious logs	Quiet room for 30 seconds	No false speech_activity logs	☐
+6	OB-06	Face detection fires when present	Sit in front of webcam	face_present log sent to /agent/log_passive	☐
+7	OB-07	Face absent log when room empty	Leave camera frame for 10s	face_absent or confidence < threshold log sent	☐
+8	OB-08	CPU usage < 20% average	Run observer 5 min; check Task Manager	Observer process CPU < 20% average	☐
+9	OB-09	Logs appear in SQLite passives table	Check DB after 5-min observer run	passives table has rows matching observer events	☐
+10	OB-10	Audio queue cleared on pause	Pause; resume; check for processing burst	No backlog burst on resume	☐
+
+8.2  Social Isolation Nudge Logic — observer.py
+#	ID	Test	Method	Expected	✓?
+1	NL-01	Low speech streak → nudge	Inject 2+ days of speech_minutes < 5 into DB	assess_metrics_and_nudges() returns nudge	☐
+2	NL-02	No other face streak → nudge	Inject 2+ days of saw_other_face=0 into DB	Returns cafe/break nudge	☐
+3	NL-03	Combined isolation → events hint	Both streaks present	Returns both nudge + events_hint items	☐
+4	NL-04	Fresh DB → no nudge	Call with empty history	Returns empty list	☐
+ 
+9  Phase 6 — Agent Routing & Personality Audit
+This phase verifies that messages are correctly routed to the right agent and that each agent responds in character. Routing tests can be automated; personality tests require human evaluation.
+
+9.1  Triage Routing — graph.py
+#	ID	Input	Expected Intent	Expected Handler	✓?
+1	AG-01	open youtube	pc_control	Graph PC control	☐
+2	AG-02	I feel stressed and overwhelmed	therapist_checkin	Therapist	☐
+3	AG-03	remind me to exercise at 6pm	set_reminder	Reminder handler	☐
+4	AG-04	volume 75	pc_control	PC volume control	☐
+5	AG-05	show events tonight in SF	pc_control (events)	Events search	☐
+6	AG-06	I feel lonely	therapist_checkin	Therapist	☐
+7	AG-07	I feel depressed	therapist_checkin	Therapist	☐
+8	AG-08	open amazon noise cancelling headphones	pc_control	Amazon search URL	☐
+ℹ  Intents 'other' in graph.py currently return generic 'OK'. If agent personality prompts require master_graph.py to be fully active, AG-05/AG-08 may return stub responses — document this gap.
+
+9.2  Agent Personality — Manual Human Evaluation
+⚠  These tests cannot be automated. A human reviewer must read each response and score it 1–5 for in-character quality. Minimum passing score: 4/5.
+#	ID	Prompt	Expected Personality Style	Score (1–5)	✓?
+1	AP-01	I haven't exercised in a week	Stern, direct, no excuses — Trainer: push user to action	    /5	⚠
+2	AP-02	I feel really down today	Warm, empathetic, non-judgmental — Therapist: open questions	    /5	⚠
+3	AP-03	Help me organise my day	Helpful, practical — Assistant: clear task structure	    /5	⚠
+4	AP-04	What's happening with the Nasdaq today	Analytical, no disclaimers — Investment Agent	    /5	⚠
+5	AP-05	I ate pizza 4 days in a row	Blunt nutrition comment — Trainer: prescribe change	    /5	⚠
+6	AP-06	You keep ignoring your inbox (via Observer)	Pattern-aware, direct — Blindspot Agent (if implemented)	    /5	⚠
+
+9.3  Feature Gap Verification — Specced but Unconfirmed
+⚠  Search the codebase for each item before marking. Do not assume implementation from documentation alone.
+Feature	Specced	Verified?	Search Term / Action Required
+Wake word detection	Yes	Verify	stt_service.py _norm() + WAKE_PHRASES — confirm functioning (V-04/V-05)
+Voice authentication (speaker recognition)	Yes	Check	Search for speaker_recognition or ECAPA — if absent, document as Phase 2 gap
+Acoustic Echo Cancellation (AEC)	Yes	Check	Search stt_service.py for webrtcaec or rnnoise — if absent, log as critical blocker
+Kokoro ONNX TTS (primary)	Yes	Verify	Check _env for ARCHER_TTS_BACKEND=kokoro; test T-01
+master_graph.py fully wired	Partial	Verify	Test core.tools import; check get_all_tools() path exists
+Verbal interruption (stop mid-TTS)	Yes	Check	Search for interrupt or stop_speaking in STT/TTS services
+Proactive sedentary alert trigger (>2hr)	Yes	Check	Verify observer_daemon logs sedentary and backend triggers Trainer
+Food detection (Trainer)	Yes	Check	Search for food_detection or yolo or nutrition model in codebase
+Blindspot Agent	Yes (full spec)	UNCONFIRMED	Search for blindspot — likely NOT yet implemented; document as outstanding
+Inventory Manager	Yes (full spec)	UNCONFIRMED	Search for inventory — likely NOT yet implemented; document as outstanding
+Google Calendar integration	Yes	Check	Search for googleapiclient or gcal in codebase
+Finance Agent	REMOVED	N/A	DO NOT implement or test — removed from scope
+ 
+10  Phase 7 — PC Control Audit
+All PC control actions require user confirmation before execution. The risk gate must be verified in addition to the functional correctness of each action type.
+
+10.1  URL and App Control — pc_control.py
+#	ID	Test	Input / Method	Expected	✓?
+1	PC-01	Explicit HTTPS URL	open https://example.com	Browser opens after confirmation	☐
+2	PC-02	Domain-only resolution	open reddit.com	Resolves to https://www.reddit.com	☐
+3	PC-03	Site alias — youtube	open youtube	Opens https://www.youtube.com	☐
+4	PC-04	Site alias — spotify	open spotify	Opens https://open.spotify.com	☐
+5	PC-05	YouTube search	open youtube lo-fi beats	Opens youtube.com/results?search_query=lo-fi+beats	☐
+6	PC-06	Amazon search	open amazon wireless headphones	Opens amazon.com search URL	☐
+7	PC-07	App launch by name	open calculator	Calculator app launches on Windows	☐
+8	PC-08	Dangerous scheme blocked	open javascript:alert(1)	Rejected — not executed	☐
+9	PC-09	Event number selection	Show events → 'open 2'	Correct event URL from LAST_EVENTS[1] opens	☐
+
+10.2  Volume Control
+#	ID	Test	Input	Expected	✓?
+1	PC-10	Volume set	volume 50	System volume = 50%	☐
+2	PC-11	Volume clamped	volume 150	Capped at 100; no crash	☐
+3	PC-12	Mute	mute	System muted	☐
+4	PC-13	Unmute	unmute	System unmuted	☐
+
+10.3  Risk Gate & Confirmation — skills.yaml + quality_gate.py
+#	ID	Test	Method	Expected	✓?
+1	PC-14	Low-risk action has requires_confirmation=true	Trigger any open_url	ControlPlan.requires_confirmation = True	☐
+2	PC-15	run_command is medium risk	Check skills.yaml	run_command.confirm = voice (stricter than click)	☐
+3	PC-16	Quality gate flags risky tools	Attempt execute_code tool	RISKY_TOOLS set triggers explicit confirmation gate	☐
+4	PC-17	User decline → action not executed	Present plan; decline in GUI	Action not executed; ARCHER acknowledges	☐
+ 
+11  Phase 8 — Stability & Performance Audit
+
+11.1  Latency Targets
+#	ID	Component	Target	Ceiling	✓?
+1	PF-01	STT (5-word phrase, GPU CUDA)	< 300ms	< 500ms	☐
+2	PF-02	LLM first token (Ollama GPU)	< 1000ms	< 2000ms	☐
+3	PF-03	TTS first audio output (Kokoro)	< 400ms	< 800ms	☐
+4	PF-04	Voice round-trip (wake to TTS)	< 3000ms	< 5000ms	☐
+5	PF-05	GUI frame time during LLM call	< 100ms	No visible freeze	☐
+6	PF-06	Observer daemon CPU average	< 10%	< 25% peak	☐
+7	PF-07	VRAM at idle (full stack running)	< 6 GB	< 10 GB	☐
+
+11.2  Long-Run Stability
+#	ID	Test	Method	Expected	✓?
+1	ST-01	1-hour run — no crashes	Run full ARCHER stack for 1 hour	No process crashes or container restarts	☐
+2	ST-02	1-hour run — no memory leak	Compare RAM at start vs end	Total RAM growth < 200 MB	☐
+3	ST-03	100 sequential API calls	Loop script: 100× POST /agent/invoke	All 100 respond; no 5xx errors	☐
+4	ST-04	Rapid fire voice (10 in 2 min)	10 varied voice commands quickly	All processed correctly; no queue corruption	☐
+5	ST-05	Backend restart recovery	Restart archer-backend container while GUI open	GUI reconnects automatically within 30s	☐
+6	ST-06	Ollama restart recovery	Restart archer-ollama container	LLM calls resume after Ollama restarts	☐
+7	ST-07	Overnight idle (8 hours)	Leave full stack running overnight	No crashes; observer still logging	☐
+
+
+Phase Gate 5 — PERFORMANCE & STABILITY	Tests	Pass Date	Tester
+All latency targets met	PF-01–PF-07		  
+1-hour stability run passed	ST-01–ST-06		  
+Overnight idle test passed	ST-07		  
+ 
+12  Phase 9 — Privacy & Security Audit
+ARCHER's core promise is 100% local processing. Zero user data must leave the local network during normal operation.
+
+12.1  Network Traffic Audit
+ℹ  Use Wireshark or Windows Resource Monitor to capture traffic during each test scenario.
+#	ID	Test	Method	Expected	✓?
+1	PV-01	Conversation — no external calls	5-message chat session + Wireshark	All traffic within 127.0.0.1 / 192.168.x.x	☐
+2	PV-02	Voice session — no external calls	Voice interaction + Wireshark	No DNS queries to OpenAI / Anthropic / Google APIs	☐
+3	PV-03	Observer active — no external calls	5-min observer run + Wireshark	No data sent to external servers	☐
+4	PV-04	Mem0 local only	Check Mem0 config in state_manager.py	config uses local Storage, not cloud API key	☐
+5	PV-05	Docker ports not exposed externally	docker compose ps + Windows Firewall	Ports 8000/8001/11434 bound to localhost only	☐
+
+12.2  Data Storage Privacy
+#	ID	Test	Method	Expected	✓?
+1	PV-06	SQLite stored locally	Verify backend_data/archer.sqlite3 location	Local disk; not synced to OneDrive / cloud	☐
+2	PV-07	ChromaDB stored locally	Verify chroma_data/ Docker volume	Local bind mount; not cloud-backed	☐
+3	PV-08	Sensitive data not extracted	Test extract_safe_facts with address/medical data	Address and medical info NOT in output	☐
+4	PV-09	Observer does not store audio content	Inspect passives table after observer run	Only metadata stored — NOT transcripts or raw audio	☐
+5	PV-10	Telemetry disabled	Check docker-compose.yml for ARCHER_TELEMETRY=0	Environment variable set; no usage beacons	☐
+6	PV-11	Container security hardening	Check docker-compose.yml	cap_drop:ALL · read_only:true · no-new-privileges:true all present	☐
+ 
+13  Master Sign-Off — All Phase Gates
+This table is the final deliverable sign-off. A project lead or senior tester must sign each gate. No phase may be signed off with open FAIL items.
+
+Gate	Phase	Coverage	All PASS?	Date	Tester
+0	Environment Ready	D-01–D-08, P-01–P-12, H-01–H-06	☐		  
+1	Backend API Verified	B-01–B-12, R-01–R-05, L-01–L-04	☐		  
+2	Database & Memory Verified	DB-01–DB-10, M-01–M-07, MM-01–MM-04, SM-01–SM-06	☐		  
+3	Voice Pipeline Verified	V-01–V-09, T-01–T-06, VL-01–VL-04, E2V-01–E2V-05	☐		  
+4	GUI Verified	G-01–G-07, O-01–O-04, C-01–C-06, W-01–W-04, CA-01–CA-03	☐		  
+5	Observer & Agents Verified	OB-01–OB-10, NL-01–NL-04, AG-01–AG-08, AP-01–AP-06	☐		  
+6	PC Control Verified	PC-01–PC-17	☐		  
+7	Stability & Performance Verified	PF-01–PF-07, ST-01–ST-07	☐		  
+8	Privacy & Security Verified	PV-01–PV-11	☐		  
+	All phases complete	200+ test cases passed	☐		  
+	FULL SYSTEM READY				
+ 
+14  Bug Report Template
+Use one form per bug found during testing. Attach logs or screenshots where possible. File in the ARCHER_9 issue tracker.
+
+Field	Value
+Bug ID	BUG-XXX
+Date Found	
+Test Case Reference	e.g. V-06, T-06 (AEC)
+Component	e.g. stt_service.py, observer_daemon.py
+Severity	Critical / High / Medium / Low
+Phase Gate Impact	Does this block a phase gate? Which one?
+Description	What happened vs. what was expected
+Steps to Reproduce	1.   2.   3.
+Error / Log Snippet	Paste key lines only
+Assigned To	
+Fix Branch	e.g. fix/aec-echo-loop
+Fix Verified Date	
+
+ARCHER QA Master Plan · March 2026 · Antigravity Development Team

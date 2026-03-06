@@ -342,7 +342,7 @@ class ObserverPipeline:
 
         # Publish to event bus
         self._bus.publish(Event(
-            type=EventType.OBSERVATION,
+            type=EventType.OBSERVATION_EVENT,
             source=f"observer.{result.event_type}",
             data={
                 "event_type": result.event_type,

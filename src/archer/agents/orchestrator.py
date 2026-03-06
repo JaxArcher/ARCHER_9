@@ -668,6 +668,7 @@ class AgentOrchestrator:
         trigger a confirmation / execution loop before resuming the
         text stream.
         """
+        full_response = ""
         try:
             import anthropic
 

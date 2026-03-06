@@ -1,0 +1,76 @@
+﻿============================================================
+  ARCHER COMPLETE VALIDATION SUITE
+============================================================
+
+[1/8] Agent Architecture
+  [OK] assistant agent loaded
+  [OK] therapist agent loaded
+  [OK] trainer agent loaded
+  [OK] investment agent loaded
+  [OK] observer agent loaded
+  [OK] finance agent DELETED
+  [OK] finance agent directory removed
+
+[2/8] Model Routing & NVIDIA NIM
+  [OK] NVIDIA NIM base URL configured
+  [WARN] NVIDIA API key set
+  [OK] Assistant uses kimi-k2.5
+  [OK] Therapist uses qwen3.5-397b
+  [OK] Trainer uses llama-3.3-70b
+  [OK] Observer uses local vision (qwen2.5vl)
+  [OK] Local vision enabled
+  [OK] Routes 'How's the S&P 500 today?...' -> investment
+  [OK] Routes 'I'm feeling depressed....' -> therapist
+  [OK] Routes 'Should I do squats or deadlift...' -> trainer
+  [OK] Routes 'Set a reminder for 7pm....' -> assistant
+
+[3/8] Three-Layer Memory System
+  [OK] Layer 1: Redis connected
+  [OK] Layer 1: Redis read/write verified
+  [OK] Layer 2: Markdown log file exists
+  [OK] Layer 3: OpenMemory write successful
+  [OK] Layer 3: OpenMemory search returns results
+
+[4/8] ChromaDB RAG Knowledge Bases
+  [OK] ChromaDB available
+  [OK] psychology_knowledge collection populated
+  [OK] trainer_knowledge collection populated
+  [OK] Therapist RAG retrieval returns context
+  [OK] Trainer RAG retrieval returns context
+
+[5/8] Observer Configuration
+  [OK] Observer analysis interval is 30s
+  [OK] Observer data directory exists
+
+[6/8] Privacy & Compliance
+  [OK] pyttsx3 is importable (should be READABLE, but NOT used)
+  [OK] Memory decay disabled (permanent retention)
+  [OK] Default mode is cloud (NVIDIA NIM) with local fallback
+
+[7/8] Environment & Docker Services
+  [FAIL] ANTHROPIC_API_KEY set in env
+  [OK] ChromaDB Docker running (port 8100)
+  [OK] Redis Docker running (port 6377)
+  [OK] Observer frequency set (30s)
+
+[8/8] Critical Validations
+  [WARN] No 'finance' in orchestrator routing code
+  [OK] Investment model focused (no budget keywords expected in routing)
+  [OK] Therapist RAG dual-layer (OM + ChromaDB)
+  [OK] Trainer RAG enabled (trainer_knowledge)
+  [OK] Observer analysis frequency in config
+
+============================================================
+  VALIDATION SUMMARY
+============================================================
+
+  Total checks: 42
+  PASSED:       39
+  WARNINGS:     2 (non-blocking)
+  FAILED:       1
+
+  STATUS: ATTENTION REQUIRED
+
+  Failed checks:
+    [FAIL] ANTHROPIC_API_KEY set in env
+============================================================

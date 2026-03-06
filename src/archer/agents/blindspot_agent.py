@@ -14,7 +14,7 @@ from loguru import logger
 from archer.config import get_config
 from archer.core.event_bus import Event, EventType, get_event_bus
 from archer.memory.sqlite_store import get_sqlite_store
-from archer.agents.souls.blindspot import __doc__ as SOUL_DOC # Not really, but placeholder
+
 
 # Import core blindspot components
 from archer.blindspot.adhd_engine import ADHDStateDetector, ADHDPatternLibrary, MedicationTracker

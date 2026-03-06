@@ -193,6 +193,7 @@ def main() -> None:
     from PyQt6.QtWidgets import QApplication
     from PyQt6.QtCore import Qt
 
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     app.setApplicationName("ARCHER")
     app.setApplicationDisplayName("ARCHER — Mission Control")
@@ -264,7 +265,7 @@ def main() -> None:
             info = f"Observer: {event_type} (conf: {confidence:.0%})"
             window.update_observer_signal.emit(info)
 
-        bus.subscribe(EventType.OBSERVATION, on_observation)
+        bus.subscribe(EventType.OBSERVATION_EVENT, on_observation)
 
         # Attach the observer's camera and detection overlay to the GUI webcam widget
         window._webcam_widget.set_camera(observer.camera)
@@ -277,7 +278,7 @@ def main() -> None:
                 if description:
                     window.update_vision_signal.emit(description)
 
-        bus.subscribe(EventType.OBSERVATION, on_scene_observation)
+        bus.subscribe(EventType.OBSERVATION_EVENT, on_scene_observation)
 
         # Camera switching: local webcam when GUI visible, network cam when hidden
         def on_gui_visibility(visible: bool):

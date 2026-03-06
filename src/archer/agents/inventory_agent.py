@@ -14,7 +14,7 @@ from loguru import logger
 from archer.config import get_config
 from archer.core.event_bus import Event, EventType, get_event_bus
 from archer.memory.sqlite_store import get_sqlite_store
-from archer.agents.souls.inventory import __doc__ as SOUL_DOC
+
 
 # Import core inventory components
 from archer.inventory.object_detector import InventoryObjectDetector

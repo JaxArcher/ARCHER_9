@@ -44,6 +44,8 @@ class EventType(str, Enum):
     AGENT_RESPONSE_END = "agent.response_end"
     AGENT_SWITCH = "agent.switch"
     ARTIFACT_DISPLAY = "agent.artifact_display"
+    AGENT_INTERVENTION = "agent.intervention"
+    ACTION_COMPLETED = "agent.action_completed"
 
     # Toggle events
     MODE_CHANGED = "system.mode_changed"
@@ -60,7 +62,7 @@ class EventType(str, Enum):
     GUI_MUTE_TTS = "gui.mute_tts"
 
     # Observer events (Phase 3, but schema is defined now)
-    OBSERVATION = "observer.observation"
+    OBSERVATION_EVENT = "observer.observation"
 
     # Memory events
     MEMORY_STORE = "memory.store"
