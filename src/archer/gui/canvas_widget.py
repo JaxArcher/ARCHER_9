@@ -1,6 +1,11 @@
-from PyQt6.QtCore import QUrl
-from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtCore import QUrl, Qt
+from PyQt6.QtWidgets import QApplication
 import os
+
+# CRITICAL: Must set this BEFORE importing QWebEngineWidgets
+QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+
+from PyQt6.QtWebEngineWidgets import QWebEngineView
 
 
 class CanvasWidget(QWebEngineView):

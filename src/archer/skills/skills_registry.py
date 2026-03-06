@@ -52,7 +52,7 @@ def parse_skill_file(filepath: Path) -> Dict[str, Any]:
     
     # Extract tool sections
     tools = []
-    tool_sections = re.split(r'\n## ', content)
+    tool_sections = re.split(r'\n###? ', content)
     
     for section in tool_sections[1:]:
         tool = parse_tool_section(section, metadata.get('category', 'general'))
@@ -71,6 +71,10 @@ def parse_tool_section(section: str, category: str) -> Dict[str, Any]:
     """Parse a single tool section from SKILL.md."""
     lines = section.split('\n')
     tool_name = lines[0].strip()
+
+    # Skip section headers (contain parentheses or 'Tools')
+    if '(' in tool_name or ')' in tool_name or 'Tools' in tool_name:
+        return None
     
     description_lines = []
     parameters = {}
@@ -132,8 +136,7 @@ def parse_tool_section(section: str, category: str) -> Dict[str, Any]:
             'type': 'object',
             'properties': properties,
             'required': required_params
-        },
-        'category': category
+        }
     }
 
 

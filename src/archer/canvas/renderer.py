@@ -61,7 +61,7 @@ def execute_canvas_tool(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str,
         return {
             'success': True,
             'artifact_path': html_path,
-            'message': f'Chart created: {tool_input[\"title\"]}'
+            'message': f"Chart created: {tool_input['title']}"
         }
     
     elif tool_name == 'create_table':
@@ -73,7 +73,7 @@ def execute_canvas_tool(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str,
         return {
             'success': True,
             'artifact_path': html_path,
-            'message': f'Table created: {tool_input[\"title\"]}'
+            'message': f"Table created: {tool_input['title']}"
         }
     
     return {'success': False, 'error': 'Unknown canvas tool'}

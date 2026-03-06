@@ -41,6 +41,8 @@ from archer.memory.redis_buffer import get_redis_buffer
 from archer.memory.openmemory_store import get_openmemory_store
 from archer.memory.markdown_logger import get_markdown_logger
 from archer.memory.chromadb_store import get_chromadb_store
+from archer.agents.blindspot_agent import BlindspotAgent
+from archer.agents.inventory_agent import InventoryAgent
 
 
 # Regex to split on sentence-ending punctuation followed by a space or end-of-string.
@@ -79,6 +81,27 @@ _INVESTMENT_KEYWORDS = {
     "market summary", "how's my portfolio",
 }
 
+_BLINDSPOT_KEYWORDS = {
+    "grooming", "hygiene", "shower", "shave", "clothes", "outfit",
+    "clutter", "messy", "clean", "desk", "room", "surface",
+    "tasks", "unfinished", "started", "abandoned", "stuck",
+    "time", "late", "delay", "departure", "countdown",
+    "routine", "habit", "gym", "workout", "morning", "evening",
+    "tell", "promise", "commitment",
+    "hyperfocus", "paralysis", "bored", "distraction", "adhd", "meds", "medication", 
+    "overstimulated", "understimulated",
+}
+
+_INVENTORY_KEYWORDS = {
+    "where is", "where's", "find", "location", "drawer", "table",
+    "coffee", "paper", "stock", "supply", "amount", "quantity", "rolls", 
+    "liters", "kg", "count", "left",
+    "bought", "purchase", "price", "vendor", "receipt",
+    "warranty", "expire", "expiration", "guarantee",
+    "lent", "borrowed", "loan", "return",
+    "inventory", "belongings", "possessions", "item",
+}
+
 # Crisis keywords ALWAYS route to Therapist regardless of other signals
 _CRISIS_KEYWORDS = {
     "self-harm", "suicidal", "don't want to live", "end it all",
@@ -91,13 +114,17 @@ _AGENT_NAME_MAP = {
     "therapist": "therapist",
     "assistant": "assistant",
     "investment": "investment",
+    "blindspot": "blindspot",
+    "inventory": "inventory",
     "coach": "trainer",
     "counselor": "therapist",
     "investor": "investment",
+    "tracker": "inventory",
+    "accountant": "blindspot",
 }
 
 # Active agents and their SOUL.md files
-_ACTIVE_AGENTS = ("assistant", "trainer", "therapist", "investment", "observer")
+_ACTIVE_AGENTS = ("assistant", "trainer", "therapist", "investment", "blindspot", "inventory", "observer")
 
 
 class AgentOrchestrator:
@@ -163,6 +190,10 @@ class AgentOrchestrator:
         self._heartbeat_timer = threading.Timer(600, self._run_heartbeat)
         self._heartbeat_timer.daemon = True
         self._heartbeat_timer.start()
+
+        # Instantiate specialized agents for passive monitoring
+        self._blindspot = BlindspotAgent()
+        self._inventory = InventoryAgent()
 
         logger.info(f"Orchestrator initialized — session {self._session_id[:8]}")
         logger.info(f"Active agents: {', '.join(_ACTIVE_AGENTS)}")
@@ -290,6 +321,8 @@ class AgentOrchestrator:
             "trainer": _score(_TRAINER_KEYWORDS),
             "therapist": _score(_THERAPIST_KEYWORDS),
             "investment": _score(_INVESTMENT_KEYWORDS),
+            "blindspot": _score(_BLINDSPOT_KEYWORDS),
+            "inventory": _score(_INVENTORY_KEYWORDS),
         }
 
         # Pick the highest-scoring agent, but only if it's unambiguous

@@ -57,7 +57,6 @@ Six distinct personalities with enhanced system prompts:
 Assistant: General-purpose, friendly, practical
 Therapist: Empathetic, supportive, non-clinical with clear professional boundaries
 Trainer: Motivational, progress-focused, compassionate accountability
-Finance: Educational, non-judgmental, clear legal disclaimers
 Investment: Analytical, risk-aware, educational disclaimers required
 Observer: Pattern detection, behavioral monitoring, privacy-respectful
 

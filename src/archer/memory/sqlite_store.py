@@ -151,6 +151,185 @@ class SQLiteStore:
                     last_intervention TIMESTAMP NOT NULL,
                     PRIMARY KEY (agent_name, topic)
                 );
+
+                -- --- BLINDSPOT AGENT TABLES ---
+
+                -- User behavior baselines (learned over time)
+                CREATE TABLE IF NOT EXISTS user_baselines (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category TEXT NOT NULL,
+                    metric TEXT NOT NULL,
+                    calculated_value REAL,
+                    observations_count INTEGER DEFAULT 0,
+                    state TEXT DEFAULT 'calibrating', -- 'calibrating', 'active'
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(category, metric)
+                );
+
+                -- Detailed behavior observations (for baseline calculation)
+                CREATE TABLE IF NOT EXISTS behavior_observations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category TEXT NOT NULL,
+                    metric TEXT NOT NULL,
+                    value REAL NOT NULL,
+                    metadata TEXT, -- JSON
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                -- ADHD state tracking
+                CREATE TABLE IF NOT EXISTS adhd_state_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    detected_state TEXT NOT NULL, -- 'hyperfocus', 'paralysis', etc.
+                    confidence REAL,
+                    trigger_context TEXT, -- JSON
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                -- Task completion tracking (ADHD pattern)
+                CREATE TABLE IF NOT EXISTS task_tracking (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    activity TEXT NOT NULL,
+                    status TEXT DEFAULT 'active', -- 'active', 'completed', 'abandoned'
+                    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_activity_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    interruptions_count INTEGER DEFAULT 0,
+                    metadata TEXT -- JSON
+                );
+
+                -- Relationship & Social Tracking
+                CREATE TABLE IF NOT EXISTS social_contacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    relationship TEXT, -- 'family', 'friend', 'colleague'
+                    typical_interval_days REAL,
+                    last_interaction_at TIMESTAMP,
+                    metadata TEXT, -- JSON
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS social_interactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    contact_id INTEGER NOT NULL,
+                    interaction_type TEXT, -- 'call', 'text', 'in-person'
+                    sentiment_score REAL,
+                    notes TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (contact_id) REFERENCES social_contacts(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS social_commitments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    contact_id INTEGER NOT NULL,
+                    promise TEXT NOT NULL,
+                    due_date TIMESTAMP,
+                    fulfilled_at TIMESTAMP,
+                    status TEXT DEFAULT 'pending', -- 'pending', 'fulfilled', 'failed'
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (contact_id) REFERENCES social_contacts(id)
+                );
+
+                -- --- INVENTORY MANAGER TABLES ---
+
+                -- Storage locations (hierarchy)
+                CREATE TABLE IF NOT EXISTS storage_locations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    location_name TEXT NOT NULL,
+                    room TEXT,
+                    furniture_type TEXT, -- 'table', 'shelf', 'drawer', etc.
+                    level INTEGER,
+                    is_visible BOOLEAN DEFAULT 1,
+                    parent_location_id INTEGER,
+                    coordinates TEXT, -- JSON
+                    FOREIGN KEY (parent_location_id) REFERENCES storage_locations(id)
+                );
+
+                -- Master items (replaces simpler inventory table)
+                CREATE TABLE IF NOT EXISTS inventory_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_name TEXT NOT NULL,
+                    category TEXT,
+                    brand TEXT,
+                    model TEXT,
+                    serial_number TEXT,
+                    barcode TEXT,
+                    estimated_value REAL,
+                    is_consumable BOOLEAN DEFAULT 0,
+                    persistent_object_id TEXT UNIQUE,
+                    notes TEXT,
+                    current_location_id INTEGER,
+                    last_seen_at TIMESTAMP,
+                    image_path TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (current_location_id) REFERENCES storage_locations(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_inv_items_name ON inventory_items(item_name);
+                CREATE INDEX IF NOT EXISTS idx_inv_items_object_id ON inventory_items(persistent_object_id);
+
+                -- Location history
+                CREATE TABLE IF NOT EXISTS item_location_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL,
+                    location_id INTEGER NOT NULL,
+                    confidence REAL,
+                    still_there BOOLEAN DEFAULT 1,
+                    placed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    removed_at TIMESTAMP,
+                    FOREIGN KEY (item_id) REFERENCES inventory_items(id),
+                    FOREIGN KEY (location_id) REFERENCES storage_locations(id)
+                );
+
+                -- Consumables tracking
+                CREATE TABLE IF NOT EXISTS consumables (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL UNIQUE,
+                    unit TEXT, -- 'count', 'liters', etc.
+                    current_quantity REAL,
+                    low_threshold REAL,
+                    ideal_quantity REAL,
+                    usage_rate_per_day REAL,
+                    estimated_days_remaining INTEGER,
+                    last_restocked_at TIMESTAMP,
+                    last_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (item_id) REFERENCES inventory_items(id)
+                );
+
+                -- Purchase records
+                CREATE TABLE IF NOT EXISTS item_purchases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL,
+                    purchase_date DATE,
+                    price REAL,
+                    vendor TEXT,
+                    receipt_path TEXT,
+                    FOREIGN KEY (item_id) REFERENCES inventory_items(id)
+                );
+
+                -- Warranties
+                CREATE TABLE IF NOT EXISTS item_warranties (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL,
+                    warranty_type TEXT, -- 'manufacturer', 'extended'
+                    start_date DATE,
+                    end_date DATE,
+                    document_path TEXT,
+                    FOREIGN KEY (item_id) REFERENCES inventory_items(id)
+                );
+
+                -- Borrowed & Lent
+                CREATE TABLE IF NOT EXISTS borrowed_lent_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL,
+                    person_name TEXT NOT NULL,
+                    transaction_type TEXT, -- 'borrowed', 'lent'
+                    expected_return_date TIMESTAMP,
+                    actual_return_date TIMESTAMP,
+                    status TEXT DEFAULT 'active', -- 'active', 'returned'
+                    notes TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (item_id) REFERENCES inventory_items(id)
+                );
             """)
             conn.commit()
             logger.info(f"SQLite store initialized at {self._db_path}")
