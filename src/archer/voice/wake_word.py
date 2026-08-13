@@ -1,9 +1,9 @@
 """
 ARCHER Wake Word Detection.
 
-Uses openWakeWord. Runs all available built-in models simultaneously
-(alexa, hey_jarvis, hey_mycroft, hey_rhasspy) so you can use any of
-those phrases to wake ARCHER. Runs on CPU continuously.
+Configured for 'hey_archer'. Currently uses openWakeWord running all available
+built-in models simultaneously (alexa, hey_jarvis, hey_mycroft, hey_rhasspy)
+pending custom 'hey_archer' model training. Runs on CPU continuously.
 
 Wake word detection runs in its own thread, consuming audio from the
 AudioManager queue and publishing WAKE_WORD_DETECTED events.
