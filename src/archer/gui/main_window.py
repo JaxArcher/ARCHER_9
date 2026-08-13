@@ -591,9 +591,9 @@ class MainWindow(QMainWindow):
             self._agent_state_label.setText("STATE: THINKING...")
             self._response_time_label.setText("RT: ---")
         elif status.startswith("response_start:"):
-            parts = status.split(":")
-            model = parts[1]
-            elapsed = float(parts[2])
+            _, rest = status.split(":", 1)
+            model, elapsed_str = rest.rsplit(":", 1)
+            elapsed = float(elapsed_str)
             self._model_info_label.setText(f"MODEL: {model.upper()}")
             self._agent_state_label.setText("STATE: RESPONDING")
             self._response_time_label.setText(f"RT: {elapsed:.1f}s")

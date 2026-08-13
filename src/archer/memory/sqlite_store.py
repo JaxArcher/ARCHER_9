@@ -828,71 +828,165 @@ class SQLiteStore:
 
     def get_therapist_status(self) -> dict:
         """Get current therapist profiling status."""
-        cursor = self._conn.cursor()
-        cursor.execute(
-            """
-            SELECT phase, current_week, days_active, baseline_established
-            FROM therapist_profiling
-            WHERE id = 1
-            """
-        )
-        row = cursor.fetchone()
-        if not row:
-            cursor.execute(
-                """
-                INSERT INTO therapist_profiling 
-                (id, start_date, phase, current_week, last_updated)
-                VALUES (1, ?, 'profiling', 1, ?)
-                """,
-                (time.time(), time.time()),
-            )
-            self._conn.commit()
-            return {"phase": "profiling", "days_active": 0, "current_week": 1, "baseline_established": False}
-        
-        start_date = cursor.execute("SELECT start_date FROM therapist_profiling WHERE id = 1").fetchone()[0]
-        days_active = int((time.time() - start_date) / 86400)
-        
-        return {
-            "phase": row[0],
-            "current_week": row[1],
-            "days_active": days_active,
-            "baseline_established": bool(row[3]),
-        }
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    """
+                    SELECT phase, current_week, days_active, baseline_established
+                    FROM therapist_profiling
+                    WHERE id = 1
+                    """
+                )
+                row = cursor.fetchone()
+                if not row:
+                    conn.execute(
+                        """
+                        INSERT INTO therapist_profiling 
+                        (id, start_date, phase, current_week, last_updated)
+                        VALUES (1, ?, 'profiling', 1, ?)
+                        """,
+                        (time.time(), time.time()),
+                    )
+                    conn.commit()
+                    return {"phase": "profiling", "days_active": 0, "current_week": 1, "baseline_established": False}
+                
+                start_row = conn.execute("SELECT start_date FROM therapist_profiling WHERE id = 1").fetchone()
+                start_date = start_row[0] if start_row else time.time()
+                days_active = int((time.time() - start_date) / 86400)
+                
+                return {
+                    "phase": row[0],
+                    "current_week": row[1],
+                    "days_active": days_active,
+                    "baseline_established": bool(row[3]),
+                }
+            except Exception:
+                return {"phase": "profiling", "days_active": 0, "current_week": 1, "baseline_established": False}
 
     def save_exercise_response(self, segment_id: str, question_id: str, response: str) -> None:
         """Save exercise response."""
-        cursor = self._conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO exercise_responses
-            (segment_id, question_id, response, timestamp)
-            VALUES (?, ?, ?, ?)
-            """,
-            (segment_id, question_id, response, time.time()),
-        )
-        cursor.execute(
-            """
-            UPDATE exercise_segments
-            SET questions_answered = questions_answered + 1
-            WHERE segment_id = ?
-            """,
-            (segment_id,),
-        )
-        self._conn.commit()
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO exercise_responses
+                    (segment_id, question_id, response, timestamp)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (segment_id, question_id, response, time.time()),
+                )
+                conn.execute(
+                    """
+                    UPDATE exercise_segments
+                    SET questions_answered = questions_answered + 1
+                    WHERE segment_id = ?
+                    """,
+                    (segment_id,),
+                )
+                conn.commit()
+            except Exception as e:
+                logger.debug(f"Failed to save exercise response: {e}")
 
-    def get_profiling_start_date(self) -> float:
+    def get_profiling_start_date(self) -> float | None:
         """Get profiling start date timestamp."""
-        cursor = self._conn.cursor()
-        cursor.execute("SELECT start_date FROM therapist_profiling WHERE id = 1")
-        row = cursor.fetchone()
-        return row[0] if row else None
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute("SELECT start_date FROM therapist_profiling WHERE id = 1")
+                row = cursor.fetchone()
+                return row[0] if row else None
+            except Exception:
+                return None
 
-    def get_last_profiling_question_time(self) -> float:
+    def get_last_profiling_question_time(self) -> float | None:
         """Get timestamp of last profiling question."""
-        cursor = self._conn.cursor()
-        cursor.execute("SELECT MAX(timestamp) FROM exercise_responses")
-        row = cursor.fetchone()
-        return row[0] if row and row[0] else None
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute("SELECT MAX(timestamp) FROM exercise_responses")
+                row = cursor.fetchone()
+                return row[0] if row and row[0] else None
+            except Exception:
+                return None
+
+    def log_pending_confirmation(self, emotion: str, confidence: float, observation_id: int) -> None:
+        """Log a pending emotion confirmation."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS emotion_confirmations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        emotion TEXT NOT NULL,
+                        confidence REAL NOT NULL,
+                        observation_id INTEGER,
+                        confirmed INTEGER,
+                        actual_emotion TEXT,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.execute(
+                    """
+                    INSERT INTO emotion_confirmations (emotion, confidence, observation_id)
+                    VALUES (?, ?, ?)
+                    """,
+                    (emotion, confidence, observation_id),
+                )
+                conn.commit()
+            except Exception as e:
+                logger.debug(f"Failed to log pending confirmation: {e}")
+
+    def update_emotion_confirmation(
+        self, emotion: str, confidence: float, user_confirmed: bool, actual_emotion: str | None = None
+    ) -> None:
+        """Update an emotion confirmation result."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS emotion_confirmations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        emotion TEXT NOT NULL,
+                        confidence REAL NOT NULL,
+                        observation_id INTEGER,
+                        confirmed INTEGER,
+                        actual_emotion TEXT,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.execute(
+                    """
+                    INSERT INTO emotion_confirmations (emotion, confidence, confirmed, actual_emotion)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (emotion, confidence, 1 if user_confirmed else 0, actual_emotion),
+                )
+                conn.commit()
+            except Exception as e:
+                logger.debug(f"Failed to update emotion confirmation: {e}")
+
+    def get_emotion_confirmation_stats(self, emotion: str) -> dict:
+        """Get historical accuracy stats for a given emotion."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    """
+                    SELECT COUNT(*), SUM(CASE WHEN confirmed = 1 THEN 1 ELSE 0 END)
+                    FROM emotion_confirmations
+                    WHERE emotion = ? AND confirmed IS NOT NULL
+                    """,
+                    (emotion,),
+                )
+                row = cursor.fetchone()
+                if not row or not row[0]:
+                    return {"total_detections": 0, "confirmed": 0, "accuracy": 0.0}
+                total, confirmed = row[0], row[1] or 0
+                return {"total_detections": total, "confirmed": confirmed, "accuracy": confirmed / total}
+            except Exception:
+                return {"total_detections": 0, "confirmed": 0, "accuracy": 0.0}
 
 # ====== END OF NEW METHODS ======
 

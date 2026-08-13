@@ -21,7 +21,7 @@ class TestConfig:
         assert config.filler_timeout_ms == 600
         assert config.halt_phrase == "archer halt"
         assert config.halt_response_ms == 150
-        assert config.claude_model == "claude-sonnet-4-5-20250929"
+        assert config.claude_model == "claude-sonnet-5"
 
     def test_singleton(self):
         """Test that get_config returns the same instance."""

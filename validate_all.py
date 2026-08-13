@@ -53,7 +53,7 @@ check("NVIDIA NIM base URL configured", "nvidia" in config.nvidia_base_url.lower
 check("NVIDIA API key set", bool(config.nvidia_api_key), warn_only=True)
 check("Assistant uses kimi-k2.5", "kimi" in config.assistant_model.lower())
 check("Therapist uses qwen3.5-397b", "qwen3.5" in config.therapist_model.lower() or "qwen" in config.therapist_model.lower())
-check("Trainer uses llama-3.3-70b", "llama" in config.trainer_model.lower())
+check("Trainer uses qwen3.6-35b / qwen3.5-397b", "qwen" in config.trainer_model.lower() or "llama" in config.trainer_model.lower())
 check("Observer uses local vision (qwen2.5vl)", "qwen" in config.observer_model.lower())
 check("Local vision enabled", config.use_local_vision)
 

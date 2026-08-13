@@ -48,7 +48,7 @@ class InventoryAgent:
 
     def _on_observation(self, event: Event) -> None:
         """Handle vision detections for object tracking."""
-        payload = event.data.get("payload", {})
+        payload = event.data.get("payload", event.data)
         source = event.data.get("source", "unknown")
         
         if source == "webcam":

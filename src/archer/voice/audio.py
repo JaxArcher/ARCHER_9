@@ -20,6 +20,11 @@ import numpy as np
 import sounddevice as sd
 from loguru import logger
 
+try:
+    import pyaec
+except ImportError:
+    pyaec = None
+
 from archer.config import get_config
 from archer.core.event_bus import Event, EventType, get_event_bus
 
@@ -50,7 +55,9 @@ class AudioManager:
 
         # Capture control
         self._is_capturing = threading.Event()
-        self._capture_stream: sd.InputStream | None = None
+        self._capture_stream: sd.Stream | None = None
+        self._aec = None
+        self._playback_queue: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=100)
 
         # TTS mute
         self._tts_muted = threading.Event()
@@ -69,22 +76,34 @@ class AudioManager:
         device_index = self._config.mic_device_index
 
         try:
-            self._capture_stream = sd.InputStream(
+            if pyaec:
+                self._aec = pyaec.Aec(
+                    frame_size=self._chunk_samples,
+                    filter_length=self._chunk_samples * 10,  # 300ms filter
+                    sample_rate=self._sample_rate,
+                    enable_preprocess=False
+                )
+                logger.info("AEC initialized (Speex via pyaec, preprocess=False)")
+            else:
+                logger.warning("pyaec not found — Echo cancellation disabled")
+
+            self._capture_stream = sd.Stream(
                 samplerate=self._sample_rate,
                 channels=self._channels,
                 dtype="int16",
                 blocksize=self._chunk_samples,
-                device=device_index,
+                device=(device_index, self._config.speaker_device_index),
                 callback=self._audio_callback,
             )
             self._capture_stream.start()
             logger.info(
-                f"Audio capture started (device={device_index}, "
+                f"Audio stream started (mic={device_index}, "
+                f"speaker={self._config.speaker_device_index}, "
                 f"rate={self._sample_rate}, chunk={self._chunk_samples} samples)"
             )
         except Exception as e:
             self._is_capturing.clear()
-            logger.error(f"Failed to start audio capture: {e}")
+            logger.error(f"Failed to start audio stream: {e}")
             raise
 
     def stop_capture(self) -> None:
@@ -103,26 +122,55 @@ class AudioManager:
     def _audio_callback(
         self,
         indata: np.ndarray,
+        outdata: np.ndarray,
         frames: int,
         time_info: object,
         status: sd.CallbackFlags,
     ) -> None:
         """
         Called by sounddevice for each audio chunk.
-        Converts to bytes and pushes to the audio queue.
+        Handles both capture (with AEC) and playback from the queue.
         """
         if status:
             logger.warning(f"Audio callback status: {status}")
 
-        if self._is_capturing.is_set():
-            audio_bytes = indata.tobytes()
+        # 1. Output (Playback)
+        ref_chunk = np.zeros((frames, self._channels), dtype="int16")
+        if self._is_playing.is_set():
             try:
-                self._audio_queue.put_nowait(audio_bytes)
+                chunk = self._playback_queue.get_nowait()
+                if chunk is not None:
+                    # chunk is already resampled to 16k and sliced
+                    ref_chunk[:] = chunk
+                    outdata[:] = chunk
+                else:
+                    # End of sequence
+                    self._is_playing.clear()
+                    outdata.fill(0)
+            except queue.Empty:
+                # Underflow
+                outdata.fill(0)
+        else:
+            outdata.fill(0)
+
+        # 2. Input (Capture) + AEC
+        if self._is_capturing.is_set():
+            if self._aec and self._is_playing.is_set():
+                # pyaec expects int16 bytes
+                clean_bytes_list = self._aec.cancel_echo(indata.tobytes(), ref_chunk.tobytes())
+                # Result is a list of ints, convert back to bytes
+                clean_bytes = np.array(clean_bytes_list, dtype=np.int16).tobytes()
+                audio_to_push = clean_bytes
+            else:
+                # No playback or no AEC — use raw mic input
+                audio_to_push = indata.tobytes()
+
+            try:
+                self._audio_queue.put_nowait(audio_to_push)
             except queue.Full:
-                # Drop oldest frame to avoid backpressure
                 try:
                     self._audio_queue.get_nowait()
-                    self._audio_queue.put_nowait(audio_bytes)
+                    self._audio_queue.put_nowait(audio_to_push)
                 except queue.Empty:
                     pass
 
@@ -144,51 +192,88 @@ class AudioManager:
         if self._tts_muted.is_set():
             return
 
-        rate = sample_rate or self._sample_rate
-        device_index = self._config.speaker_device_index
+        # Always work at the pipeline rate (16000) for AEC consistency
+        rate = self._sample_rate
+        
+        # Ensure data is int16 for the callback
+        if audio_data.dtype != np.int16:
+            # Assume float -1.0..1.0
+            if audio_data.dtype == np.float32 or audio_data.dtype == np.float64:
+                audio_data = (audio_data * 32767).astype(np.int16)
+        
+        # If input rate doesn't match pipeline rate, resample
+        if sample_rate and sample_rate != rate:
+            ratio = rate / sample_rate
+            n_out = int(len(audio_data) * ratio)
+            indices = np.linspace(0, len(audio_data) - 1, n_out)
+            audio_data = np.interp(
+                indices, np.arange(len(audio_data)), audio_data
+            ).astype(np.int16)
 
         with self._playback_lock:
+            # Clear any stale data
+            while not self._playback_queue.empty():
+                try: self._playback_queue.get_nowait()
+                except queue.Empty: break
+            
+            # Slice into chunks of self._chunk_samples
+            # If mono, ensure (N, 1) shape for sounddevice duplex
+            if audio_data.ndim == 1:
+                audio_data = audio_data.reshape(-1, 1)
+            
+            total_samples = len(audio_data)
+            offset = 0
+            while offset < total_samples:
+                end = min(offset + self._chunk_samples, total_samples)
+                chunk = audio_data[offset:end]
+                # Pad last chunk if needed
+                if len(chunk) < self._chunk_samples:
+                    chunk = np.pad(chunk, ((0, self._chunk_samples - len(chunk)), (0, 0)))
+                
+                self._playback_queue.put(chunk)
+                offset = end
+            
+            # Add sentinel
+            self._playback_queue.put(None)
+            
             self._is_playing.set()
+            logger.debug(f"Playback queued: {total_samples} samples")
+
             try:
-                sd.play(audio_data, samplerate=rate, device=device_index)
-
-                # Compute and publish amplitude during playback (~30fps)
-                total_samples = len(audio_data)
+                # Wait for playback to finish (callback will clear _is_playing)
+                # Max wait: duration + 2s buffer
                 duration = total_samples / rate
-                chunk_duration = 1.0 / 30.0  # ~33ms per amplitude update
-                chunk_size = int(rate * chunk_duration)
-                offset = 0
-
-                while self._is_playing.is_set() and offset < total_samples:
-                    end = min(offset + chunk_size, total_samples)
-                    chunk = audio_data[offset:end]
-
-                    # RMS amplitude (0.0 – 1.0)
-                    if len(chunk) > 0:
-                        rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2)))
-                        # Clamp to 0-1 range (float32 audio is already -1..1)
-                        amplitude = min(1.0, rms * 3.0)  # Amplify for visual effect
+                start_wait = time.time()
+                
+                # While playing, calculate amplitude for GUI (mocking original loop)
+                # In the duplex model, the hardware loop is running in the background.
+                # Here we just track progress for the visualizer.
+                current_offset = 0
+                while self._is_playing.is_set() and (time.time() - start_wait) < (duration + 2.0):
+                    # Estimate amplitude for visualizer
+                    if current_offset < total_samples:
+                        end = min(current_offset + self._chunk_samples, total_samples)
+                        v_chunk = audio_data[current_offset:end]
+                        rms = float(np.sqrt(np.mean(v_chunk.astype(np.float64) ** 2)))
+                        amplitude = min(1.0, (rms / 32768.0) * 3.0)
                         self._bus.publish(Event(
                             type=EventType.AUDIO_AMPLITUDE,
                             source="audio_manager",
                             data={"amplitude": amplitude},
                         ))
+                        current_offset += self._chunk_samples
+                    
+                    time.sleep(self._config.audio_chunk_ms / 1000.0)
 
-                    offset = end
-                    time.sleep(chunk_duration)
-
-                # Reset amplitude to 0 when playback ends
+            except Exception as e:
+                logger.error(f"Audio playback error: {e}")
+            finally:
+                # Ensure amplitude is reset
                 self._bus.publish(Event(
                     type=EventType.AUDIO_AMPLITUDE,
                     source="audio_manager",
                     data={"amplitude": 0.0},
                 ))
-
-                sd.wait()
-            except Exception as e:
-                logger.error(f"Audio playback error: {e}")
-            finally:
-                self._is_playing.clear()
 
     def play_audio_bytes(self, audio_bytes: bytes, sample_rate: int = 24000) -> None:
         """Play raw PCM audio bytes (int16, mono).
@@ -228,7 +313,10 @@ class AudioManager:
 
     def stop_playback(self) -> None:
         """Immediately stop any active audio playback."""
-        sd.stop()
+        # Clear playback queue
+        while not self._playback_queue.empty():
+            try: self._playback_queue.get_nowait()
+            except queue.Empty: break
         self._is_playing.clear()
 
     @property
@@ -252,7 +340,9 @@ class AudioManager:
     def _on_halt(self, event: Event) -> None:
         """HALT handler — immediately stop all audio."""
         self.stop_playback()
-        logger.info("HALT: Audio playback stopped.")
+        # No sd.stop() here as it would stop the capture stream too if using duplex.
+        # Duplex stream stays open, but we send silence.
+        logger.info("HALT: Audio playback stopped (AEC duplex retained).")
 
     def shutdown(self) -> None:
         """Clean shutdown of all audio resources."""

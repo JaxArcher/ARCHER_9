@@ -1,0 +1,177 @@
+# ARCHER — Update Instructions for Antigravity (v2)
+
+**This document supersedes `ARCHER_ANTIGRAVITY_UPDATE_INSTRUCTIONS.md`.** Everything in v1 is either carried forward below (with several of its open decisions now resolved) or superseded by the single-agent architecture work in Section 6. Read this one; treat v1 as historical.
+
+**Source:** Live review of `JaxArcher/ARCHER_9` (`pyproject.toml`, `config.py`, `orchestrator.py`, `voice/tts.py`, `voice/wake_word.py`, `observer/*`, `agents/inventory_agent.py`, `agents/blindspot_agent.py`, `docker-compose.yml`), plus design discussion covering conversation architecture, memory, and agent structure.
+
+**How to use this doc:** No timelines by design. Sections 1-5 are direct fixes and cleanup to the *existing* system — do these regardless of the bigger architecture work. Section 6 is new construction: a single-agent core built alongside the current system, not a replacement for it yet. Do the Phase 0 audit described at the end of v1 before starting either — confirm this doc still matches `master` before acting on it.
+
+---
+
+## 1. Confirmed bugs — fix directly
+
+### 1.1 `full_response` crashes `_stream_local()`
+**File:** `orchestrator.py`, `_stream_local()`
+`full_response` is read in a conditional but never initialized in that method's scope — first execution of that branch raises `UnboundLocalError`. Initialize `full_response = ""` at the top of the method, matching the pattern already used correctly in `_stream_claude()`.
+**Verify:** Force a Claude API failure with auto-fallback enabled; confirm local fallback completes without raising.
+
+### 1.2 Two different local models depending on entry path
+**File:** `orchestrator.py` — `_stream_ollama()` (hardcodes `"qwen2.5:7b"`) vs. `_stream_local()` (correctly reads `self._config.local_fallback_model`)
+Replace the hardcoded string in `_stream_ollama()` with `self._config.local_fallback_model` so both paths agree.
+**Verify:** Start in local mode; confirm the Ollama request uses the configured model, not `qwen2.5:7b`.
+
+### 1.3 Wake word config says "hey_archer," code doesn't implement it
+**Files:** `config.py` (`wake_word: str = "hey_archer"`) vs. `voice/wake_word.py` (only loads generic built-ins: alexa, hey_jarvis, hey_mycroft, hey_rhasspy)
+Train a custom `hey_archer` openWakeWord model and load it in `initialize()`. Until it exists, don't leave the config value implying behavior that isn't there — update the default/docstring to be honest about current behavior.
+**Verify:** Say "hey archer," confirm `WAKE_WORD_DETECTED` fires with `model="hey_archer"`.
+
+### 1.4 TTS code and TTS deployment disagree about the engine
+**Files:** `voice/tts.py` (`LocalTTS`, docstring says IndexTTS2) vs. `docker-compose.yml` (service `coqui-tts`, comment says Coqui XTTS-v2)
+Recommended: replace the Coqui XTTS-v2 container with **Chatterbox** (Resemble AI, MIT) rather than just relabeling — real-time-oriented, permissively licensed, rated ahead of ElevenLabs in blind preference tests, and a genuine upgrade over the two-year-old, non-commercially-licensed XTTS-v2. Build `docker/chatterbox/` on the same pattern as `docker/coqui-tts/`, point the (renamed) local-TTS URL config at it, retire the old container.
+**Verify:** `docker compose --profile local-tts up -d`, confirm `/health`, confirm `LocalTTS.is_available()` returns `True`.
+
+### 1.5 Observer → Blindspot/Inventory signal is silently broken
+**Files:** `observer/pipeline.py` (`_publish_observation`) vs. `agents/blindspot_agent.py` and `agents/inventory_agent.py` (`_on_observation`)
+Observer publishes event data flattened directly into the event (`data={"event_type":..., "source":..., "confidence":..., **result.data}`). Both `BlindspotAgent._on_observation` and `InventoryAgent._on_observation` read `payload = event.data.get("payload", {})` — a key that never exists in what's published. Both handlers fire on every observation but always process an empty dict. No error, no log signal — it just silently does nothing. Fix: change both handlers to read detection fields directly off `event.data` (matching how `InterventionEngine._on_observation` already does it correctly), not from a nonexistent nested `payload` key.
+**Verify:** Trigger a webcam observation, confirm `InventoryObjectDetector.detect_items_in_frame()` and Blindspot's grooming/clutter/plant checks receive non-empty data.
+
+### 1.6 No `room`/location signal in Observer output
+**Files:** `observer/analyzers.py` (none of `EmotionAnalyzer`, `PoseAnalyzer`, `SceneAnalyzer` populate a `room` field) vs. `inventory_agent.py` (`detect_items_in_frame(payload, room)` expects one)
+Even after 1.5 is fixed, location tracking has no real input — `room` will always resolve to `"unknown"`. Needs a room/location signal added to Observer's detection output before Inventory's location tracking can do anything real. This might be as simple as a configured room-per-camera-source mapping (you already have `webcam_device` vs. `network_camera_url` as distinct sources) rather than anything vision-based.
+
+### 1.7 No structured object detection feeding Inventory
+**Files:** `observer/analyzers.py` (`SceneAnalyzer` produces free-text: "Describe what you see... 2-3 concise sentences") vs. `inventory_agent.py` (expects structured `object_type`/`confidence` records)
+There's no translation layer from the VLM's free-text description to the structured format Inventory's detector consumes. Either add structured-output prompting to `SceneAnalyzer` (ask `qwen2.5vl:7b` for JSON: objects + approximate locations, not prose) or add a dedicated lightweight object-detection pass specifically for Inventory. Structured-output prompting is the smaller lift — try that first.
+
+---
+
+## 2. Dead config / dependencies — resolved
+
+### 2.1 LangGraph / LangChain — RESOLVED: remove
+**File:** `pyproject.toml`
+No `StateGraph` or LangGraph construct exists anywhere in the codebase, and the single-agent core design (Section 6) doesn't need one either — its routing is deterministic keyword/rule logic, not a graph. Remove `langgraph`, `langchain-core`, `langchain-anthropic` from `pyproject.toml`. No framework needed for either the current orchestrator or the new core.
+
+### 2.2 Kimi K2.5 (`assistant_model`) — RESOLVED: repurpose, don't remove
+**File:** `config.py` (`assistant_model: str = "moonshotai/kimi-k2.5"`)
+Currently unreachable dead config in the old orchestrator (`_stream_agent()` never routes Assistant to it). Don't delete it — repurpose it as one of the pluggable cloud-delegation targets in the new single-agent core (Section 6.4). The NVIDIA NIM client plumbing already exists in `orchestrator.py`; the new core's delegation logic should be able to route to either Claude or a NIM-hosted model (Kimi K2.5 included) depending on task type, not just default to Claude for everything.
+
+### 2.3 `_llm_classify()` — leave as-is in the old orchestrator, don't port it forward
+**File:** `orchestrator.py`
+Confirmed unused by `_classify_agent()`'s actual routing flow. Since the old orchestrator keeps running unmodified until cutover (per the build-alongside plan), no need to touch it now. The new single-agent core doesn't need an equivalent — its stance/domain-tag scoring (Section 6.3) does this job with plain keyword scoring, no LLM call.
+
+### 2.4 Finance remnants — clean up
+**Files:** `README.md` (still lists Finance in the five-agent description), `agents/finance/SOUL.md` (still present), `pyproject.toml` (`yfinance` still a dependency)
+Finance is confirmed removed from actual routing (`_ACTIVE_AGENTS`, no keyword table, no name mapping). Update the README's agent list to match reality, remove or archive `finance/SOUL.md`, drop `yfinance` unless something else uses it.
+
+### 2.5 A2A protocol — downgraded to a future note, not a spike task
+**Previously scoped as:** a research spike into using A2A for inter-agent communication.
+**Now:** with the shift to one local primary agent instead of five independently-routed agents, the original motivation (agents talking to each other) mostly disappears — there's only one agent. A2A would only matter if ARCHER needs to talk to *external* third-party agents later. Keep it as a "someday, if that need materializes" note. No active work here.
+
+---
+
+## 3. Model pin updates
+
+### 3.1 Claude model — one generation behind
+**File:** `config.py` (`claude_model: str = "claude-sonnet-4-5-20250929"`)
+Update to `claude-sonnet-5`. Note: this pin's role shrinks under the new architecture — it stops being *the* default model and becomes one of the cloud-delegation targets (Section 6.4) once the single-agent core is live. Update it regardless, since the old orchestrator keeps using it until cutover.
+
+### 3.2 Trainer's NIM model is stale
+**File:** `config.py` (`trainer_model: str = "meta/llama-3.3-70b-instruct"`)
+Swap to `qwen/qwen3.6-35b-a3b` (Apache-2.0, 73.4% SWE-bench at 3B active params) if available on NIM; fall back to `qwen/qwen3.5-397b-a17b` (already used for Therapist/Investment) otherwise. A/B a handful of real conversations before fully cutting over.
+
+---
+
+## 4. Speech stack
+
+### 4.1 Local STT — add Parakeet as an option for English
+**Files:** `config.py`, `voice/stt.py`
+Add NVIDIA Parakeet TDT 0.6B v3 as a configurable option for the English-only fast path (beats Whisper large-v3 on English WER at ~1/4 the size, much faster on CPU). Keep Faster-Whisper large-v3 for multilingual — Parakeet covers 25 languages, Whisper covers 99.
+
+### 4.2 Local TTS — fast filler tier
+**File:** `voice/tts.py` (`FILLER_PHRASES` mechanism)
+Independent of 1.4's engine decision, add a second lightweight TTS tier specifically for the 600ms filler mechanism. Kokoro-82M (Apache-2.0, 2-3GB VRAM, runs on CPU) fits — fillers are short and latency-critical, they don't need the full engine's quality.
+
+---
+
+## 5. Observer — move the vision model off GPU VRAM
+
+**Files:** `observer/analyzers.py` (`SceneAnalyzer`), `config.py`
+`SceneAnalyzer` currently sends `qwen2.5vl:7b` requests to `self._config.ollama_base_url` — the *same* GPU-bound Ollama instance used for conversation and local fallback. This was originally speced to run separately on CPU/system RAM (256GB available), which never made it into the current code.
+
+Observer only analyzes a frame every 30 seconds (`observer_analysis_frequency`, `SceneAnalyzer`'s own cooldown) — nowhere near latency-sensitive, so CPU inference taking 10-15 seconds per call is fine. Run a second Ollama instance bound to CPU only (`CUDA_VISIBLE_DEVICES=""`, separate port, e.g. 11435), add a new config field (e.g. `observer_ollama_url`) distinct from `ollama_base_url`, and point `SceneAnalyzer` at it. This frees several GB of VRAM on the RTX 5080 for whichever model comes out of Section 6.5.
+
+---
+
+## 6. Single-agent core (new construction, build alongside the current system)
+
+**Scope:** a new module — `src/archer/agents/core_agent.py` (or similar) — implementing a single local-primary conversational agent. It reuses the existing memory/store classes (`sqlite_store`, `chromadb_store`, `openmemory_store`, `redis_buffer`) and the event bus, but owns its own turn-processing and context-assembly logic. `orchestrator.py` and the current five-agent routing keep running unmodified — nothing gets cut over until this proves itself.
+
+**Why this shape:** Col wants ARCHER's actual moment-to-moment conversation to run on a local model rather than defaulting to cloud, with cloud models (Claude, NIM) called in only when a task genuinely needs them. The model doesn't need to be especially powerful — its job is understanding Col specifically, being fluent in human behavior/psychology, and knowing what's going on across ARCHER as a whole, not winning reasoning benchmarks.
+
+### 6.1 Persona consolidation — stance modifiers, not five agents, not one flat voice
+The five SOUL.md files (Assistant, Trainer, Therapist, Investment, Blindspot/Inventory) don't get deleted or run as separate routed agents. Their content gets restructured into retrievable **stance/communication-style guidance** that the single core agent pulls into context situationally — a therapeutic register when the conversation calls for it, a direct coaching register for fitness, without switching identity. One continuous agent, one shared memory and conversation state throughout.
+
+**Exception, non-negotiable:** the crisis-keyword safety override stays a hard, code-level rule — evaluated before anything else, not subject to retrieval scoring or context budget. This is Section 6.3 step 1 below.
+
+### 6.2 Domain knowledge stays retrieval-based, not folded into identity
+The psychology knowledge base (currently gated to `agent == "therapist"` in `_retrieve_memory_context()`) and the trainer knowledge collection should become unconditionally available to the single core agent's retrieval step, selected by the same domain-tag scoring that picks stance guidance — not walled off behind a persona check that no longer exists.
+
+### 6.3 Context-assembly pipeline (per turn, in order)
+
+1. **Safety pre-check** — plain code, not model-mediated. Same crisis-keyword scan as today. If triggered, short-circuits straight to a dedicated safety response, bypassing normal assembly entirely.
+2. **Core identity block** — static, ~200-400 tokens. Who ARCHER is, relationship framing, hard rules.
+3. **Situational stance signal** — the existing keyword-scoring tables (`_TRAINER_KEYWORDS`, `_THERAPIST_KEYWORDS`, etc.) run as-is, cheap and fast, no model call. Output becomes a weighted set of domain/register tags (not a routing decision) that determine which stance guidance from 6.1 gets pulled in.
+4. **Domain knowledge retrieval** — ChromaDB queries against `psychology_knowledge`/`trainer_knowledge`/etc., driven by the same tags from step 3, unconditionally available rather than persona-gated.
+5. **Personal memory retrieval** — OpenMemory search plus recent-turn continuity, as it works today.
+6. **ARCHER-wide activity awareness** — new. A small background process maintains a rolling plain-language status buffer (2-4 lines, e.g. "Observer flagged sedentary behavior 20 min ago"), refreshed on a timer or on significant events, decoupled from per-turn latency. The turn reads whatever's currently in the buffer rather than querying the event bus live.
+7. **Recent conversation history** — Tier 1, as today.
+
+**Budget:** target ~1-2K tokens for everything except raw conversation history, hard-capped. `_build_system_prompt()`'s current unbounded string concatenation is fine as one of five smaller prompts; it's a latency risk once it's the only path.
+
+### 6.4 Cloud-delegation triggers — deterministic for v1, not model-judged
+
+Three triggers, all pre-routing (decided before the local model starts generating, not mid-generation):
+
+1. **Explicit ask** — Col directly requests a cloud capability. Always honored.
+2. **Task-category classification** — cheap heuristic/pattern matching (same style as step 3 above, not a model call) for categories known to exceed local comfort: substantial code generation, long-document analysis, anything needing live external info.
+3. **Mechanical context overflow** — if what needs considering exceeds the local context budget from 6.3, that's an automatic trigger.
+
+Hold off on "local model self-assesses uncertainty and requests backup mid-generation" as a v2 idea — small local models aren't reliably calibrated for this yet, and it adds real complexity. Revisit once the deterministic version is proven.
+
+**Delegation targets are pluggable, not just Claude:** reuse the existing `anthropic` and NVIDIA NIM clients already instantiated in `orchestrator.py`. Route to Claude for reasoning/tool-use-heavy work; route to a NIM-hosted model (Kimi K2.5 per 2.2, or others) where that's the better fit.
+
+**Transparency:** reuse the existing filler-phrase mechanism with a distinct phrase for delegation ("let me check on that") rather than adding an explicit confirmation step — a cloud consult has no real-world side effects, unlike PC-control tools, so it doesn't need a confirm/proceed round-trip.
+
+**Fallback:** if cloud is unavailable when a trigger fires, degrade to the local model's best attempt with an honest caveat rather than failing hard.
+
+### 6.5 Local primary model — benchmark before picking
+
+Three candidates, all fit the RTX 5080's 16GB with the Section 5 Observer offload freeing additional headroom:
+- **Qwen3-8B** (FP8, ~8GB VRAM)
+- **Qwen3.6-27B** (INT4, ~14GB VRAM)
+- **Gemma 4 26B-A4B** (MoE, ~4B active params — may beat the dense 27B's quality-for-VRAM tradeoff)
+
+**Build a harness that tests the right thing** — not coding/reasoning leaderboards, since heavy code-gen and long-document work now delegate out by design (6.4). Measure:
+- Latency and VRAM under realistic concurrent load: idle, with STT+TTS active, and with the Observer profile active — not the model in isolation.
+- A fixed set of ARCHER-style prompts (casual check-in, emotionally loaded disclosure, vague request needing a clarifying question, memory-recall-dependent question, a case where stance guidance should shift register) — scored qualitatively by Col reading transcripts, not an automated metric.
+- Unsloth LoRA fine-tuning viability and rough training time on the 5080 for each candidate, since 6.6 depends on whichever one wins here.
+
+No automated winner — Antigravity assembles the data and transcripts, Col makes the call.
+
+### 6.6 Continual learning (depends on 6.5's outcome)
+
+Unsloth-based LoRA fine-tuning on a scheduled refresh, not live/continuous RL for v1. Training target is the **relational layer** specifically — tone, what communication style works, not facts (facts stay in retrieval per 6.3, so they remain correctable and current rather than baked into weights).
+
+1. Training-data extraction from the existing correction protocol and Tier 2 (SQLite) conversation logs, formatted as instruction-tuning pairs.
+2. Unsloth LoRA script (or Unsloth Studio) targeting whichever model wins 6.5.
+3. Manual-trigger refresh first — have Col review a few cycles' before/after behavior before any automatic scheduling gets turned on.
+
+---
+
+## Ground rules (unchanged from v1)
+
+- No timelines or target dates in any documentation.
+- Don't add CPU-fallback code paths silently — if a local model or service doesn't have GPU available where it's supposed to, fail loudly rather than degrading quietly. (Section 5's Observer CPU move is an intentional, explicit exception — that one's designed to run on CPU, not falling back to it.)
+- `pyttsx3` remains permanently forbidden.
+- Do the Phase 0 audit before starting — confirm this doc still matches `master`, report anything that's already fixed or already stale rather than silently skipping it.
+- Git-sourced skills/tools (e.g. OfficeCLI) are intentionally out of scope for this round — separate, unresolved discussion.

@@ -29,6 +29,7 @@ import time
 import threading
 import uuid
 from collections.abc import Generator
+from datetime import datetime
 from pathlib import Path
 
 from loguru import logger
@@ -83,12 +84,10 @@ _INVESTMENT_KEYWORDS = {
 
 _BLINDSPOT_KEYWORDS = {
     "grooming", "hygiene", "shower", "shave", "clothes", "outfit",
-    "clutter", "messy", "clean", "desk", "room", "surface",
-    "tasks", "unfinished", "started", "abandoned", "stuck",
-    "time", "late", "delay", "departure", "countdown",
-    "routine", "habit", "gym", "workout", "morning", "evening",
-    "tell", "promise", "commitment",
-    "hyperfocus", "paralysis", "bored", "distraction", "adhd", "meds", "medication", 
+    "clutter", "messy", "clean surface", "desk clutter",
+    "tasks abandoned", "procrastinating", "time blindness",
+    "morning routine", "evening routine", "daily routine", "habit tracking",
+    "hyperfocus", "paralysis", "boredom", "distraction", "adhd", "meds", "medication", 
     "overstimulated", "understimulated",
 }
 
@@ -538,6 +537,15 @@ class AgentOrchestrator:
         """Build the system prompt for an agent, including SOUL.md and memory context."""
         soul = self._souls.get(agent, f"You are ARCHER's {agent} agent.")
 
+        # Always inject current date/time so the LLM never gives stale dates
+        now = datetime.now()
+        soul = (
+            f"## Current Date & Time\n"
+            f"Today is {now.strftime('%A, %B %d, %Y')}. "
+            f"The current time is {now.strftime('%I:%M %p')}.\n"
+            f"Always use this when asked about dates or times.\n\n"
+        ) + soul
+
         # Therapist-specific: Add profiling status and observer data
         if agent == "therapist":
             status = self._sqlite.get_therapist_status()
@@ -974,6 +982,8 @@ class AgentOrchestrator:
         import requests
         import json
         
+        full_response = ""
+        
         system_prompt = self._build_system_prompt(agent)
         
         # Get conversation history
@@ -981,20 +991,19 @@ class AgentOrchestrator:
             # Match the limit used in _stream_claude
             messages = list(self._conversation_history[-10:])
         
-        # Format for Ollama (api/generate expects a raw prompt often, or we use api/chat)
-        # Using the prompt format from instructions:
-        prompt = f"{system_prompt}\n\n"
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            prompt += f"{role.upper()}: {content}\n"
-        prompt += f"USER: {text}\nASSISTANT:"
+        # Format for Ollama /api/chat
+        with self._history_lock:
+            # Rebuild messages for Ollama format
+            messages = [
+                {"role": "system", "content": system_prompt}
+            ] + list(self._conversation_history[-15:])
+            messages.append({"role": "user", "content": text})
         
         # Call Ollama API
-        url = f"{self._config.ollama_base_url}/api/generate"
+        url = f"{self._config.ollama_base_url}/api/chat"
         payload = {
             "model": self._config.local_fallback_model,
-            "prompt": prompt,
+            "messages": messages,
             "stream": True,
             "options": {
                 "temperature": self._config.agent_temperature,
@@ -1012,7 +1021,15 @@ class AgentOrchestrator:
                     break
                 if line:
                     data = json.loads(line)
-                    token = data.get("response", "")
+                    # Handle both /api/generate (response) and /api/chat (message.content)
+                    if "message" in data:
+                        token = data["message"].get("content", "")
+                    else:
+                        token = data.get("response", "")
+                    
+                    if not token: # skip empty tokens or end of stream
+                        continue
+                        
                     buffer += token
                     
                     # Yield complete sentences
@@ -1031,10 +1048,22 @@ class AgentOrchestrator:
                                     }
                                 ))
                             yield sentence.strip()
+                            full_response += sentence
                     buffer = sentences[-1]
             
             # Yield remaining text
             if buffer.strip():
+                if not full_response:
+                    elapsed = time.monotonic() - self._last_request_time
+                    self._bus.publish(Event(
+                        type=EventType.AGENT_RESPONSE_START,
+                        source="orchestrator",
+                        data={
+                            "agent": agent,
+                            "model": f"Local ({self._config.local_fallback_model})",
+                            "elapsed": elapsed
+                        }
+                    ))
                 yield buffer.strip()
                 
         except Exception as e:
@@ -1045,7 +1074,9 @@ class AgentOrchestrator:
         """Stream sentences from Ollama (local) for a specific agent."""
         try:
             import httpx
-
+            import json
+            
+            full_response = ""
             system_prompt = self._build_system_prompt(agent)
 
             with self._history_lock:
@@ -1057,9 +1088,9 @@ class AgentOrchestrator:
 
             with httpx.stream(
                 "POST",
-                "http://127.0.0.1:11434/api/chat",
+                f"{self._config.ollama_base_url}/api/chat",
                 json={
-                    "model": "qwen2.5:7b",
+                    "model": self._config.local_fallback_model,
                     "messages": messages,
                     "stream": True,
                 },
@@ -1071,7 +1102,7 @@ class AgentOrchestrator:
                         break
                     if not line:
                         continue
-                    import json
+                    
                     data = json.loads(line)
                     chunk = data.get("message", {}).get("content", "")
                     if not chunk:
@@ -1087,10 +1118,33 @@ class AgentOrchestrator:
                         sentence = buffer[:match.start()].strip()
                         buffer = buffer[match.end():]
                         if sentence:
+                            if not full_response:
+                                elapsed = time.monotonic() - self._last_request_time
+                                self._bus.publish(Event(
+                                    type=EventType.AGENT_RESPONSE_START,
+                                    source="orchestrator",
+                                    data={
+                                        "agent": agent,
+                                        "model": f"Local ({self._config.local_fallback_model})",
+                                        "elapsed": elapsed
+                                    }
+                                ))
                             yield sentence
+                            full_response += sentence
 
             remaining = buffer.strip()
             if remaining:
+                if not full_response:
+                    elapsed = time.monotonic() - self._last_request_time
+                    self._bus.publish(Event(
+                        type=EventType.AGENT_RESPONSE_START,
+                        source="orchestrator",
+                        data={
+                            "agent": agent,
+                            "model": f"Local ({self._config.local_fallback_model})",
+                            "elapsed": elapsed
+                        }
+                    ))
                 yield remaining
 
         except Exception as e:

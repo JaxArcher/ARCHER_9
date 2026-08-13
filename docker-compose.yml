@@ -49,13 +49,13 @@ services:
     profiles:
       - observer # Only started when observer is enabled (Phase 3+)
 
-  # --- Local TTS Server (Coqui XTTS-v2) ---
-  # High-quality local voice synthesis with GPU acceleration.
-  coqui-tts:
+  # --- Local TTS Server (Chatterbox / Resemble AI MIT) ---
+  # Real-time high-quality local voice synthesis with GPU acceleration.
+  chatterbox-tts:
     build:
-      context: ./docker/coqui-tts
+      context: ./docker/chatterbox
       dockerfile: Dockerfile
-    container_name: archer-coqui-tts
+    container_name: archer-chatterbox-tts
     ports:
       - "8103:8000"
     deploy:

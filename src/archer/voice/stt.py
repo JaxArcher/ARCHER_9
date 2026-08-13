@@ -85,8 +85,8 @@ class CloudSTT(STTBackend):
         return bool(self._config.elevenlabs_api_key)
 
 
-class LocalSTT(STTBackend):
-    """Faster-Whisper local STT backend (CUDA, float16)."""
+class ParakeetSTT(STTBackend):
+    """NVIDIA Parakeet TDT 0.6B v3 fast-path local STT backend for English."""
 
     def __init__(self) -> None:
         self._config = get_config()
@@ -97,22 +97,68 @@ class LocalSTT(STTBackend):
         if self._model is None:
             with self._lock:
                 if self._model is None:
+                    import nemo.collections.asr as nemo_asr
+                    self._model = nemo_asr.models.EncDecCTCModelBPE.from_pretrained(
+                        model_name="nvidia/parakeet-tdt-0.6b-v3"
+                    )
+                    logger.info("NVIDIA Parakeet TDT 0.6B v3 loaded.")
+        return self._model
+
+    def transcribe(self, audio_data: bytes, sample_rate: int = 16000) -> str:
+        """Transcribe English audio using Parakeet TDT."""
+        try:
+            model = self._get_model()
+            audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+            results = model.transcribe([audio_array])
+            text = results[0] if results else ""
+            logger.debug(f"Parakeet STT result: '{text}'")
+            return text.strip()
+        except Exception as e:
+            logger.error(f"Parakeet STT error: {e}")
+            raise
+
+    def is_available(self) -> bool:
+        try:
+            import nemo
+            import torch
+            return torch.cuda.is_available()
+        except ImportError:
+            return False
+
+
+class LocalSTT(STTBackend):
+    """Faster-Whisper or Parakeet local STT backend."""
+
+    def __init__(self) -> None:
+        self._config = get_config()
+        self._whisper = None
+        self._parakeet = ParakeetSTT()
+        self._lock = threading.Lock()
+
+    def _get_whisper_model(self):
+        if self._whisper is None:
+            with self._lock:
+                if self._whisper is None:
                     from faster_whisper import WhisperModel
 
-                    self._model = WhisperModel(
+                    self._whisper = WhisperModel(
                         self._config.stt_model,
                         device="cuda",
                         compute_type="float16",
                     )
                     logger.info(f"Faster-Whisper model loaded: {self._config.stt_model}")
-        return self._model
+        return self._whisper
 
     def transcribe(self, audio_data: bytes, sample_rate: int = 16000) -> str:
-        """Transcribe using Faster-Whisper locally."""
-        try:
-            model = self._get_model()
+        """Transcribe using selected provider (Whisper or Parakeet)."""
+        if getattr(self._config, "stt_provider", "whisper") == "parakeet" and self._parakeet.is_available():
+            try:
+                return self._parakeet.transcribe(audio_data, sample_rate)
+            except Exception as e:
+                logger.warning(f"Parakeet failed, falling back to Whisper: {e}")
 
-            # Convert bytes to float32 numpy array
+        try:
+            model = self._get_whisper_model()
             audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
 
             segments, info = model.transcribe(

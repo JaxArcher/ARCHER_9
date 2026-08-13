@@ -48,10 +48,8 @@ class ToggleService:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            # Reset to configured default mode on every startup.
-            # This prevents fallback_to_local() from persisting across restarts.
             conn.execute("""
-                INSERT OR REPLACE INTO toggle_state (key, value, updated_at)
+                INSERT OR IGNORE INTO toggle_state (key, value, updated_at)
                 VALUES ('mode', ?, CURRENT_TIMESTAMP)
             """, (self._config.default_mode,))
             conn.commit()

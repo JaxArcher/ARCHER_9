@@ -49,6 +49,8 @@ _AGENT_COLORS = {
     "therapist": "#5B2A8C",
     "finance": "#8C6B00",
     "investment": "#C75B00",
+    "blindspot": "#9932CC",
+    "inventory": "#20B2AA",
     "observer": "#888888",
     "system": "#666666",
 }

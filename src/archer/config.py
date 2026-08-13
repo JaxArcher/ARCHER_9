@@ -69,16 +69,17 @@ class ArcherConfig(BaseSettings):
         return v
 
     # --- Voice Pipeline ---
-    wake_word: str = "hey_archer"
+    wake_word: str = "hey_archer"  # Supported built-in fallback triggers: Alexa, Hey Jarvis, Hey Mycroft, Hey Rhasspy
     wake_word_threshold: float = 0.3
     vad_aggressiveness: int = 2  # webrtcvad: 0-3. Level 3 rejects speech on low-gain mics.
+    stt_provider: str = Field(default="whisper", alias="ARCHER_STT_PROVIDER")  # whisper or parakeet
     stt_model: str = "base.en"  # Faster-Whisper model for local STT
     stt_model_large: str = "large-v3"  # For accuracy mode
     voice_auth_threshold: float = 0.85  # Cosine similarity for voice verification
     filler_timeout_ms: int = 600  # Play filler if no response in 600ms
 
     # --- Agent ---
-    claude_model: str = "claude-sonnet-4-5-20250929"
+    claude_model: str = "claude-sonnet-5"
     max_tokens: int = 4096
     agent_temperature: float = 0.7
 
@@ -111,12 +112,13 @@ class ArcherConfig(BaseSettings):
     # Agent-specific model selection
     assistant_model: str = Field(default="moonshotai/kimi-k2.5", alias="ARCHER_ASSISTANT_MODEL")
     therapist_model: str = Field(default="qwen/qwen3.5-397b-a17b", alias="ARCHER_THERAPIST_MODEL")
-    trainer_model: str = Field(default="meta/llama-3.3-70b-instruct", alias="ARCHER_TRAINER_MODEL")
+    trainer_model: str = Field(default="qwen/qwen3.6-35b-a3b", alias="ARCHER_TRAINER_MODEL")
     investment_model: str = Field(default="qwen/qwen3.5-397b-a17b", alias="ARCHER_INVESTMENT_MODEL")
     observer_model: str = Field(default="qwen2.5vl:7b", alias="ARCHER_OBSERVER_MODEL")
 
     # Local Vision (Ollama)
-    ollama_base_url: str = "http://localhost:11434"
+    ollama_base_url: str = Field(default="http://127.0.0.1:11434", alias="OLLAMA_HOST")
+    observer_ollama_url: str = Field(default="http://127.0.0.1:11435", alias="OBSERVER_OLLAMA_HOST")  # CPU-bound Ollama instance
     use_local_vision: bool = True
 
     # Local Fallback

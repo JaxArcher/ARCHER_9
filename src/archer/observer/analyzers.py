@@ -298,14 +298,13 @@ class SceneAnalyzer:
         self._check_interval = 60.0
         self._latest_description: str = ""
         self._model = self._config.observer_model
-        self._ollama_url = f"{self._config.ollama_base_url}/api/generate"
+        self._ollama_url = f"{self._config.observer_ollama_url}/api/generate"
 
-    def analyze(self, frame: np.ndarray) -> list[DetectionResult]:
+    def analyze(self, frame: np.ndarray, camera_source: str = "webcam", room: str = "main_office") -> list[DetectionResult]:
         """
-        Analyze a frame using local Qwen2-VL.
+        Analyze a frame using local Qwen2-VL on CPU Ollama.
 
-        Returns a DetectionResult with a text description of the scene.
-        Respects a cooldown and ensures zero cloud API calls for vision.
+        Returns a DetectionResult with scene description, room location, and structured objects.
         """
         now = time.monotonic()
 
@@ -317,20 +316,25 @@ class SceneAnalyzer:
 
         try:
             import httpx
+            import json
 
             b64_frame = _frame_to_jpeg_b64(frame, quality=60)
             if not b64_frame:
                 return []
 
+            prompt = (
+                "Analyze this frame. Respond with valid JSON strictly matching this structure:\n"
+                "{\n"
+                '  "description": "2-3 concise sentences of what you see",\n'
+                '  "objects": [{"object_type": "item_name", "confidence": 0.9, "location": "desk"}]\n'
+                "}"
+            )
+
             resp = httpx.post(
                 self._ollama_url,
                 json={
                     "model": self._model,
-                    "prompt": (
-                        "Describe what you see in this webcam frame. "
-                        "Identify: people present, posture, and notable objects. "
-                        "Keep it to 2-3 concise sentences."
-                    ),
+                    "prompt": prompt,
                     "images": [b64_frame],
                     "stream": False,
                 },
@@ -339,17 +343,37 @@ class SceneAnalyzer:
             resp.raise_for_status()
             data = resp.json()
 
-            description = data.get("response", "").strip()
+            raw_resp = data.get("response", "").strip()
             self._last_analysis = now
+            
+            # Parse structured output or fallback to raw text
+            description = raw_resp
+            detected_objects = []
+            try:
+                # Find JSON block if enclosed in markdown
+                if "```json" in raw_resp:
+                    json_str = raw_resp.split("```json")[1].split("```")[0].strip()
+                elif "```" in raw_resp:
+                    json_str = raw_resp.split("```")[1].split("```")[0].strip()
+                else:
+                    json_str = raw_resp
+                parsed = json.loads(json_str)
+                description = parsed.get("description", raw_resp)
+                detected_objects = parsed.get("objects", [])
+            except Exception:
+                pass
+
             self._latest_description = description
 
             if description:
                 return [DetectionResult(
-                    source="webcam",
+                    source=camera_source,
                     event_type="scene",
                     confidence=0.85,
                     data={
                         "description": description,
+                        "objects": detected_objects,
+                        "room": room,
                         "model": self._model,
                         "local": True,
                     },
@@ -357,7 +381,7 @@ class SceneAnalyzer:
             return []
 
         except Exception as e:
-            logger.debug(f"Local scene analysis (Ollama) failed: {e}")
+            logger.debug(f"Local scene analysis (Ollama CPU) failed: {e}")
             self._available = False
             self._last_check = time.monotonic()
             self._last_analysis = now

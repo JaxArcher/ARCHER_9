@@ -29,15 +29,13 @@ dependencies = [
     "sounddevice==0.5.1",
     "soundfile==0.13.1",
     "numpy==1.26.4",
+    "pyaec==1.0.1",
 
     # --- Voice Authentication ---
     "speechbrain==1.0.2",
 
     # --- LLM / Agent ---
     "anthropic==0.43.0",
-    "langgraph==0.2.65",
-    "langchain-core==0.3.31",
-    "langchain-anthropic==0.3.4",
 
     # --- Memory ---
     "aiosqlite==0.20.0",
@@ -55,9 +53,6 @@ dependencies = [
     "mss==9.0.2",
     "Pillow==11.1.0",
     "playwright==1.49.1",
-
-    # --- Finance/Investment (Phase 4) ---
-    "yfinance==0.2.51",
 
     # --- Scheduling ---
     "apscheduler==3.10.4",

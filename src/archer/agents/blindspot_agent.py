@@ -66,7 +66,7 @@ class BlindspotAgent:
 
     def _on_observation(self, event: Event) -> None:
         """Handle vision/system observations."""
-        payload = event.data.get("payload", {})
+        payload = event.data.get("payload", event.data)
         source = event.data.get("source", "unknown")
         
         if source == "webcam":

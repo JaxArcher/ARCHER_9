@@ -93,13 +93,13 @@ class CloudTTS(TTSBackend):
 
 
 class LocalTTS(TTSBackend):
-    """IndexTTS2 local TTS backend via Docker container."""
+    """Chatterbox (Resemble AI) local TTS backend via Docker container."""
 
     def __init__(self) -> None:
         self._config = get_config()
 
     def synthesize(self, text: str) -> tuple[bytes, int]:
-        """Synthesize text using the local IndexTTS2 Docker container."""
+        """Synthesize text using the local Chatterbox TTS Docker container."""
         import httpx
 
         try:

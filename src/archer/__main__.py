@@ -188,6 +188,19 @@ def main() -> None:
         logger.warning(f"Observer initialization failed (non-fatal): {e}")
         logger.info("Observer features disabled.")
 
+    # Start API Server (Phase 1 / Mobile Bridge)
+    def _start_api_server():
+        try:
+            import uvicorn
+            from archer.server import app, set_orchestrator
+            set_orchestrator(orchestrator)
+            logger.info(f"Starting API Server on {config.api_host}:{config.api_port}...")
+            uvicorn.run(app, host=config.api_host, port=config.api_port, log_level="warning")
+        except Exception as e:
+            logger.warning(f"API Server failed to start: {e}")
+
+    threading.Thread(target=_start_api_server, daemon=True, name="APIServer").start()
+
     # Start PyQt6 GUI (must be on main thread)
     logger.info("Starting GUI...")
     from PyQt6.QtWidgets import QApplication

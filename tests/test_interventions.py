@@ -195,7 +195,7 @@ class TestInterventionEngine(unittest.TestCase):
         from archer.core.event_bus import Event, EventType
 
         event = Event(
-            type=EventType.OBSERVATION,
+            type=EventType.OBSERVATION_EVENT,
             source="observer.sedentary",
             data={
                 "event_type": "sedentary",
@@ -215,7 +215,7 @@ class TestInterventionEngine(unittest.TestCase):
         from archer.core.event_bus import Event, EventType
 
         event = Event(
-            type=EventType.OBSERVATION,
+            type=EventType.OBSERVATION_EVENT,
             source="observer.sustained_emotion",
             data={
                 "event_type": "sustained_emotion",
@@ -235,7 +235,7 @@ class TestInterventionEngine(unittest.TestCase):
         from archer.core.event_bus import Event, EventType
 
         event = Event(
-            type=EventType.OBSERVATION,
+            type=EventType.OBSERVATION_EVENT,
             source="observer.sustained_emotion",
             data={
                 "event_type": "sustained_emotion",
@@ -252,7 +252,7 @@ class TestInterventionEngine(unittest.TestCase):
         from archer.core.event_bus import Event, EventType
 
         event = Event(
-            type=EventType.OBSERVATION,
+            type=EventType.OBSERVATION_EVENT,
             source="observer.sedentary",
             data={
                 "event_type": "sedentary",
@@ -268,7 +268,7 @@ class TestInterventionEngine(unittest.TestCase):
         from archer.core.event_bus import Event, EventType
 
         event = Event(
-            type=EventType.OBSERVATION,
+            type=EventType.OBSERVATION_EVENT,
             source="observer.sedentary",
             data={
                 "event_type": "sedentary",
@@ -308,7 +308,7 @@ class TestInterventionEngine(unittest.TestCase):
         from archer.core.event_bus import Event, EventType
 
         event = Event(
-            type=EventType.OBSERVATION,
+            type=EventType.OBSERVATION_EVENT,
             source="observer.posture",
             data={
                 "event_type": "posture",
