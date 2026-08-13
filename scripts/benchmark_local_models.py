@@ -1,10 +1,10 @@
 """
 ARCHER Local Primary Model Evaluation Benchmark Harness (Section 6.5).
 
-Evaluates 3 local primary model candidates for CoreAgent:
-- Qwen3-8B (FP8) -> Ollama tag 'qwen3:8b'
-- Qwen3.6-27B (INT4) -> Ollama tag 'qwen3.6:27b'
-- Gemma 4 26B-A4B (MoE) -> Ollama tag 'gemma4:26b-a4b'
+Evaluates local primary model candidates for CoreAgent:
+- Qwen2.5-7B (Q4_K_M) -> Ollama tag 'qwen2.5:7b'
+- Qwen2.5-14B (Q4_K_M) -> Ollama tag 'qwen2.5:14b'
+- Gemma2-27B (Q4_K_M) -> Ollama tag 'gemma2:27b'
 
 Measures:
 1. TTFT (ms) & TPS across 3 load conditions:
@@ -15,6 +15,10 @@ Measures:
 3. Unsloth LoRA fine-tuning viability & time estimate check.
 4. Executes 5 ARCHER prompts through CoreAgent.build_context_system_prompt().
 
+Enforces:
+- Upfront availability validation (exits immediately if model is missing).
+- Strict error propagation (no 0.0/empty placeholder outputs).
+- Console smoke-test preview before full benchmark execution.
 Saves full transcripts and raw metrics to JSON for human evaluation.
 """
 
@@ -28,6 +32,11 @@ import subprocess
 import threading
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+
+import httpx
+
+# Ensure unbuffered output on Windows
+sys.stdout.reconfigure(line_buffering=True)
 
 # Add project root to Python path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
@@ -67,21 +76,55 @@ EVAL_PROMPTS = [
 
 CANDIDATE_MODELS = [
     {
-        "name": "Qwen3-8B (FP8)",
-        "ollama_tag": "qwen3:8b",
+        "name": "Qwen2.5-7B (Q4_K_M)",
+        "ollama_tag": "qwen2.5:7b",
         "vram_budget_gb": 8.0
     },
     {
-        "name": "Qwen3.6-27B (INT4)",
-        "ollama_tag": "qwen3.6:27b",
-        "vram_budget_gb": 14.0
+        "name": "Qwen2.5-14B (Q4_K_M)",
+        "ollama_tag": "qwen2.5:14b",
+        "vram_budget_gb": 12.0
     },
     {
-        "name": "Gemma 4 26B-A4B (MoE)",
-        "ollama_tag": "gemma4:26b-a4b",
-        "vram_budget_gb": 10.0
+        "name": "Gemma2-27B (Q4_K_M)",
+        "ollama_tag": "gemma2:27b",
+        "vram_budget_gb": 16.0
     }
 ]
+
+
+def check_ollama_models_available(ollama_url: str = "http://127.0.0.1:11434") -> List[str]:
+    """Query Ollama API and return list of available model tags."""
+    try:
+        resp = httpx.get(f"{ollama_url}/api/tags", timeout=30.0)
+        if resp.status_code == 200:
+            data = resp.json()
+            return [m.get("name", "") for m in data.get("models", [])]
+    except Exception as e:
+        print(f"CRITICAL ERROR: Could not connect to Ollama at {ollama_url}: {e}")
+        sys.exit(1)
+    return []
+
+
+def verify_upfront_availability(ollama_url: str = "http://127.0.0.1:11434") -> None:
+    """Verify all candidate models exist upfront before running. Exit immediately if any missing."""
+    available = check_ollama_models_available(ollama_url)
+    missing = []
+    for cand in CANDIDATE_MODELS:
+        tag = cand["ollama_tag"]
+        if tag not in available and f"{tag}:latest" not in available:
+            missing.append(tag)
+
+    if missing:
+        print("=" * 70)
+        print("CRITICAL ERROR: Missing Candidate Models in Ollama!")
+        print(f"Missing tags: {missing}")
+        print(f"Available tags on Ollama: {available}")
+        print("Please pull missing tags before running the benchmark.")
+        print("=" * 70)
+        sys.exit(1)
+
+    print("[UPFRONT CHECK PASSED] All candidate models are loaded in Ollama.")
 
 
 def get_vram_usage_gb() -> float:
@@ -117,7 +160,7 @@ def check_unsloth_lora_viability(model_name: str) -> Dict[str, Any]:
         return {"viable": False, "error": str(e)}
 
 
-def run_stt_tts_background_load(duration_s: float, stop_event: threading.Event) -> None:
+def run_stt_tts_background_load(stop_event: threading.Event) -> None:
     """Simulate active STT/TTS pipeline load during benchmarking."""
     stt = STTService()
     tts = TTSService()
@@ -131,18 +174,66 @@ def run_stt_tts_background_load(duration_s: float, stop_event: threading.Event) 
             time.sleep(0.5)
 
 
+def run_console_smoke_tests(core_agent: CoreAgent, ollama_url: str = "http://127.0.0.1:11434") -> None:
+    """Run a single smoke-test generation call for each candidate model and print to console."""
+    print("\n" + "=" * 70)
+    print("  RUNNING CANDIDATE MODEL SMOKE TESTS (Console Verification)")
+    print("=" * 70)
+
+    test_prompt = "Hello ARCHER, confirm system status in two brief sentences."
+    system_prompt, _ = core_agent.build_context_system_prompt(test_prompt)
+
+    for candidate in CANDIDATE_MODELS:
+        name = candidate["name"]
+        tag = candidate["ollama_tag"]
+        print(f"\n[Smoke Test -> {name} ({tag})]")
+
+        payload = {
+            "model": tag,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": test_prompt}
+            ],
+            "stream": False
+        }
+        start_t = time.monotonic()
+        resp = httpx.post(f"{ollama_url}/api/chat", json=payload, timeout=300.0)
+        elapsed_ms = (time.monotonic() - start_t) * 1000.0
+
+        if resp.status_code != 200:
+            raise RuntimeError(f"Smoke test failed for '{tag}'! Ollama returned HTTP {resp.status_code}: {resp.text}")
+
+        data = resp.json()
+        resp_text = data.get("message", {}).get("content", "").strip()
+        if not resp_text:
+            raise RuntimeError(f"Smoke test failed for '{tag}'! Received empty response text.")
+
+        print(f"  Latency: {elapsed_ms:.0f}ms")
+        print(f"  Generated Text Preview:\n  \"{resp_text}\"")
+        print("-" * 50)
+
+
 def run_benchmark(ollama_url: str = "http://127.0.0.1:11434") -> Dict[str, Any]:
     """Run full evaluation benchmark suite across candidate models."""
-    import httpx
+    print("=" * 70)
+    print("  ARCHER LOCAL PRIMARY MODEL BENCHMARK HARNESS (Section 6.5)")
+    print("=" * 70)
+
+    # 1. Upfront Model Availability Check (Exits if missing)
+    verify_upfront_availability(ollama_url)
 
     core_agent = CoreAgent()
+
+    # 2. Console Smoke-Test Preview (Prints generated text for visual inspection)
+    run_console_smoke_tests(core_agent, ollama_url)
+
     benchmark_report: Dict[str, Any] = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "candidates": {}
     }
 
-    print("=" * 70)
-    print("  ARCHER LOCAL PRIMARY MODEL BENCHMARK HARNESS (Section 6.5)")
+    print("\n" + "=" * 70)
+    print("  STARTING FULL 3-CONDITION BENCHMARK SUITE")
     print("=" * 70)
 
     for candidate in CANDIDATE_MODELS:
@@ -169,7 +260,7 @@ def run_benchmark(ollama_url: str = "http://127.0.0.1:11434") -> Dict[str, Any]:
             load_thread = None
 
             if cond_key == "condition_b_stt_tts_active":
-                load_thread = threading.Thread(target=run_stt_tts_background_load, args=(30, stop_load), daemon=True)
+                load_thread = threading.Thread(target=run_stt_tts_background_load, args=(stop_load,), daemon=True)
                 load_thread.start()
 
             vram_start = get_vram_usage_gb()
@@ -180,50 +271,50 @@ def run_benchmark(ollama_url: str = "http://127.0.0.1:11434") -> Dict[str, Any]:
                 prompt_text = item["prompt"]
                 cat = item["category"]
 
-                # 4. Use real CoreAgent.build_context_system_prompt()
+                # CoreAgent.build_context_system_prompt() context assembly
                 system_prompt, cloud_trigger = core_agent.build_context_system_prompt(prompt_text)
 
                 start_t = time.monotonic()
-                try:
-                    payload = {
-                        "model": tag,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": prompt_text}
-                        ],
-                        "stream": False
-                    }
-                    resp = httpx.post(f"{ollama_url}/api/chat", json=payload, timeout=90.0)
-                    elapsed_ms = (time.monotonic() - start_t) * 1000.0
+                payload = {
+                    "model": tag,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt_text}
+                    ],
+                    "stream": False
+                }
+                resp = httpx.post(f"{ollama_url}/api/chat", json=payload, timeout=300.0)
+                elapsed_ms = (time.monotonic() - start_t) * 1000.0
 
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        resp_msg = data.get("message", {}).get("content", "")
-                        eval_count = data.get("eval_count", len(resp_msg.split()))
-                        eval_duration_ns = data.get("eval_duration", 1)
-                        tps = (eval_count / (eval_duration_ns / 1e9)) if eval_duration_ns > 0 else 0.0
+                if resp.status_code != 200:
+                    raise RuntimeError(f"Benchmark generation failed for candidate '{tag}' on prompt '{cat}'! HTTP {resp.status_code}")
 
-                        ttft_list.append(elapsed_ms)
-                        tps_list.append(tps)
+                data = resp.json()
+                resp_msg = data.get("message", {}).get("content", "").strip()
+                if not resp_msg:
+                    raise RuntimeError(f"Candidate '{tag}' returned empty response text for prompt '{cat}'.")
 
-                        # Record transcript on GPU Idle condition
-                        if cond_key == "condition_a_gpu_idle":
-                            model_results["transcripts"].append({
-                                "id": item["id"],
-                                "category": cat,
-                                "prompt": prompt_text,
-                                "assembled_system_prompt": system_prompt,
-                                "cloud_trigger": cloud_trigger,
-                                "model_response": resp_msg,
-                                "ttft_ms": round(elapsed_ms, 1),
-                                "tps": round(tps, 2)
-                            })
+                eval_count = data.get("eval_count", len(resp_msg.split()))
+                eval_duration_ns = data.get("eval_duration", 1)
+                tps = (eval_count / (eval_duration_ns / 1e9)) if eval_duration_ns > 0 else (len(resp_msg.split()) / (elapsed_ms / 1000.0))
 
-                        print(f"    [OK] ({cat[:20]}) -> TTFT: {elapsed_ms:.0f}ms | {tps:.1f} tok/s")
-                    else:
-                        print(f"    [SKIP] Ollama tag '{tag}' returned HTTP {resp.status_code}")
-                except Exception as e:
-                    print(f"    [SKIP] Could not benchmark prompt on '{tag}': {e}")
+                ttft_list.append(elapsed_ms)
+                tps_list.append(tps)
+
+                # Record transcript on GPU Idle condition
+                if cond_key == "condition_a_gpu_idle":
+                    model_results["transcripts"].append({
+                        "id": item["id"],
+                        "category": cat,
+                        "prompt": prompt_text,
+                        "assembled_system_prompt": system_prompt,
+                        "cloud_trigger": cloud_trigger,
+                        "model_response": resp_msg,
+                        "ttft_ms": round(elapsed_ms, 1),
+                        "tps": round(tps, 2)
+                    })
+
+                print(f"    [OK] ({cat[:25]}) -> TTFT: {elapsed_ms:.0f}ms | {tps:.1f} tok/s")
 
             if load_thread:
                 stop_load.set()
@@ -233,6 +324,9 @@ def run_benchmark(ollama_url: str = "http://127.0.0.1:11434") -> Dict[str, Any]:
 
             avg_ttft = sum(ttft_list) / len(ttft_list) if ttft_list else 0.0
             avg_tps = sum(tps_list) / len(tps_list) if tps_list else 0.0
+
+            if avg_ttft == 0.0 or avg_tps == 0.0:
+                raise RuntimeError(f"Invalid zero metric calculated for candidate '{tag}' under condition '{cond_label}'.")
 
             model_results["metrics_by_condition"][cond_key] = {
                 "label": cond_label,
