@@ -11,6 +11,7 @@ All other voice pipeline components receive audio data through queues.
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
