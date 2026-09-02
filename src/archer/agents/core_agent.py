@@ -122,6 +122,20 @@ class CoreAgent:
         self._bus.subscribe(EventType.OBSERVATION_EVENT, self._on_observation)
         logger.info(f"CoreAgent (Single-Agent Architecture) initialized with primary model: {self.primary_model}")
 
+    @property
+    def active_agent(self) -> str:
+        """Compatibility property for server/GUI components."""
+        return "core_agent"
+
+    @property
+    def session_id(self) -> str:
+        """Compatibility property for server/GUI components."""
+        return "core_agent"
+
+    def process_request(self, user_input: str) -> str:
+        """Synchronous full-turn string generation (compatibility method)."""
+        return " ".join(list(self.process_turn_streaming(user_input)))
+
     def _on_observation(self, event: Event) -> None:
         """Update rolling activity status buffer on significant events."""
         event_type = event.data.get("event_type", "observation")

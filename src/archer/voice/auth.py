@@ -50,27 +50,41 @@ class VoiceAuthenticator:
     def initialize(self) -> None:
         """Load the speaker verification model and enrolled embedding."""
         try:
-            # Patch torchaudio if list_audio_backends was removed (torchaudio >= 2.10)
+            import shutil
             import torchaudio
+            import huggingface_hub
+            import huggingface_hub.errors
+
+            # Patch torchaudio if list_audio_backends was removed (torchaudio >= 2.10)
             if not hasattr(torchaudio, "list_audio_backends"):
                 torchaudio.list_audio_backends = lambda: ["soundfile"]
 
-            # Windows: force huggingface_hub to use copies instead of symlinks.
-            # In huggingface_hub >= 1.x, the module must be imported explicitly
-            # (attribute access on the top-level package doesn't auto-resolve it).
-            from huggingface_hub import constants as hf_constants
-            hf_constants.HF_HUB_DISABLE_SYMLINKS_WARNING = True
+            # Patch huggingface_hub for use_auth_token parameter mapping
+            _orig_hf_download = huggingface_hub.hf_hub_download
+            def _patched_hf_hub_download(*args, **kwargs):
+                filename = kwargs.get("filename", "")
+                if "use_auth_token" in kwargs:
+                    token_val = kwargs.pop("use_auth_token")
+                    if "token" not in kwargs and token_val is not None:
+                        kwargs["token"] = token_val
+                try:
+                    return _orig_hf_download(*args, **kwargs)
+                except Exception as e:
+                    if filename == "custom.py" or "NotFoundError" in type(e).__name__:
+                        raise ValueError(f"File not found on HuggingFace Hub: {filename}") from e
+                    raise
+            huggingface_hub.hf_hub_download = _patched_hf_hub_download
 
-            from huggingface_hub import file_download as _hf_file_download
-            _orig_create_symlink = getattr(_hf_file_download, '_create_symlink', None)
-            if _orig_create_symlink:
-                import shutil
-                def _copy_instead_of_symlink(src, dst):
-                    try:
-                        _orig_create_symlink(src, dst)
-                    except OSError:
-                        shutil.copy2(str(src), str(dst))
-                _hf_file_download._create_symlink = _copy_instead_of_symlink
+            # Patch SpeechBrain fetch for symlinks on Windows
+            import speechbrain.utils.fetching as sb_fetch
+            _orig_link = sb_fetch.link_with_strategy
+            def _patched_link(src, dst, strategy):
+                try:
+                    return _orig_link(src, dst, strategy)
+                except OSError:
+                    shutil.copy2(src, dst)
+                    return dst
+            sb_fetch.link_with_strategy = _patched_link
 
             from speechbrain.inference.speaker import SpeakerRecognition
 

@@ -65,18 +65,18 @@ class ChatResponse(BaseModel):
     conversation_id: str
 
 
-# Global orchestrator instance (singleton)
+# Global orchestrator / agent instance (singleton)
 _orchestrator = None
 
 def get_orchestrator():
     global _orchestrator
     if _orchestrator is None:
-        # Fallback initialization if not injected by main process
-        _orchestrator = AgentOrchestrator()
+        from archer.agents.core_agent import CoreAgent
+        _orchestrator = CoreAgent()
     return _orchestrator
 
-def set_orchestrator(orch: AgentOrchestrator):
-    """Inject a pre-initialized orchestrator instance."""
+def set_orchestrator(orch: Any):
+    """Inject a pre-initialized agent or orchestrator instance."""
     global _orchestrator
     _orchestrator = orch
 

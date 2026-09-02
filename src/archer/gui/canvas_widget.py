@@ -2,8 +2,9 @@ from PyQt6.QtCore import QUrl, Qt
 from PyQt6.QtWidgets import QApplication
 import os
 
-# CRITICAL: Must set this BEFORE importing QWebEngineWidgets
-QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+# CRITICAL: Must set this BEFORE importing QWebEngineWidgets and creating QApplication instance
+if not QApplication.instance():
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 

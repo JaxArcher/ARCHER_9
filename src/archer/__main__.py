@@ -65,6 +65,15 @@ def setup_logging() -> None:
 
 def main() -> None:
     """Main entry point for ARCHER."""
+    # Set Qt attribute for QWebEngineView BEFORE any QCoreApplication/QApplication instance is created
+    try:
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt
+        if not QApplication.instance():
+            QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+    except Exception:
+        pass
+
     setup_logging()
     logger.info("=" * 60)
     logger.info("  ARCHER — Advanced Responsive Computing Helper")
@@ -192,7 +201,7 @@ def main() -> None:
         try:
             import uvicorn
             from archer.server import app, set_orchestrator
-            set_orchestrator(orchestrator)
+            set_orchestrator(core_agent)
             logger.info(f"Starting API Server on {config.api_host}:{config.api_port}...")
             uvicorn.run(app, host=config.api_host, port=config.api_port, log_level="warning")
         except Exception as e:
