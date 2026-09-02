@@ -35,8 +35,9 @@ from typing import Dict, Any, List, Optional
 
 import httpx
 
-# Ensure unbuffered output on Windows
-sys.stdout.reconfigure(line_buffering=True)
+# Ensure unbuffered UTF-8 output on Windows
+sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 # Add project root to Python path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
@@ -76,18 +77,18 @@ EVAL_PROMPTS = [
 
 CANDIDATE_MODELS = [
     {
-        "name": "Qwen2.5-7B (Q4_K_M)",
-        "ollama_tag": "qwen2.5:7b",
+        "name": "Qwen3-8B",
+        "ollama_tag": "qwen3:8b",
         "vram_budget_gb": 8.0
     },
     {
-        "name": "Qwen2.5-14B (Q4_K_M)",
-        "ollama_tag": "qwen2.5:14b",
-        "vram_budget_gb": 12.0
+        "name": "Qwen3.6-27B",
+        "ollama_tag": "qwen3.6:27b",
+        "vram_budget_gb": 16.0
     },
     {
-        "name": "Gemma2-27B (Q4_K_M)",
-        "ollama_tag": "gemma2:27b",
+        "name": "Gemma4-26B",
+        "ollama_tag": "gemma4:26b",
         "vram_budget_gb": 16.0
     }
 ]
@@ -174,8 +175,21 @@ def run_stt_tts_background_load(stop_event: threading.Event) -> None:
             time.sleep(0.5)
 
 
+def run_observer_background_load(stop_event: threading.Event) -> None:
+    """Simulate active Observer background vision/audio frame processing during benchmarking."""
+    import numpy as np
+    while not stop_event.is_set():
+        try:
+            dummy_frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+            _ = np.mean(dummy_frame)
+            _ = np.std(dummy_frame)
+            time.sleep(0.1)
+        except Exception:
+            time.sleep(0.1)
+
+
 def run_console_smoke_tests(core_agent: CoreAgent, ollama_url: str = "http://127.0.0.1:11434") -> None:
-    """Run a single smoke-test generation call for each candidate model and print to console."""
+    """Run a single smoke-test generation call for each candidate model with pre-warming retries."""
     print("\n" + "=" * 70)
     print("  RUNNING CANDIDATE MODEL SMOKE TESTS (Console Verification)")
     print("=" * 70)
@@ -196,12 +210,24 @@ def run_console_smoke_tests(core_agent: CoreAgent, ollama_url: str = "http://127
             ],
             "stream": False
         }
-        start_t = time.monotonic()
-        resp = httpx.post(f"{ollama_url}/api/chat", json=payload, timeout=300.0)
-        elapsed_ms = (time.monotonic() - start_t) * 1000.0
 
-        if resp.status_code != 200:
-            raise RuntimeError(f"Smoke test failed for '{tag}'! Ollama returned HTTP {resp.status_code}: {resp.text}")
+        # Up to 3 pre-warming retries for models requiring internal context fitting (e.g. Gemma4)
+        resp = None
+        elapsed_ms = 0.0
+        for attempt in range(1, 4):
+            start_t = time.monotonic()
+            try:
+                resp = httpx.post(f"{ollama_url}/api/chat", json=payload, timeout=900.0)
+                elapsed_ms = (time.monotonic() - start_t) * 1000.0
+                if resp.status_code == 200:
+                    break
+                print(f"  [Attempt {attempt}] Received HTTP {resp.status_code}, retrying in 3s for pre-warming...")
+            except Exception as e:
+                print(f"  [Attempt {attempt}] Exception: {e}, retrying in 3s...")
+            time.sleep(3.0)
+
+        if not resp or resp.status_code != 200:
+            raise RuntimeError(f"Smoke test failed for '{tag}'! Ollama returned HTTP {resp.status_code if resp else 'No Response'}: {resp.text if resp else ''}")
 
         data = resp.json()
         resp_text = data.get("message", {}).get("content", "").strip()
@@ -233,7 +259,7 @@ def run_benchmark(ollama_url: str = "http://127.0.0.1:11434") -> Dict[str, Any]:
     }
 
     print("\n" + "=" * 70)
-    print("  STARTING FULL 3-CONDITION BENCHMARK SUITE")
+    print("  STARTING BENCHMARK SUITE")
     print("=" * 70)
 
     for candidate in CANDIDATE_MODELS:
@@ -247,12 +273,15 @@ def run_benchmark(ollama_url: str = "http://127.0.0.1:11434") -> Dict[str, Any]:
             "transcripts": []
         }
 
-        # Measure 3 load conditions
-        conditions = [
-            ("condition_a_gpu_idle", "GPU Idle"),
-            ("condition_b_stt_tts_active", "STT+TTS Active Load"),
-            ("condition_c_observer_active", "Observer Profile Active Load")
-        ]
+        # For Qwen3.6-27B, limit to GPU Idle condition per user configuration to prevent excessive runtime due to CPU RAM offloading
+        if tag == "qwen3.6:27b":
+            conditions = [("condition_a_gpu_idle", "GPU Idle")]
+        else:
+            conditions = [
+                ("condition_a_gpu_idle", "GPU Idle"),
+                ("condition_b_stt_tts_active", "STT+TTS Active Load"),
+                ("condition_c_observer_active", "Observer Profile Active Load")
+            ]
 
         for cond_key, cond_label in conditions:
             print(f"\n  --- Testing Load Condition: {cond_label} ---")
@@ -262,8 +291,12 @@ def run_benchmark(ollama_url: str = "http://127.0.0.1:11434") -> Dict[str, Any]:
             if cond_key == "condition_b_stt_tts_active":
                 load_thread = threading.Thread(target=run_stt_tts_background_load, args=(stop_load,), daemon=True)
                 load_thread.start()
+            elif cond_key == "condition_c_observer_active":
+                load_thread = threading.Thread(target=run_observer_background_load, args=(stop_load,), daemon=True)
+                load_thread.start()
 
             vram_start = get_vram_usage_gb()
+            vram_peak = vram_start
             ttft_list: List[float] = []
             tps_list: List[float] = []
 
@@ -283,7 +316,7 @@ def run_benchmark(ollama_url: str = "http://127.0.0.1:11434") -> Dict[str, Any]:
                     ],
                     "stream": False
                 }
-                resp = httpx.post(f"{ollama_url}/api/chat", json=payload, timeout=300.0)
+                resp = httpx.post(f"{ollama_url}/api/chat", json=payload, timeout=900.0)
                 elapsed_ms = (time.monotonic() - start_t) * 1000.0
 
                 if resp.status_code != 200:
@@ -298,8 +331,15 @@ def run_benchmark(ollama_url: str = "http://127.0.0.1:11434") -> Dict[str, Any]:
                 eval_duration_ns = data.get("eval_duration", 1)
                 tps = (eval_count / (eval_duration_ns / 1e9)) if eval_duration_ns > 0 else (len(resp_msg.split()) / (elapsed_ms / 1000.0))
 
-                ttft_list.append(elapsed_ms)
+                prompt_eval_ns = data.get("prompt_eval_duration", 0)
+                ttft_ms = (prompt_eval_ns / 1e6) if prompt_eval_ns > 0 else elapsed_ms
+
+                ttft_list.append(ttft_ms)
                 tps_list.append(tps)
+
+                vram_curr = get_vram_usage_gb()
+                if vram_curr > vram_peak:
+                    vram_peak = vram_curr
 
                 # Record transcript on GPU Idle condition
                 if cond_key == "condition_a_gpu_idle":
@@ -310,17 +350,15 @@ def run_benchmark(ollama_url: str = "http://127.0.0.1:11434") -> Dict[str, Any]:
                         "assembled_system_prompt": system_prompt,
                         "cloud_trigger": cloud_trigger,
                         "model_response": resp_msg,
-                        "ttft_ms": round(elapsed_ms, 1),
+                        "ttft_ms": round(ttft_ms, 1),
                         "tps": round(tps, 2)
                     })
 
-                print(f"    [OK] ({cat[:25]}) -> TTFT: {elapsed_ms:.0f}ms | {tps:.1f} tok/s")
+                print(f"    [OK] ({cat[:25]}) -> TTFT: {ttft_ms:.0f}ms | {tps:.1f} tok/s")
 
             if load_thread:
                 stop_load.set()
                 load_thread.join(timeout=2.0)
-
-            vram_peak = get_vram_usage_gb()
 
             avg_ttft = sum(ttft_list) / len(ttft_list) if ttft_list else 0.0
             avg_tps = sum(tps_list) / len(tps_list) if tps_list else 0.0
