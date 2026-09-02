@@ -188,7 +188,10 @@ class TestInterventionEngine(unittest.TestCase):
     def tearDown(self):
         self._store_patcher.stop()
         self._bus_patcher.stop()
-        os.unlink(self._tmp.name)
+        try:
+            os.unlink(self._tmp.name)
+        except OSError:
+            pass
 
     def test_sedentary_triggers_callback(self):
         """Sedentary observation triggers trainer callback."""
