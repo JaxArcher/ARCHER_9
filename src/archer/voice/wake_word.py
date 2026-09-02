@@ -78,6 +78,11 @@ class WakeWordDetector:
         # Convert bytes to numpy array
         audio_array = np.frombuffer(audio_chunk, dtype=np.int16)
 
+        # RMS energy floor guard: if chunk is pitch-black silence (<50 RMS), skip inference to prevent model drift
+        rms = float(np.sqrt(np.mean(audio_array.astype(np.float64) ** 2)))
+        if rms < 50.0:
+            return False
+
         # Feed to model
         self._model.predict(audio_array)
 

@@ -339,13 +339,6 @@ class VoicePipeline:
 
                 logger.info(f"📝 STT: '{text}'")
 
-                # Publish STT result for GUI conversation panel
-                self._bus.publish(Event(
-                    type=EventType.STT_FINAL,
-                    source="voice_pipeline",
-                    data={"text": text},
-                ))
-
                 # --- HALT check ---
                 if self._halt.check_text_for_halt(text):
                     worker_aborted.set()
