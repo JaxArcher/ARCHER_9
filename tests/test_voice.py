@@ -106,7 +106,7 @@ class TestTTSStack:
 
     @patch("httpx.post")
     def test_local_tts_chatterbox_synthesis(self, mock_post):
-        """LocalTTS should call Chatterbox container endpoint."""
+        """LocalTTS should call Chatterbox container endpoint on HTTP fallback."""
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.content = b"RIFF....WAVEfmt "
@@ -114,6 +114,7 @@ class TestTTSStack:
         mock_post.return_value = mock_resp
 
         local_tts = LocalTTS()
+        local_tts._kokoro_pipeline = None
         audio_bytes, sr = local_tts.synthesize("Hello Chatterbox")
         assert audio_bytes == b"RIFF....WAVEfmt "
         assert sr == 24000
