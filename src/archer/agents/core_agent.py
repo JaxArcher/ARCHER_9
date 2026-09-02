@@ -316,8 +316,15 @@ class CoreAgent:
         if cloud_trigger == "context_overflow" and self._nvidia_client:
             model = self._config.assistant_model  # moonshotai/kimi-k2.5
             with self._history_lock:
-                messages = [{"role": "system", "content": system_prompt}] + list(self._conversation_history[-10:])
+                history_subset = list(self._conversation_history[-10:])
+                messages = [{"role": "system", "content": system_prompt}] + history_subset
                 messages.append({"role": "user", "content": user_input})
+                history_count = len(self._conversation_history)
+
+            logger.info(
+                f"CoreAgent cloud turn history memory (NVIDIA NIM): {history_count} total prior messages in history "
+                f"-> sending {len(messages)} messages to {model}"
+            )
 
             stream = self._nvidia_client.chat.completions.create(
                 model=model,
@@ -352,8 +359,14 @@ class CoreAgent:
             import anthropic
             client = anthropic.Anthropic(api_key=self._config.anthropic_api_key)
             with self._history_lock:
-                messages = list(self._conversation_history[-10:])
-                messages.append({"role": "user", "content": user_input})
+                history_subset = list(self._conversation_history[-10:])
+                messages = history_subset + [{"role": "user", "content": user_input}]
+                history_count = len(self._conversation_history)
+
+            logger.info(
+                f"CoreAgent cloud turn history memory (Claude): {history_count} total prior messages in history "
+                f"-> sending {len(messages)} messages to {self._config.claude_model}"
+            )
 
             with client.messages.stream(
                 model=self._config.claude_model,
@@ -399,8 +412,15 @@ class CoreAgent:
     def _stream_local(self, user_input: str, system_prompt: str, start_t: float) -> Generator[str, None, None]:
         """Stream response from local primary model (qwen3:8b) via Ollama API."""
         with self._history_lock:
-            messages = [{"role": "system", "content": system_prompt}] + list(self._conversation_history[-10:])
+            history_subset = list(self._conversation_history[-10:])
+            messages = [{"role": "system", "content": system_prompt}] + history_subset
             messages.append({"role": "user", "content": user_input})
+            history_count = len(self._conversation_history)
+
+        logger.info(
+            f"CoreAgent turn history memory: {history_count} total prior messages in history "
+            f"-> sending {len(messages)} messages to Ollama ({self.primary_model})"
+        )
 
         url = f"{self._config.ollama_base_url}/api/chat"
         payload = {
