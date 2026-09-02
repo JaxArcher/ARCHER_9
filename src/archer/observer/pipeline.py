@@ -89,6 +89,7 @@ class ObserverPipeline:
         self._last_emotion: str | None = None
         self._emotion_stable_since: float = 0.0
         self._emotion_stable_threshold: float = 60.0  # 60s of same emotion = event
+        self._last_analyzed_timestamp: float = 0.0
 
         # Stats
         self._analyses_run = 0
@@ -249,11 +250,13 @@ class ObserverPipeline:
         """Run one analysis cycle: grab frame, run analyzers, publish events."""
         with self._camera_lock:
             frame, timestamp = self._camera.get_latest_frame()
-        self._analyses_run += 1
 
-        if frame is None:
-            # No camera — only run system-level checks
+        if frame is None or timestamp == self._last_analyzed_timestamp:
+            # No new camera frame — skip duplicate analysis
             return
+
+        self._last_analyzed_timestamp = timestamp
+        self._analyses_run += 1
 
         # --- Emotion Analysis ---
         emotion_results = self._emotion_analyzer.analyze(frame)

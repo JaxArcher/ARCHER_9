@@ -175,6 +175,10 @@ class WebcamCapture:
 
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._resolution[0])
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._resolution[1])
+                try:
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    pass
 
                 # Warmup: let the camera stabilize before testing
                 import time as _time

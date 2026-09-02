@@ -693,6 +693,10 @@ class VoicePipeline:
 
         logger.info(f"📝 Text input: '{text}'")
 
+        # Stop active audio playback and cancel in-progress TTS (barge-in interrupt)
+        self._audio.stop_playback()
+        self._tts.cancel()
+
         # Publish as STT_FINAL so conversation panel shows the user message
         self._bus.publish(Event(
             type=EventType.STT_FINAL,

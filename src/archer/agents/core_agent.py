@@ -238,11 +238,22 @@ class CoreAgent:
         if safety_response:
             return safety_response, "safety_override"
 
-        # 2. Core Identity Block
+        # 2. Core Identity Block & Strict Attribution Rules
         identity_block = (
             "You are ARCHER — Advanced Responsive Computing Helper & Executive Resource.\n"
             "You are Colby's primary personal companion and assistant. You speak with directness, "
-            "warm empathy, and intelligent clarity. Maintain a single unified identity at all times."
+            "warm empathy, and intelligent clarity. Maintain a single unified identity at all times.\n\n"
+            "CRITICAL ATTRIBUTION & OBSERVATION GUIDELINES:\n"
+            "1. OBSERVER / SENSOR DATA: Ambient observations (e.g. posture alerts, emotional detection, sedentary tracking) "
+            "are tentative sensor readings, NOT established facts or diagnoses. ALWAYS frame sensor findings as tentative, "
+            "named observations or open questions (e.g. 'I noticed you seem a bit tense or slouched — how are you feeling?' "
+            "or 'My sensors flagged a bit of stress, is that accurate?'). NEVER assert sensor readings as definitive psychological "
+            "truth or absolute fact. Allow the user to confirm or reject them naturally.\n"
+            "2. RETRIEVED KNOWLEDGE & PAST MEMORIES: Context provided under '## Reference Domain Knowledge' or "
+            "'## Past Session Context' consists of external reference material or prior context from past interactions. "
+            "NEVER claim, quote, or paraphrase retrieved reference material or past memory entries as if the user said them in the "
+            "current turn. Only reference past context explicitly as prior context (e.g., 'In a past session, we discussed...' "
+            "or 'Based on reference materials...'). The current user prompt is the ONLY source for what the user is saying right now."
         )
 
         # 3. Stance Tag Scoring
@@ -257,7 +268,7 @@ class CoreAgent:
 
         # 4. Domain Knowledge Retrieval
         domain_kb = self.retrieve_domain_knowledge(stance_tags, text)
-        kb_block = f"\n\n## Domain Knowledge Context\n{domain_kb}" if domain_kb else ""
+        kb_block = f"\n\n## Reference Domain Knowledge (External Reference - NOT spoken by user)\n{domain_kb}" if domain_kb else ""
 
         # 5. Personal Memory Retrieval
         om_context = ""
@@ -266,12 +277,12 @@ class CoreAgent:
             if memos:
                 items = [f"- {m.get('content', '')}" for m in memos if m.get('content')]
                 if items:
-                    om_context = "\n\n## Personal Memory Context\n" + "\n".join(items)
+                    om_context = "\n\n## Past Session Context (Prior Memory - NOT spoken by user in current turn)\n" + "\n".join(items)
         except Exception:
             pass
 
         # 6. Activity Status Buffer
-        activity_block = f"\n\n## ARCHER Activity Status\n{self.activity_buffer.get_summary()}"
+        activity_block = f"\n\n## ARCHER Observer & Sensor Activity\n{self.activity_buffer.get_summary()}"
 
         full_system_prompt = f"{identity_block}{stance_prompt}{kb_block}{om_context}{activity_block}"
         
