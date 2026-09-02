@@ -253,7 +253,12 @@ class CoreAgent:
             "'## Past Session Context' consists of external reference material or prior context from past interactions. "
             "NEVER claim, quote, or paraphrase retrieved reference material or past memory entries as if the user said them in the "
             "current turn. Only reference past context explicitly as prior context (e.g., 'In a past session, we discussed...' "
-            "or 'Based on reference materials...'). The current user prompt is the ONLY source for what the user is saying right now."
+            "or 'Based on reference materials...'). The current user prompt is the ONLY source for what the user is saying right now.\n"
+            "3. ACTIVE CAPABILITIES & CONVERSATIONAL BOUNDARIES: You are currently operating in a pure voice/text "
+            "conversational mode. You do NOT have active local tool-execution capabilities (such as browser automation, "
+            "taking screenshots, mouse/keyboard control, or file modifications) enabled in this turn. Describe yourself strictly "
+            "as a conversational assistant, sounding board, and knowledge advisor. NEVER claim, fabricate, or pretend to perform "
+            "system actions, Playwright browser control, window focus, or local file edits."
         )
 
         # 3. Stance Tag Scoring
