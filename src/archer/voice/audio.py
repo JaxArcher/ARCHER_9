@@ -302,34 +302,24 @@ class AudioManager:
                 ))
 
     def play_audio_bytes(self, audio_bytes: bytes, sample_rate: int = 24000) -> None:
-        """Play raw PCM audio bytes (int16, mono).
-
-        If the source sample rate doesn't match the output device's native rate,
-        the audio is resampled using linear interpolation to avoid
-        PaErrorCode -9997 (Invalid sample rate) on WASAPI devices.
-        """
         if self._tts_muted.is_set():
             return
 
+        import io
+        import soundfile as sf
+
         try:
-            import io
-            import soundfile as sf
-            audio_array, sr = sf.read(io.BytesIO(audio_bytes))
-            audio_array = audio_array.astype(np.float32)
-            if sr:
-                sample_rate = sr
+            audio_array, file_sample_rate = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+            sample_rate = file_sample_rate
         except Exception:
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
-        # Resample if the output device doesn't support the source rate.
         device_rate = self._get_output_device_rate()
         if device_rate and device_rate != sample_rate:
             ratio = device_rate / sample_rate
             n_out = int(len(audio_array) * ratio)
             indices = np.linspace(0, len(audio_array) - 1, n_out)
-            audio_array = np.interp(
-                indices, np.arange(len(audio_array)), audio_array
-            ).astype(np.float32)
+            audio_array = np.interp(indices, np.arange(len(audio_array)), audio_array).astype(np.float32)
             sample_rate = device_rate
 
         self.play_audio(audio_array, sample_rate)
