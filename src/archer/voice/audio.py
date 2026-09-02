@@ -302,7 +302,15 @@ class AudioManager:
         if self._tts_muted.is_set():
             return
 
-        audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        try:
+            import io
+            import soundfile as sf
+            audio_array, sr = sf.read(io.BytesIO(audio_bytes))
+            audio_array = audio_array.astype(np.float32)
+            if sr:
+                sample_rate = sr
+        except Exception:
+            audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
         # Resample if the output device doesn't support the source rate.
         device_rate = self._get_output_device_rate()
