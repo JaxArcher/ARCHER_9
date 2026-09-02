@@ -96,9 +96,26 @@ class AudioManager:
                 callback=self._audio_callback,
             )
             self._capture_stream.start()
+            mic_name = "Default System Mic"
+            speaker_name = "Default System Speaker"
+            try:
+                devs = sd.query_devices()
+                if device_index is not None and device_index < len(devs):
+                    mic_name = devs[device_index]["name"]
+                elif sd.default.device[0] is not None and sd.default.device[0] < len(devs):
+                    mic_name = devs[sd.default.device[0]]["name"]
+                
+                spk_idx = self._config.speaker_device_index
+                if spk_idx is not None and spk_idx < len(devs):
+                    speaker_name = devs[spk_idx]["name"]
+                elif sd.default.device[1] is not None and sd.default.device[1] < len(devs):
+                    speaker_name = devs[sd.default.device[1]]["name"]
+            except Exception:
+                pass
+
             logger.info(
-                f"Audio stream started (mic={device_index}, "
-                f"speaker={self._config.speaker_device_index}, "
+                f"Audio stream started (mic={device_index} ['{mic_name}'], "
+                f"speaker={self._config.speaker_device_index} ['{speaker_name}'], "
                 f"rate={self._sample_rate}, chunk={self._chunk_samples} samples)"
             )
         except Exception as e:
