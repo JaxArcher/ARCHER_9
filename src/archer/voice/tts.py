@@ -93,15 +93,54 @@ class CloudTTS(TTSBackend):
 
 
 class LocalTTS(TTSBackend):
-    """Chatterbox (Resemble AI) local TTS backend via Docker container."""
+    """Local TTS backend using Kokoro-82M neural engine (with HTTP fallback)."""
 
     def __init__(self) -> None:
         self._config = get_config()
+        self._kokoro_pipeline = None
+        self._init_kokoro()
+
+    def _init_kokoro(self) -> None:
+        try:
+            from kokoro import KPipeline
+            self._kokoro_pipeline = KPipeline(lang_code="a")
+            logger.info("LocalTTS initialized with Kokoro-82M neural engine.")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Kokoro pipeline: {e}. Falling back to HTTP.")
 
     def synthesize(self, text: str) -> tuple[bytes, int]:
-        """Synthesize text using the local Chatterbox TTS Docker container."""
-        import httpx
+        """Synthesize text using Kokoro-82M neural TTS engine."""
+        import io
+        import time
+        import numpy as np
+        import soundfile as sf
 
+        if self._kokoro_pipeline is not None:
+            try:
+                generator = self._kokoro_pipeline(text, voice="af_sarah")
+                chunks = [chunk[2] for chunk in generator]
+                if chunks:
+                    audio_float = np.concatenate(chunks).astype(np.float32)
+                    buf = io.BytesIO()
+                    sf.write(buf, audio_float, 24000, format="WAV")
+                    audio_bytes = buf.getvalue()
+
+                    # Save unique debug dump with timestamp
+                    try:
+                        import os
+                        os.makedirs("scratch", exist_ok=True)
+                        ts = int(time.time() * 1000)
+                        with open(f"scratch/raw_chatterbox_response_{ts}.wav", "wb") as f:
+                            f.write(audio_bytes)
+                    except Exception:
+                        pass
+
+                    return audio_bytes, 24000
+            except Exception as e:
+                logger.error(f"Kokoro neural synthesis error: {e}")
+
+        # Fallback to HTTP server if Kokoro pipeline is unavailable
+        import httpx
         try:
             response = httpx.post(
                 f"{self._config.chatterbox_url}/synthesize",
@@ -111,17 +150,6 @@ class LocalTTS(TTSBackend):
             response.raise_for_status()
 
             audio_bytes = response.content
-
-            # Raw byte dump immediately after Chatterbox returns
-            try:
-                import os
-                os.makedirs("scratch", exist_ok=True)
-                with open("scratch/raw_chatterbox_response.wav", "wb") as f:
-                    f.write(audio_bytes)
-                logger.info(f"Raw Chatterbox payload dumped to scratch/raw_chatterbox_response.wav ({len(audio_bytes)} bytes, input_text={text!r})")
-            except Exception as dump_err:
-                logger.warning(f"Failed to dump raw Chatterbox response: {dump_err}")
-
             sample_rate = int(response.headers.get("X-Sample-Rate", "24000"))
             return audio_bytes, sample_rate
 
@@ -130,6 +158,8 @@ class LocalTTS(TTSBackend):
             raise
 
     def is_available(self) -> bool:
+        if self._kokoro_pipeline is not None:
+            return True
         import httpx
         try:
             response = httpx.get(
