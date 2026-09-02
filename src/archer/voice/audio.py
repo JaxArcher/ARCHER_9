@@ -211,21 +211,38 @@ class AudioManager:
 
         # Always work at the pipeline rate (16000) for AEC consistency
         rate = self._sample_rate
+        input_dtype = audio_data.dtype
+        input_shape = audio_data.shape
         
-        # Ensure data is int16 for the callback
-        if audio_data.dtype != np.int16:
-            # Assume float -1.0..1.0
-            if audio_data.dtype == np.float32 or audio_data.dtype == np.float64:
-                audio_data = (audio_data * 32767).astype(np.int16)
-        
-        # If input rate doesn't match pipeline rate, resample
+        # If input rate doesn't match pipeline rate, resample in float32 FIRST
+        resample_executed = False
         if sample_rate and sample_rate != rate:
+            resample_executed = True
             ratio = rate / sample_rate
             n_out = int(len(audio_data) * ratio)
             indices = np.linspace(0, len(audio_data) - 1, n_out)
             audio_data = np.interp(
                 indices, np.arange(len(audio_data)), audio_data
-            ).astype(np.int16)
+            ).astype(np.float32)
+            sample_rate = rate
+
+        # Ensure data is int16 for the callback
+        if audio_data.dtype != np.int16:
+            if audio_data.dtype == np.float32 or audio_data.dtype == np.float64:
+                audio_data = (audio_data * 32767.0).astype(np.int16)
+
+        device_rate_val = self._get_output_device_rate()
+
+        logger.info(
+            f"PLAY_AUDIO DUMP LOG:\n"
+            f"  - input_dtype: {input_dtype}, input_shape: {input_shape}\n"
+            f"  - audio_data.dtype: {audio_data.dtype}, audio_data.shape: {audio_data.shape}\n"
+            f"  - sample_rate_param: {sample_rate}\n"
+            f"  - rate (self._sample_rate): {rate}\n"
+            f"  - resample_executed: {resample_executed}\n"
+            f"  - device_rate (_get_output_device_rate()): {device_rate_val}\n"
+            f"  - first_20_values: {audio_data[:20].flatten().tolist()}"
+        )
 
         # Write exact hardware playback audio array to disk for external media player verification
         try:
@@ -314,14 +331,7 @@ class AudioManager:
         except Exception:
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
-        device_rate = self._get_output_device_rate()
-        if device_rate and device_rate != sample_rate:
-            ratio = device_rate / sample_rate
-            n_out = int(len(audio_array) * ratio)
-            indices = np.linspace(0, len(audio_array) - 1, n_out)
-            audio_array = np.interp(indices, np.arange(len(audio_array)), audio_array).astype(np.float32)
-            sample_rate = device_rate
-
+        # Skip play_audio_bytes device-rate resample: pass raw float32 array straight to play_audio
         self.play_audio(audio_array, sample_rate)
 
     def _get_output_device_rate(self) -> int | None:
