@@ -350,8 +350,16 @@ class VoicePipeline:
 
                 # --- Stream agent sentences ---
                 if self._agent_streaming_callback is not None:
-                    for sentence in self._agent_streaming_callback(text):
-                        sentence_queue.put(sentence)
+                    gen = self._agent_streaming_callback(text)
+                    try:
+                        for sentence in gen:
+                            sentence_queue.put(sentence)
+                    finally:
+                        if hasattr(gen, "close"):
+                            try:
+                                gen.close()
+                            except Exception:
+                                pass
                 else:
                     result = self._agent_callback(text)
                     for sentence in self._split_into_sentences(result):
@@ -443,8 +451,16 @@ class VoicePipeline:
         def agent_worker():
             try:
                 if self._agent_streaming_callback is not None:
-                    for sentence in self._agent_streaming_callback(text):
-                        sentence_queue.put(sentence)
+                    gen = self._agent_streaming_callback(text)
+                    try:
+                        for sentence in gen:
+                            sentence_queue.put(sentence)
+                    finally:
+                        if hasattr(gen, "close"):
+                            try:
+                                gen.close()
+                            except Exception:
+                                pass
                 else:
                     result = self._agent_callback(text)
                     for sentence in self._split_into_sentences(result):

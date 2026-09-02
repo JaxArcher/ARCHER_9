@@ -180,23 +180,27 @@ class WebcamCapture:
                 import time as _time
                 _time.sleep(0.3)
 
-                # Verify the camera can actually produce frames.
-                # Read 3 test frames — some virtual devices (e.g. Remote
-                # Desktop Camera Bus) pass a single read but fail on all
-                # subsequent ones.
+                # Verify the camera can actually produce non-empty frames.
+                # Read 3 test frames and check pixel brightness/variance — phantom devices
+                # (e.g. OBS Virtual Camera / disconnected drivers) pass single read calls but
+                # return solid pitch-black frames (mean intensity 0.0).
                 ok_count = 0
                 last_frame = None
                 for _attempt in range(3):
                     ret, frame = cap.read()
                     if ret and frame is not None:
-                        ok_count += 1
-                        last_frame = frame
+                        import numpy as _np
+                        mean_val = float(_np.mean(frame))
+                        std_val = float(_np.std(frame))
+                        if mean_val > 2.0 or std_val > 1.0:
+                            ok_count += 1
+                            last_frame = frame
                     _time.sleep(0.1)
 
                 if ok_count < 2:
                     logger.debug(
                         f"Device {device} ({backend_name}): opened but only "
-                        f"{ok_count}/3 test frames succeeded — skipping"
+                        f"{ok_count}/3 test frames contained non-black content — skipping phantom device"
                     )
                     cap.release()
                     continue
@@ -204,7 +208,7 @@ class WebcamCapture:
                 logger.debug(
                     f"Device {device} ({backend_name}): working — "
                     f"{last_frame.shape[1]}x{last_frame.shape[0]} "
-                    f"({ok_count}/3 test frames OK)"
+                    f"({ok_count}/3 test frames OK, mean_brightness={_np.mean(last_frame):.1f})"
                 )
                 return cap
 
