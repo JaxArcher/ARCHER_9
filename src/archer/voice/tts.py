@@ -111,6 +111,17 @@ class LocalTTS(TTSBackend):
             response.raise_for_status()
 
             audio_bytes = response.content
+
+            # Raw byte dump immediately after Chatterbox returns
+            try:
+                import os
+                os.makedirs("scratch", exist_ok=True)
+                with open("scratch/raw_chatterbox_response.wav", "wb") as f:
+                    f.write(audio_bytes)
+                logger.info(f"Raw Chatterbox payload dumped to scratch/raw_chatterbox_response.wav ({len(audio_bytes)} bytes, input_text={text!r})")
+            except Exception as dump_err:
+                logger.warning(f"Failed to dump raw Chatterbox response: {dump_err}")
+
             sample_rate = int(response.headers.get("X-Sample-Rate", "24000"))
             return audio_bytes, sample_rate
 
