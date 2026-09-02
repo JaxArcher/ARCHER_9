@@ -50,3 +50,20 @@ class TestCoreAgent:
         prompt, trigger = core_agent.build_context_system_prompt("Let's plan my workout")
         assert "ARCHER" in prompt
         assert "High-Performance Fitness" in prompt
+
+    def test_blindspot_path1_piggyback(self, core_agent):
+        """Blindspot flag should piggyback on next turn once and clear after use."""
+        from archer.event_bus import Event, EventType
+        # Stage observer event
+        core_agent._on_observation(Event(type=EventType.OBSERVATION_EVENT, source="test", data={"event_type": "sedentary", "duration_minutes": 90}))
+        
+        # Turn 1: user asks workout question while sedentary flag is pending
+        prompt_turn1, _ = core_agent.build_context_system_prompt("What workout should I do today?")
+        assert "Proactive Blindspot Register" in prompt_turn1
+        assert "Observer flagged sedentary behavior (90 min)" in prompt_turn1
+        assert "High-Performance Fitness" in prompt_turn1  # Coexists with domain stance!
+
+        # Turn 2: next turn should NOT have Blindspot flag (cleared after single use)
+        prompt_turn2, _ = core_agent.build_context_system_prompt("What workout should I do today?")
+        assert "Proactive Blindspot Register" not in prompt_turn2
+        assert "High-Performance Fitness" in prompt_turn2

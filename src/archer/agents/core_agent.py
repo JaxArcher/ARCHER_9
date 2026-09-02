@@ -120,6 +120,8 @@ class CoreAgent:
 
         self._history_lock = threading.Lock()
         self._turn_lock = threading.Lock()
+        self._blindspot_lock = threading.Lock()
+        self._pending_blindspot_flag: Optional[str] = None
         self._conversation_history: List[Dict[str, str]] = []
         
         # Subscribe to observer events for activity buffer
@@ -141,16 +143,28 @@ class CoreAgent:
         return " ".join(list(self.process_turn_streaming(user_input)))
 
     def _on_observation(self, event: Event) -> None:
-        """Update rolling activity status buffer on significant events."""
+        """Update rolling activity status buffer and pending Blindspot flag on significant events."""
         event_type = event.data.get("event_type", "observation")
+        flag_desc = None
         if event_type == "sedentary":
             mins = event.data.get("duration_minutes", 120)
-            self.activity_buffer.update_status(f"Observer flagged sedentary behavior ({mins:.0f} min).")
+            status_str = f"Observer flagged sedentary behavior ({mins:.0f} min)."
+            self.activity_buffer.update_status(status_str)
+            flag_desc = f"Observer flagged sedentary behavior ({mins:.0f} min)"
         elif event_type == "sustained_emotion":
             emo = event.data.get("dominant_emotion", "distress")
-            self.activity_buffer.update_status(f"Observer detected sustained {emo} emotional state.")
+            status_str = f"Observer detected sustained {emo} emotional state."
+            self.activity_buffer.update_status(status_str)
+            flag_desc = f"Observer detected sustained {emo} emotional state"
         elif event_type == "posture":
-            self.activity_buffer.update_status("Observer flagged slouching posture.")
+            status_str = "Observer flagged slouching posture."
+            self.activity_buffer.update_status(status_str)
+            flag_desc = "Observer flagged slouching posture"
+
+        if flag_desc:
+            with self._blindspot_lock:
+                self._pending_blindspot_flag = flag_desc
+            logger.info(f"Blindspot flag staged for next user turn: '{flag_desc}'")
 
     def check_safety_override(self, text: str) -> Optional[str]:
         """Safety pre-check (code-level crisis override)."""
@@ -275,8 +289,18 @@ class CoreAgent:
         )
 
         # 3. Stance Tag Scoring & Register Assembly
+        blindspot_prompt = ""
+        with self._blindspot_lock:
+            if self._pending_blindspot_flag:
+                blindspot_prompt = (
+                    f"\n[Stance: Proactive Blindspot Register - Gently acknowledge the ambient sensor signal "
+                    f"('{self._pending_blindspot_flag}') at the beginning of your response before addressing the user's "
+                    f"actual message. Frame this strictly as a tentative observation they can confirm or dismiss, NOT an absolute assertion.]"
+                )
+                self._pending_blindspot_flag = None  # Consume flag so it surfaces only once per signal
+
         stance_tags = self.calculate_stance_tags(text)
-        stance_prompt = ""
+        stance_prompt = blindspot_prompt
         if "therapeutic" in stance_tags:
             stance_prompt += "\n[Stance: Therapeutic & Reflective Register - Listen attentively, validate feelings, and explore emotional dynamics without judgment.]"
         if "coaching" in stance_tags:
