@@ -115,6 +115,7 @@ class CoreAgent:
                 logger.warning("openai package not found — CoreAgent NVIDIA NIM disabled.")
 
         self._history_lock = threading.Lock()
+        self._turn_lock = threading.Lock()
         self._conversation_history: List[Dict[str, str]] = []
         
         # Subscribe to observer events for activity buffer
@@ -265,6 +266,37 @@ class CoreAgent:
         cloud_trigger = self.evaluate_cloud_delegation(text, token_est)
 
         return full_system_prompt, cloud_trigger
+
+    def process_turn_streaming(self, user_input: str) -> Generator[str, None, None]:
+        """
+        Canonical, thread-safe public entrypoint for processing a conversation turn.
+
+        Acquires _turn_lock with a timeout, guaranteeing clean lock release via try...finally
+        even if the consumer breaks early, closes the generator, or encounters an exception mid-stream.
+        """
+        acquired = self._turn_lock.acquire(timeout=60.0)
+        if not acquired:
+            logger.error("CoreAgent turn lock acquisition timed out (another turn is active).")
+            self._bus.publish(Event(
+                type=EventType.SYSTEM_ERROR,
+                source="core_agent",
+                data={"message": "CoreAgent busy — please try again in a moment."}
+            ))
+            yield "I am currently processing another request. Please try again in a moment."
+            return
+
+        try:
+            yield from self.process_request_streaming(user_input)
+        except Exception as e:
+            logger.error(f"CoreAgent turn execution failed: {e}")
+            self._bus.publish(Event(
+                type=EventType.SYSTEM_ERROR,
+                source="core_agent",
+                data={"message": f"CoreAgent turn failed: {e}"}
+            ))
+            yield "I encountered an issue processing that request. Please try again."
+        finally:
+            self._turn_lock.release()
 
     def process_request_streaming(self, user_input: str) -> Generator[str, None, None]:
         """

@@ -90,17 +90,16 @@ def main() -> None:
     from archer.memory.sqlite_store import get_sqlite_store
     store = get_sqlite_store()
 
-    # Initialize agent orchestrator
-    logger.info("Initializing agent orchestrator...")
-    from archer.agents.orchestrator import AgentOrchestrator
-    orchestrator = AgentOrchestrator()
+    # Initialize CoreAgent (Single-Agent Core Engine)
+    logger.info("Initializing CoreAgent...")
+    from archer.agents.core_agent import CoreAgent
+    core_agent = CoreAgent()
 
     # Initialize voice pipeline
     logger.info("Creating voice pipeline...")
     from archer.voice.pipeline import VoicePipeline
     pipeline = VoicePipeline(
-        agent_callback=orchestrator.process_request,
-        agent_streaming_callback=orchestrator.process_request_streaming,
+        agent_streaming_callback=core_agent.process_turn_streaming,
     )
 
     # Initialize + start the voice pipeline in a background thread.
@@ -168,7 +167,7 @@ def main() -> None:
 
         # Create intervention engine with proactive delivery callback
         intervention_engine = InterventionEngine(
-            speak_callback=orchestrator.deliver_proactive_message,
+            speak_callback=lambda text: pipeline._call_agent_with_filler(text),
         )
 
         # Start the observer in a background thread

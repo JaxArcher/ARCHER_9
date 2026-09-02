@@ -62,7 +62,7 @@ def main() -> None:
         start_t = time.monotonic()
         sentence_count = 0
 
-        for sentence in agent.process_request_streaming(user_input):
+        for sentence in agent.process_turn_streaming(user_input):
             sentence_count += 1
             if sentence_count == 1:
                 print(f"{sentence}", flush=True)
