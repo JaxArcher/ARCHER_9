@@ -173,10 +173,9 @@ class AudioManager:
         # 2. Input (Capture) + AEC
         if self._is_capturing.is_set():
             if self._aec and self._is_playing.is_set():
-                # pyaec expects int16 bytes
+                # pyaec expects int16 bytes and returns a list of 8-bit byte ints
                 clean_bytes_list = self._aec.cancel_echo(indata.tobytes(), ref_chunk.tobytes())
-                # Result is a list of ints, convert back to bytes
-                clean_bytes = np.array(clean_bytes_list, dtype=np.int16).tobytes()
+                clean_bytes = bytes(x & 0xFF for x in clean_bytes_list)
                 audio_to_push = clean_bytes
             else:
                 # No playback or no AEC — use raw mic input
@@ -226,6 +225,15 @@ class AudioManager:
             audio_data = np.interp(
                 indices, np.arange(len(audio_data)), audio_data
             ).astype(np.int16)
+
+        # Write exact hardware playback audio array to disk for external media player verification
+        try:
+            import soundfile as sf
+            os.makedirs("scratch", exist_ok=True)
+            sf.write("scratch/last_hardware_playback.wav", audio_data, rate)
+            logger.info(f"Saved live hardware playback array to scratch/last_hardware_playback.wav ({len(audio_data)} samples @ {rate}Hz)")
+        except Exception as e:
+            logger.warning(f"Failed to dump hardware playback audio: {e}")
 
         with self._playback_lock:
             # Clear any stale data
