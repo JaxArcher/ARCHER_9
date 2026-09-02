@@ -1,10 +1,10 @@
 # ARCHER — Advanced Responsive Computing Helper & Executive Resource
 
-## Phase 4: PC Control + Finance + Full GUI
+## Phase 4: PC Control + Single-Agent Core + Full GUI
 
-A personal AI assistant with always-on voice interaction, five-agent orchestration,
-ambient observation, proactive interventions, desktop automation, and financial
-tracking — running on local hardware with cloud fallback.
+A personal AI assistant with always-on voice interaction, unified single-agent core architecture
+(with local-primary model and cloud delegation), ambient observation, proactive interventions,
+desktop automation, and investment tracking — running on local hardware with cloud fallback.
 
 ---
 
@@ -92,15 +92,14 @@ ARCHER_9/
 │       │   └── auth.py         # Voice authentication
 │       ├── agents/
 │       │   ├── AGENTS.md       # Routing manifest
-│       │   ├── orchestrator.py # Multi-agent routing + tool calling
+│       │   ├── core_agent.py   # Single-agent core engine (Qwen3-8B local primary)
+│       │   ├── orchestrator.py # Legacy multi-agent routing + tool calling
 │       │   ├── assistant/
 │       │   │   └── SOUL.md     # Assistant personality
 │       │   ├── trainer/
 │       │   │   └── SOUL.md     # Trainer personality
 │       │   ├── therapist/
 │       │   │   └── SOUL.md     # Therapist personality
-│       │   ├── finance/
-│       │   │   └── SOUL.md     # Finance personality
 │       │   └── investment/
 │       │       └── SOUL.md     # Investment personality
 │       ├── observer/
@@ -135,19 +134,19 @@ ARCHER_9/
 
 ## Architecture Notes
 
-### Five-Agent System (Phase 4)
+### CoreAgent & Specialist System
+- **CoreAgent**: Single-agent core engine utilizing `Qwen3-8B` as the primary local LLM, with deterministic cloud delegation (Claude & NVIDIA NIM Kimi).
 - **Assistant**: General tasks, calendar, reminders, inventory, PC control
 - **Trainer**: Fitness, nutrition, exercise (proactive: sedentary/posture)
 - **Therapist**: Emotional support, mental health (proactive: sustained distress)
-- **Finance**: Budget tracking, spending analysis, financial planning
 - **Investment**: Portfolio monitoring, market summaries, investment analysis
 
 ### Routing Priority
-1. Crisis keywords → always Therapist (safety override)
+1. Safety override → crisis helpline response
 2. Explicit agent name ("ask the trainer", "talk to therapist")
-3. Context continuity (stay with active specialist)
+3. Context continuity (stay with active specialist register)
 4. Keyword hints (secondary, unambiguous matches only)
-5. Default: Assistant
+5. Default: CoreAgent / Assistant
 
 ### PC Control (Phase 4)
 The Assistant agent can execute desktop automation via Claude tool_use:
@@ -195,4 +194,4 @@ reads the active mode before every request.
 | Phase 1 | Core Voice Loop | ✅ Complete |
 | Phase 2 | Agent Orchestration + Memory | ✅ Complete |
 | Phase 3 | Observer + Proactive | ✅ Complete |
-| **Phase 4** | PC Control + Finance + Full GUI | 🔨 In Progress |
+| **Phase 4** | PC Control + Single-Agent Core + Full GUI | 🔨 In Progress |

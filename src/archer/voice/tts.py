@@ -3,7 +3,7 @@ ARCHER Text-to-Speech (TTS).
 
 Supports two backends:
 - Cloud: ElevenLabs streaming TTS (low latency)
-- Local: IndexTTS2 via Docker container (GPU-accelerated)
+- Local: Chatterbox via Docker container (GPU-accelerated)
 
 Sentence-level streaming: pipe first sentence to TTS before the full
 LLM response is complete. Do not wait for the full response.
@@ -104,7 +104,7 @@ class LocalTTS(TTSBackend):
 
         try:
             response = httpx.post(
-                f"{self._config.indextts_url}/synthesize",
+                f"{self._config.chatterbox_url}/synthesize",
                 json={"text": text},
                 timeout=30.0,
             )
@@ -122,7 +122,7 @@ class LocalTTS(TTSBackend):
         import httpx
         try:
             response = httpx.get(
-                f"{self._config.indextts_url}/health",
+                f"{self._config.chatterbox_url}/health",
                 timeout=2.0,
             )
             return response.status_code == 200

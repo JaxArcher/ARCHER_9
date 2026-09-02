@@ -99,7 +99,8 @@ class ArcherConfig(BaseSettings):
     chromadb_url: str = "http://127.0.0.1:8100"
     mediapipe_url: str = "http://127.0.0.1:8101"
     deepface_url: str = "http://127.0.0.1:8102"
-    indextts_url: str = "http://127.0.0.1:8103"
+    chatterbox_url: str = Field(default="http://127.0.0.1:8103", alias="CHATTERBOX_URL")
+    indextts_url: str = Field(default="http://127.0.0.1:8103", alias="INDEXTTS_URL")  # Backward compatibility alias
     redis_url: str = "redis://127.0.0.1:6377/0"
     openmemory_db: str = "data/openmemory.db"
     memory_decay: bool = False

@@ -53,6 +53,14 @@ _STANCE_KEYWORDS = {
 }
 
 
+import json
+import httpx
+from collections.abc import Generator
+
+# Regex to split on sentence-ending punctuation followed by a space or end-of-string.
+_SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])\s+')
+
+
 class ActivityStatusBuffer:
     """Rolling plain-language activity status buffer for ARCHER-wide awareness."""
 
@@ -94,6 +102,18 @@ class CoreAgent:
         # Reason: Chosen for 136+ tok/s speed, ~7.3GB VRAM headroom, and Unsloth LoRA viability on 16GB GPU.
         self.primary_model: str = self._config.core_primary_model
         
+        # NVIDIA NIM client setup for cloud delegation (e.g. Kimi model)
+        self._nvidia_client = None
+        if self._config.nvidia_api_key:
+            try:
+                from openai import OpenAI
+                self._nvidia_client = OpenAI(
+                    api_key=self._config.nvidia_api_key,
+                    base_url=self._config.nvidia_base_url,
+                )
+            except ImportError:
+                logger.warning("openai package not found — CoreAgent NVIDIA NIM disabled.")
+
         self._history_lock = threading.Lock()
         self._conversation_history: List[Dict[str, str]] = []
         
@@ -154,6 +174,15 @@ class CoreAgent:
                 for m in memos:
                     if m.get("content"):
                         retrieved.append(f"[Fitness KB] {m['content']}")
+            except Exception:
+                pass
+
+        if "financial" in stance_tags:
+            try:
+                memos = self._chroma.query(query_text=text, n_results=2, collection_name="investment_knowledge")
+                for m in memos:
+                    if m.get("content"):
+                        retrieved.append(f"[Financial KB] {m['content']}")
             except Exception:
                 pass
 
@@ -236,3 +265,203 @@ class CoreAgent:
         cloud_trigger = self.evaluate_cloud_delegation(text, token_est)
 
         return full_system_prompt, cloud_trigger
+
+    def process_request_streaming(self, user_input: str) -> Generator[str, None, None]:
+        """
+        Process inbound user request through CoreAgent pipeline with sentence-level streaming.
+
+        1. Assembles context system prompt & checks delegation triggers via build_context_system_prompt().
+        2. Routes to cloud LLM (Claude API / NVIDIA NIM) if a delegation trigger is active.
+        3. Executes local streaming generation via Ollama (qwen3:8b) as default primary LLM.
+        4. Yields response sentence-by-sentence for TTS pipelining.
+        5. Updates working conversation history and logs turn to Tier 2 (SQLite).
+        """
+        start_t = time.monotonic()
+        system_prompt, cloud_trigger = self.build_context_system_prompt(user_input)
+
+        if cloud_trigger == "safety_override":
+            with self._history_lock:
+                self._conversation_history.append({"role": "user", "content": user_input})
+                self._conversation_history.append({"role": "assistant", "content": system_prompt})
+            self._store.log_conversation(
+                session_id="core_agent",
+                role="assistant",
+                agent_name="core_agent",
+                content=system_prompt,
+            )
+            yield system_prompt
+            return
+
+        # Check cloud delegation routing
+        if cloud_trigger and self._toggle.is_cloud:
+            try:
+                cloud_stream = self._stream_cloud(user_input, cloud_trigger, system_prompt, start_t)
+                yield from cloud_stream
+                return
+            except Exception as e:
+                logger.warning(f"CoreAgent cloud delegation ({cloud_trigger}) failed: {e}. Falling back to local {self.primary_model}.")
+
+        # Default local LLM streaming via Ollama (qwen3:8b)
+        yield from self._stream_local(user_input, system_prompt, start_t)
+
+    def _stream_cloud(
+        self, user_input: str, cloud_trigger: str, system_prompt: str, start_t: float
+    ) -> Generator[str, None, None]:
+        """Route cloud delegation to Claude API or NVIDIA NIM (Kimi) based on trigger type."""
+        full_response = ""
+        buffer = ""
+        first_chunk = True
+
+        # Target mapping: context_overflow -> NVIDIA NIM (Kimi); complex_task / explicit_request -> Claude
+        if cloud_trigger == "context_overflow" and self._nvidia_client:
+            model = self._config.assistant_model  # moonshotai/kimi-k2.5
+            with self._history_lock:
+                messages = [{"role": "system", "content": system_prompt}] + list(self._conversation_history[-10:])
+                messages.append({"role": "user", "content": user_input})
+
+            stream = self._nvidia_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                stream=True,
+                temperature=self._config.agent_temperature,
+                max_tokens=self._config.max_tokens,
+            )
+
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    token = chunk.choices[0].delta.content
+                    buffer += token
+                    full_response += token
+                    if first_chunk:
+                        first_chunk = False
+                        self._bus.publish(Event(
+                            type=EventType.AGENT_RESPONSE_START,
+                            source="core_agent",
+                            data={"agent": "core_agent", "model": f"NVIDIA NIM ({model})", "elapsed": time.monotonic() - start_t}
+                        ))
+                    while True:
+                        match = _SENTENCE_BOUNDARY.search(buffer)
+                        if match is None:
+                            break
+                        sentence = buffer[:match.start()].strip()
+                        buffer = buffer[match.end():]
+                        if sentence:
+                            yield sentence
+
+        else:
+            import anthropic
+            client = anthropic.Anthropic(api_key=self._config.anthropic_api_key)
+            with self._history_lock:
+                messages = list(self._conversation_history[-10:])
+                messages.append({"role": "user", "content": user_input})
+
+            with client.messages.stream(
+                model=self._config.claude_model,
+                max_tokens=self._config.max_tokens,
+                system=system_prompt,
+                messages=messages,
+            ) as stream:
+                for text_chunk in stream.text_stream:
+                    buffer += text_chunk
+                    full_response += text_chunk
+                    if first_chunk:
+                        first_chunk = False
+                        self._bus.publish(Event(
+                            type=EventType.AGENT_RESPONSE_START,
+                            source="core_agent",
+                            data={"agent": "core_agent", "model": f"Claude ({self._config.claude_model})", "elapsed": time.monotonic() - start_t}
+                        ))
+                    while True:
+                        match = _SENTENCE_BOUNDARY.search(buffer)
+                        if match is None:
+                            break
+                        sentence = buffer[:match.start()].strip()
+                        buffer = buffer[match.end():]
+                        if sentence:
+                            yield sentence
+
+        remaining = buffer.strip()
+        if remaining:
+            yield remaining
+
+        # Update history & SQLite store
+        if full_response.strip():
+            with self._history_lock:
+                self._conversation_history.append({"role": "user", "content": user_input})
+                self._conversation_history.append({"role": "assistant", "content": full_response.strip()})
+            self._store.log_conversation(
+                session_id="core_agent",
+                role="assistant",
+                agent_name="core_agent",
+                content=full_response.strip(),
+            )
+
+    def _stream_local(self, user_input: str, system_prompt: str, start_t: float) -> Generator[str, None, None]:
+        """Stream response from local primary model (qwen3:8b) via Ollama API."""
+        with self._history_lock:
+            messages = [{"role": "system", "content": system_prompt}] + list(self._conversation_history[-10:])
+            messages.append({"role": "user", "content": user_input})
+
+        url = f"{self._config.ollama_base_url}/api/chat"
+        payload = {
+            "model": self.primary_model,
+            "messages": messages,
+            "stream": True,
+            "options": {
+                "temperature": self._config.agent_temperature,
+                "num_ctx": 4096
+            }
+        }
+
+        full_response = ""
+        buffer = ""
+        first_chunk = True
+
+        with httpx.stream("POST", url, json=payload, timeout=120.0) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line or not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                    token = data.get("message", {}).get("content", "")
+                    if not token:
+                        continue
+                    buffer += token
+                    full_response += token
+
+                    if first_chunk:
+                        first_chunk = False
+                        self._bus.publish(Event(
+                            type=EventType.AGENT_RESPONSE_START,
+                            source="core_agent",
+                            data={"agent": "core_agent", "model": f"Local ({self.primary_model})", "elapsed": time.monotonic() - start_t}
+                        ))
+
+                    while True:
+                        match = _SENTENCE_BOUNDARY.search(buffer)
+                        if match is None:
+                            break
+                        sentence = buffer[:match.start()].strip()
+                        buffer = buffer[match.end():]
+                        if sentence:
+                            yield sentence
+                except Exception:
+                    continue
+
+        remaining = buffer.strip()
+        if remaining:
+            yield remaining
+
+        # Update history & SQLite store
+        if full_response.strip():
+            with self._history_lock:
+                self._conversation_history.append({"role": "user", "content": user_input})
+                self._conversation_history.append({"role": "assistant", "content": full_response.strip()})
+            self._store.log_conversation(
+                session_id="core_agent",
+                role="assistant",
+                agent_name="core_agent",
+                content=full_response.strip(),
+            )
+
