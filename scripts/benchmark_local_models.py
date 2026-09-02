@@ -145,17 +145,43 @@ def get_vram_usage_gb() -> float:
             return 0.0
 
 
-def check_unsloth_lora_viability(model_name: str) -> Dict[str, Any]:
-    """Sanity check Unsloth LoRA fine-tuning viability on local hardware."""
+def get_total_vram_gb() -> float:
+    """Query total physical GPU VRAM via pynvml or nvidia-smi CLI fallback."""
     try:
-        import torch
-        vram_total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3) if torch.cuda.is_available() else 0.0
-        is_viable = vram_total >= 12.0
+        import pynvml
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        return float(info.total / (1024 ** 3))
+    except Exception:
+        try:
+            cmd = ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"]
+            res = subprocess.check_output(cmd, text=True)
+            return float(res.strip().split("\n")[0]) / 1024.0
+        except Exception:
+            return 0.0
+
+
+def check_unsloth_lora_viability(model_name: str) -> Dict[str, Any]:
+    """Sanity check Unsloth LoRA fine-tuning viability on local hardware during dedicated session."""
+    try:
+        vram_total = get_total_vram_gb()
+        # 4-bit QLoRA VRAM requirement check for dedicated fine-tuning:
+        # - 8B models (Qwen3-8B) require ~7.5-8 GB VRAM -> Viable on 16GB VRAM
+        # - 26B/27B models (Gemma4-26B, Qwen3.6-27B) require ~18-20 GB VRAM -> Not Viable on 16GB VRAM
+        is_8b_class = any(tag in model_name.lower() for tag in ["-8b", ":8b", " 8b", "3-8b", "-7b", ":7b", " 7b", "2.5-7b"]) and not any(tag in model_name.lower() for tag in ["27b", "26b", "14b"])
+        req_vram = 8.0 if is_8b_class else 18.0
+        is_viable = vram_total >= req_vram
+
         return {
             "viable": is_viable,
             "gpu_vram_total_gb": round(vram_total, 2),
             "estimated_fine_tune_time_per_1k_samples_min": 15.0 if is_viable else None,
-            "notes": "Viable with Unsloth 4-bit QLoRA on 16GB+ VRAM" if is_viable else "Requires 12GB+ GPU VRAM"
+            "notes": (
+                "Viable with Unsloth 4-bit QLoRA on 16GB VRAM (~8GB VRAM headroom available)"
+                if is_viable
+                else f"Requires ~{req_vram:.0f}GB+ GPU VRAM for 4-bit QLoRA (Hardware has {vram_total:.1f}GB)"
+            )
         }
     except Exception as e:
         return {"viable": False, "error": str(e)}
