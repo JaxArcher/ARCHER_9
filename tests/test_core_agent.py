@@ -49,4 +49,4 @@ class TestCoreAgent:
         """System prompt should include identity, stance, and activity status."""
         prompt, trigger = core_agent.build_context_system_prompt("Let's plan my workout")
         assert "ARCHER" in prompt
-        assert "Stance: Direct Fitness Register" in prompt
+        assert "High-Performance Fitness" in prompt
