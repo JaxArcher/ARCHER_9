@@ -166,7 +166,7 @@ class LocalSTT(STTBackend):
                 beam_size=5,
                 language="en",
                 vad_filter=True,
-                vad_parameters=dict(min_speech_duration_ms=500, threshold=0.5),
+                vad_parameters=dict(min_speech_duration_ms=500, onset=0.5, offset=0.35),
             )
 
             # --- VAD & Hallucination Guard ---
