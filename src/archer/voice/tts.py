@@ -105,7 +105,7 @@ class LocalTTS(TTSBackend):
             from kokoro import KPipeline
             self._kokoro_pipeline = KPipeline(lang_code="a")
             logger.info("LocalTTS initialized with Kokoro-82M neural engine.")
-        except Exception as e:
+        except BaseException as e:
             logger.warning(f"Failed to initialize Kokoro pipeline: {e}. Falling back to HTTP.")
 
     def synthesize(self, text: str) -> tuple[bytes, int]:
