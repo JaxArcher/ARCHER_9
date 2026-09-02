@@ -49,6 +49,10 @@ _STANCE_KEYWORDS = {
     "accountability": {
         "procrastination", "adhd", "focus", "distraction", "routine", "clutter",
         "habit", "time blindness", "tasks"
+    },
+    "research_rd": {
+        "python", "code", "architecture", "script", "algorithm", "debug", "refactor", "api",
+        "benchmark", "framework", "system design", "database", "engineering", "hardware", "ai model"
     }
 }
 
@@ -201,6 +205,15 @@ class CoreAgent:
             except Exception:
                 pass
 
+        if "research_rd" in stance_tags:
+            try:
+                memos = self._chroma.query(query_text=text, n_results=2, collection_name="research_knowledge")
+                for m in memos:
+                    if m.get("content"):
+                        retrieved.append(f"[R&D KB] {m['content']}")
+            except Exception:
+                pass
+
         return "\n".join(retrieved)
 
     def evaluate_cloud_delegation(self, text: str, total_tokens_est: int) -> Optional[str]:
@@ -261,15 +274,19 @@ class CoreAgent:
             "system actions, Playwright browser control, window focus, or local file edits."
         )
 
-        # 3. Stance Tag Scoring
+        # 3. Stance Tag Scoring & Register Assembly
         stance_tags = self.calculate_stance_tags(text)
         stance_prompt = ""
         if "therapeutic" in stance_tags:
-            stance_prompt += "\n[Stance: Therapeutic & Reflective Register - Listen attentively and validate feelings.]"
+            stance_prompt += "\n[Stance: Therapeutic & Reflective Register - Listen attentively, validate feelings, and explore emotional dynamics without judgment.]"
         if "coaching" in stance_tags:
-            stance_prompt += "\n[Stance: Direct Fitness Register - Be action-oriented and encouraging.]"
+            stance_prompt += "\n[Stance: High-Performance Fitness & Athletic Coaching Register - Speak with direct, discipline-focused authority. Focus on physiological reality, recovery parameters, progressive overload, and biomechanical posture/form. Direct action rather than offering soft cliches or accepting excuses.]"
         if "financial" in stance_tags:
-            stance_prompt += "\n[Stance: Analytical Financial Register - Focus on precision and data.]"
+            stance_prompt += "\n[Stance: Analytical Market & Investment Register - Provide precise, risk-aware, data-grounded market analysis. Express figures in percentages and dollar amounts together, maintain risk discipline, and present options calmly without asserting certainty or making trade execution promises.]"
+        if "accountability" in stance_tags:
+            stance_prompt += "\n[Stance: Executive-Function & Accountability Register - Break tasks into immediate, low-friction micro-steps. Acknowledge friction or procrastination without judgment, avoid lecturing, and gently re-anchor focus.]"
+        if "research_rd" in stance_tags:
+            stance_prompt += "\n[Stance: Technical R&D & Engineering Register - Maintain technical precision, systemic problem solving, architectural clarity, and clean code principles. Focus on root cause diagnostics and empirical data.]"
 
         # 4. Domain Knowledge Retrieval
         domain_kb = self.retrieve_domain_knowledge(stance_tags, text)
