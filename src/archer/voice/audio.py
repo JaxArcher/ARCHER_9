@@ -58,7 +58,7 @@ class AudioManager:
         self._is_capturing = threading.Event()
         self._capture_stream: sd.Stream | None = None
         self._aec = None
-        self._playback_queue: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=100)
+        self._playback_queue: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=10000)
 
         # TTS mute
         self._tts_muted = threading.Event()
@@ -268,6 +268,10 @@ class AudioManager:
             
             total_samples = len(audio_data)
             offset = 0
+
+            # Set playing flag BEFORE chunking so the hardware callback can actively drain
+            self._is_playing.set()
+
             while offset < total_samples:
                 end = min(offset + self._chunk_samples, total_samples)
                 chunk = audio_data[offset:end]
@@ -275,13 +279,20 @@ class AudioManager:
                 if len(chunk) < self._chunk_samples:
                     chunk = np.pad(chunk, ((0, self._chunk_samples - len(chunk)), (0, 0)))
                 
-                self._playback_queue.put(chunk)
+                try:
+                    self._playback_queue.put(chunk, timeout=2.0)
+                except queue.Full:
+                    logger.error(f"Playback queue full on chunk offset {offset}/{total_samples} — aborting queue push.")
+                    break
+
                 offset = end
             
             # Add sentinel
-            self._playback_queue.put(None)
+            try:
+                self._playback_queue.put(None, timeout=2.0)
+            except queue.Full:
+                pass
             
-            self._is_playing.set()
             logger.debug(f"Playback queued: {total_samples} samples")
 
             try:
