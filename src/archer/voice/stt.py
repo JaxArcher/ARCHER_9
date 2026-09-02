@@ -171,10 +171,12 @@ class LocalSTT(STTBackend):
 
             # --- VAD & Hallucination Guard ---
             # 1. If audio surviving VAD is less than 600ms (0.6s), treat as silence
-            if hasattr(info, "duration_after_vad") and info.duration_after_vad < 0.6:
+            duration_after_vad = getattr(info, "duration_after_vad", None)
+            total_duration = getattr(info, "duration", 0.0)
+            if isinstance(duration_after_vad, (int, float)) and duration_after_vad < 0.6:
                 logger.info(
-                    f"STT VAD gate: only {info.duration_after_vad:.2f}s speech survived VAD "
-                    f"in {info.duration:.2f}s capture (<0.6s min) — treating as silence."
+                    f"STT VAD gate: only {duration_after_vad:.2f}s speech survived VAD "
+                    f"in {total_duration:.2f}s capture (<0.6s min) — treating as silence."
                 )
                 return ""
 
@@ -186,11 +188,11 @@ class LocalSTT(STTBackend):
             for seg in segment_list:
                 no_speech_prob = getattr(seg, "no_speech_prob", 0.0)
                 seg_text = seg.text.strip()
-                if no_speech_prob > 0.6:
+                if isinstance(no_speech_prob, (int, float)) and no_speech_prob > 0.6:
                     logger.debug(f"Discarding segment '{seg_text}' (no_speech_prob={no_speech_prob:.2f})")
                     continue
-                if seg_text.lower() in _HALLUCINATION_PHRASES and (not hasattr(info, "duration_after_vad") or info.duration_after_vad < 1.2):
-                    logger.info(f"Discarding Whisper hallucination phrase '{seg_text}' on short VAD audio ({getattr(info, 'duration_after_vad', 0):.2f}s)")
+                if seg_text.lower() in _HALLUCINATION_PHRASES and (not isinstance(duration_after_vad, (int, float)) or duration_after_vad < 1.2):
+                    logger.info(f"Discarding Whisper hallucination phrase '{seg_text}' on short VAD audio")
                     continue
                 valid_texts.append(seg_text)
 
