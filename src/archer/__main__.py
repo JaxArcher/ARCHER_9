@@ -16,10 +16,21 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import threading
 from pathlib import Path
+
+# CRITICAL ORDERING RULE 1 (PyTorch / ONNXRuntime Windows DLL Fix):
+# Must set KMP_DUPLICATE_LIB_OK and pre-load torch/onnxruntime BEFORE importing PyQt6 modules.
+# Qt 6 C++ runtime DLLs lock process OpenMP handles on import, causing WinError 1114 on lazy torch/onnxruntime DLL load.
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+try:
+    import torch
+    import onnxruntime
+except ImportError:
+    pass
 
 from dotenv import load_dotenv
 from loguru import logger

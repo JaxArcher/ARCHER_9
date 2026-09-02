@@ -135,8 +135,6 @@ class WebcamWidget(QFrame):
             is_running = getattr(camera, "is_running", True)
             self._timer.start()
             logger.info(f"Webcam widget attached to camera feed (capture_running={is_running}).")
-            if not is_running:
-                self._show_placeholder("CAM ERROR\n\nCamera failed to open")
         else:
             self._timer.stop()
             self._show_placeholder("No Camera")
@@ -169,7 +167,7 @@ class WebcamWidget(QFrame):
 
         frame, timestamp = self._camera.get_latest_frame()
         if frame is None:
-            if not self._has_received_frame and (time.time() - self._attached_time) > 3.0:
+            if not self._has_received_frame and (time.time() - self._attached_time) > 5.0:
                 self._show_placeholder("CAM ERROR\n\nCamera failed to open")
             return
 
@@ -190,6 +188,10 @@ class WebcamWidget(QFrame):
     def _display_frame(self, frame: np.ndarray) -> None:
         """Convert a BGR numpy array to QPixmap and display it."""
         try:
+            # Clear text label when displaying active video frame
+            if self._video_label.text():
+                self._video_label.setText("")
+
             # OpenCV BGR → Qt RGB
             import cv2
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -200,17 +202,22 @@ class WebcamWidget(QFrame):
                 rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888
             )
 
+            # Determine target size, fallback to widget size if label size is empty
+            target_size = self._video_label.size()
+            if target_size.width() <= 0 or target_size.height() <= 0:
+                target_size = self.size()
+
             # Scale to fit label while maintaining aspect ratio
             pixmap = QPixmap.fromImage(qimg)
             scaled = pixmap.scaled(
-                self._video_label.size(),
+                target_size,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
             self._video_label.setPixmap(scaled)
 
         except Exception as e:
-            logger.debug(f"Frame display error: {e}")
+            logger.warning(f"Frame display error: {e}")
 
     def _show_placeholder(self, text: str) -> None:
         """Show a text placeholder instead of video."""
