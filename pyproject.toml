@@ -21,6 +21,12 @@ dependencies = [
     "pyvista==0.44.2",
     "pyvistaqt==0.11.2",
 
+    # --- Deep Learning & Runtimes (Pinned for RTX 5080 / CUDA 12.8 cu128 compatibility) ---
+    "torch==2.10.0+cu128",
+    "torchvision==0.25.0+cu128",
+    "torchaudio==2.10.0+cu128",
+    "onnxruntime==1.28.0",
+
     # --- Voice Pipeline ---
     "openwakeword==0.6.0",
     "webrtcvad==2.0.10",

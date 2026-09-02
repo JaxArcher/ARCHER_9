@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 
+import time
 import numpy as np
 from loguru import logger
 
@@ -49,6 +50,8 @@ class WebcamWidget(QFrame):
         self._camera = None  # Set via set_camera()
         self._paused = False
         self._get_detections: Callable[[], list[dict]] | None = None
+        self._attached_time: float = 0.0
+        self._has_received_frame: bool = False
 
         self._setup_ui()
 
@@ -125,9 +128,15 @@ class WebcamWidget(QFrame):
             camera: A WebcamCapture instance (from observer pipeline).
         """
         self._camera = camera
+        self._attached_time = time.time()
+        self._has_received_frame = False
+
         if camera is not None:
+            is_running = getattr(camera, "is_running", True)
             self._timer.start()
-            logger.info("Webcam widget attached to camera feed.")
+            logger.info(f"Webcam widget attached to camera feed (capture_running={is_running}).")
+            if not is_running:
+                self._show_placeholder("CAM ERROR\n\nCamera failed to open")
         else:
             self._timer.stop()
             self._show_placeholder("No Camera")
@@ -160,7 +169,11 @@ class WebcamWidget(QFrame):
 
         frame, timestamp = self._camera.get_latest_frame()
         if frame is None:
+            if not self._has_received_frame and (time.time() - self._attached_time) > 3.0:
+                self._show_placeholder("CAM ERROR\n\nCamera failed to open")
             return
+
+        self._has_received_frame = True
 
         # Apply detection overlays if available
         if self._get_detections is not None:
