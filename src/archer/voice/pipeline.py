@@ -359,6 +359,11 @@ class VoicePipeline:
 
             except Exception as e:
                 logger.error(f"Utterance processing failed: {e}")
+                self._bus.publish(Event(
+                    type=EventType.SYSTEM_ERROR,
+                    source="voice_pipeline",
+                    data={"message": f"Utterance processing failed: {e}"}
+                ))
                 sentence_queue.put("I'm sorry, I encountered an error.")
             finally:
                 sentence_queue.put(None)  # Sentinel
@@ -446,6 +451,11 @@ class VoicePipeline:
                         sentence_queue.put(sentence)
             except Exception as e:
                 logger.error(f"Agent call failed: {e}")
+                self._bus.publish(Event(
+                    type=EventType.SYSTEM_ERROR,
+                    source="voice_pipeline",
+                    data={"message": f"Agent call failed: {e}"}
+                ))
                 sentence_queue.put("I'm sorry, I encountered an error.")
             finally:
                 sentence_queue.put(None)
