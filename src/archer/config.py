@@ -125,6 +125,11 @@ class ArcherConfig(BaseSettings):
     local_fallback_model: str = Field(default="qwen3.5:4b", alias="ARCHER_LOCAL_MODEL")
     enable_auto_fallback: bool = Field(default=True, alias="ARCHER_ENABLE_FALLBACK")
 
+    # Local Primary Model (CoreAgent Single-Agent Architecture)
+    core_primary_model: str = Field(
+        default="qwen3:8b", alias="ARCHER_CORE_PRIMARY_MODEL"
+    )
+
     # --- HALT ---
     halt_phrase: str = "archer halt"
     halt_response_ms: int = 150  # Max time to respond to HALT

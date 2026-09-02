@@ -90,12 +90,16 @@ class CoreAgent:
         self._chroma = get_chromadb_store()
         self.activity_buffer = ActivityStatusBuffer()
         
+        # Section 6.5 Benchmark Selected Primary Model: qwen3:8b
+        # Reason: Chosen for 136+ tok/s speed, ~7.3GB VRAM headroom, and Unsloth LoRA viability on 16GB GPU.
+        self.primary_model: str = self._config.core_primary_model
+        
         self._history_lock = threading.Lock()
         self._conversation_history: List[Dict[str, str]] = []
         
         # Subscribe to observer events for activity buffer
         self._bus.subscribe(EventType.OBSERVATION_EVENT, self._on_observation)
-        logger.info("CoreAgent (Single-Agent Architecture) initialized.")
+        logger.info(f"CoreAgent (Single-Agent Architecture) initialized with primary model: {self.primary_model}")
 
     def _on_observation(self, event: Event) -> None:
         """Update rolling activity status buffer on significant events."""
