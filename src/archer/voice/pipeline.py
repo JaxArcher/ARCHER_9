@@ -216,6 +216,21 @@ class VoicePipeline:
                     ))
 
             elif self._state == VoicePipelineState.LISTENING:
+                # Also check wake word if no speech has started yet
+                if not self._heard_speech:
+                    if self._wake_word.process_audio(audio_chunk):
+                        logger.info("🎤 Wake word detected during listening — resetting follow-up listener...")
+                        self._vad.reset()
+                        self._speech_buffer.clear()
+                        self._heard_speech = False
+                        self._silence_frames = 0
+                        self._listen_start = time.monotonic()
+                        self._bus.publish(Event(
+                            type=EventType.WAKE_WORD_DETECTED,
+                            source="voice_pipeline",
+                        ))
+                        continue
+
                 # Collect ALL audio while listening (speech + pauses).
                 # The STT model handles noise/silence far better than
                 # trying to gate audio frames ourselves.
@@ -587,10 +602,7 @@ class VoicePipeline:
             data={"text": response_text},
         ))
 
-        # Transition to LISTENING (not IDLE) for continuous dialogue.
-        # The user can keep talking without re-saying the wake word.
-        # A 5-second silence timeout in the LISTENING state will
-        # return to IDLE if no follow-up speech is detected.
+        logger.info(f"Response streaming completed ({len(collected_text)} sentences). Transitioning pipeline state: SPEAKING -> LISTENING.")
         self._set_state(VoicePipelineState.LISTENING)
         self._vad.reset()
         self._speech_buffer.clear()

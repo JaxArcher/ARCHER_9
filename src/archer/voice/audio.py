@@ -248,8 +248,10 @@ class AudioManager:
         try:
             import soundfile as sf
             os.makedirs("scratch", exist_ok=True)
-            sf.write("scratch/last_hardware_playback.wav", audio_data, rate)
-            logger.info(f"Saved live hardware playback array to scratch/last_hardware_playback.wav ({len(audio_data)} samples @ {rate}Hz)")
+            ts = int(time.time() * 1000)
+            dump_filename = f"scratch/last_hardware_playback_{ts}.wav"
+            sf.write(dump_filename, audio_data, rate)
+            logger.info(f"Saved live hardware playback array to {dump_filename} ({len(audio_data)} samples @ {rate}Hz)")
         except Exception as e:
             logger.warning(f"Failed to dump hardware playback audio: {e}")
 
@@ -307,6 +309,12 @@ class AudioManager:
                         current_offset += self._chunk_samples
                     
                     time.sleep(self._config.audio_chunk_ms / 1000.0)
+
+                elapsed_wait = time.time() - start_wait
+                logger.info(
+                    f"PLAY_AUDIO BLOCKING WAIT COMPLETE: played {total_samples} samples "
+                    f"(expected {duration:.2f}s, elapsed {elapsed_wait:.2f}s, is_playing={self._is_playing.is_set()})"
+                )
 
             except Exception as e:
                 logger.error(f"Audio playback error: {e}")
