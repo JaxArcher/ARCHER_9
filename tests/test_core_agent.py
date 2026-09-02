@@ -53,7 +53,7 @@ class TestCoreAgent:
 
     def test_blindspot_path1_piggyback(self, core_agent):
         """Blindspot flag should piggyback on next turn once and clear after use."""
-        from archer.event_bus import Event, EventType
+        from archer.core.event_bus import Event, EventType
         # Stage observer event
         core_agent._on_observation(Event(type=EventType.OBSERVATION_EVENT, source="test", data={"event_type": "sedentary", "duration_minutes": 90}))
         
