@@ -58,6 +58,7 @@ class EmotionAnalyzer:
         self._available = True
         self._last_check = 0.0
         self._check_interval = 60.0  # Re-check availability every 60s
+        self._angry_window: list[float] = []  # Timestamps of recent angry detections
 
     def analyze(self, frame: np.ndarray) -> list[DetectionResult]:
         """
@@ -86,11 +87,28 @@ class EmotionAnalyzer:
             resp.raise_for_status()
             data = resp.json()
 
+            now = time.monotonic()
             results = []
             for face in data.get("results", []):
                 dominant = face.get("dominant_emotion", "neutral")
                 emotions = face.get("emotion", {})
                 confidence = emotions.get(dominant, 0.0) / 100.0
+
+                # False-positive mitigation for "angry":
+                # Require >= 0.75 confidence AND 2+ detections within a 90s window before emitting "angry"
+                if dominant == "angry":
+                    if confidence < 0.75:
+                        # Fall back to neutral or highest non-angry emotion
+                        sorted_emotions = sorted([(k, v) for k, v in emotions.items() if k != "angry"], key=lambda x: x[1], reverse=True)
+                        dominant = sorted_emotions[0][0] if sorted_emotions else "neutral"
+                        confidence = emotions.get(dominant, 0.0) / 100.0
+                    else:
+                        self._angry_window = [t for t in self._angry_window if now - t < 90.0]
+                        self._angry_window.append(now)
+                        if len(self._angry_window) < 2:
+                            # Not yet sustained across multiple readings — suppress angry for now
+                            dominant = "neutral"
+                            confidence = 0.5
 
                 results.append(DetectionResult(
                     source="webcam",

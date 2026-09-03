@@ -63,6 +63,9 @@ class AudioManager:
         # TTS mute
         self._tts_muted = threading.Event()
 
+        # Mic mute
+        self._mic_muted = threading.Event()
+
         # Register HALT handler
         self._bus.subscribe_halt(self._on_halt)
 
@@ -172,7 +175,7 @@ class AudioManager:
             outdata.fill(0)
 
         # 2. Input (Capture) + AEC
-        if self._is_capturing.is_set():
+        if self._is_capturing.is_set() and not self._mic_muted.is_set():
             if self._aec and self._is_playing.is_set():
                 # pyaec expects int16 bytes and returns a list of 8-bit byte ints
                 clean_bytes_list = self._aec.cancel_echo(indata.tobytes(), ref_chunk.tobytes())
@@ -191,8 +194,33 @@ class AudioManager:
                 except queue.Empty:
                     pass
 
+    def set_mic_muted(self, muted: bool) -> None:
+        """Mute or unmute microphone capture."""
+        if muted:
+            self._mic_muted.set()
+            while not self._audio_queue.empty():
+                try:
+                    self._audio_queue.get_nowait()
+                except queue.Empty:
+                    break
+        else:
+            self._mic_muted.clear()
+
+        logger.info(f"Microphone mute state changed: muted={muted}")
+        self._bus.publish(Event(
+            type=EventType.MIC_MUTE_TOGGLED,
+            source="audio_manager",
+            data={"muted": muted}
+        ))
+
+    def is_mic_muted(self) -> bool:
+        """Check if microphone capture is muted."""
+        return self._mic_muted.is_set()
+
     def get_audio_chunk(self, timeout: float = 0.1) -> bytes | None:
-        """Get the next audio chunk from the capture queue. Returns None on timeout."""
+        """Get the next audio chunk from the capture queue. Returns None on timeout or when muted."""
+        if self._mic_muted.is_set():
+            return None
         try:
             return self._audio_queue.get(timeout=timeout)
         except queue.Empty:
@@ -402,3 +430,17 @@ class AudioManager:
         self.stop_playback()
         self.stop_capture()
         logger.info("AudioManager shut down.")
+
+
+_audio_manager_instance: AudioManager | None = None
+_audio_manager_lock = threading.Lock()
+
+
+def get_audio_manager() -> AudioManager:
+    """Get or create singleton AudioManager instance."""
+    global _audio_manager_instance
+    if _audio_manager_instance is None:
+        with _audio_manager_lock:
+            if _audio_manager_instance is None:
+                _audio_manager_instance = AudioManager()
+    return _audio_manager_instance

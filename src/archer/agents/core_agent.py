@@ -250,13 +250,55 @@ class CoreAgent:
             
         return None
 
+    def _check_visual_query(self, text: str) -> Optional[str]:
+        """
+        If text asks a visual question ("what do you see", "look at this", "what am i holding"),
+        capture a frame from the camera pipeline and query local Moondream VLM via Ollama.
+        """
+        lower = text.lower()
+        visual_triggers = [
+            "what do you see", "look at", "in front of the camera", "describe what you see",
+            "what am i holding", "what is in front of me", "what's on my desk", "what's in the camera",
+            "can you see me", "can you see this"
+        ]
+        if not any(t in lower for t in visual_triggers):
+            return None
+
+        try:
+            from archer.observer.pipeline import ObserverPipeline
+            pipeline = ObserverPipeline.get_instance()
+            if pipeline and pipeline.camera:
+                frame, timestamp = pipeline.camera.get_latest_frame()
+                if frame is not None:
+                    import cv2
+                    import base64
+                    _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    img_b64 = base64.b64encode(buffer.tobytes()).decode("utf-8")
+
+                    url = f"{self._config.ollama_base_url}/api/generate"
+                    payload = {
+                        "model": "moondream",
+                        "prompt": "Describe in detail what is visible in this camera frame.",
+                        "images": [img_b64],
+                        "stream": False,
+                    }
+                    resp = httpx.post(url, json=payload, timeout=15.0)
+                    if resp.status_code == 200:
+                        desc = resp.json().get("response", "").strip()
+                        if desc:
+                            logger.info(f"Visual Q&A Moondream description generated: {desc[:60]}...")
+                            return desc
+        except Exception as e:
+            logger.warning(f"Visual Q&A Moondream query failed: {e}")
+        return None
+
     def build_context_system_prompt(self, text: str) -> tuple[str, Optional[str]]:
         """
         Construct 7-step context assembly pipeline:
         1. Safety pre-check
         2. Core identity block
         3. Stance tag scoring
-        4. Domain knowledge retrieval
+        4. Domain knowledge retrieval (including visual Q&A)
         5. Personal memory retrieval (OpenMemory)
         6. Rolling activity status buffer
         7. System prompt string + cloud trigger flag
@@ -265,12 +307,12 @@ class CoreAgent:
         if safety_response:
             return safety_response, "safety_override"
 
-        # 2. Core Identity Block & Strict Attribution Rules
+        # 2. Core Identity Block & Operational Guidelines
         identity_block = (
             "You are ARCHER — Advanced Responsive Computing Helper & Executive Resource.\n"
             "You are Colby's primary personal companion and assistant. You speak with directness, "
             "warm empathy, and intelligent clarity. Maintain a single unified identity at all times.\n\n"
-            "CRITICAL ATTRIBUTION & OBSERVATION GUIDELINES:\n"
+            "CRITICAL ATTRIBUTION & OPERATIONAL GUIDELINES:\n"
             "1. OBSERVER / SENSOR DATA: Ambient observations (e.g. posture alerts, emotional detection, sedentary tracking) "
             "are tentative sensor readings, NOT established facts or diagnoses. ALWAYS frame sensor findings as tentative, "
             "named observations or open questions (e.g. 'I noticed you seem a bit tense or slouched — how are you feeling?' "
@@ -279,13 +321,18 @@ class CoreAgent:
             "2. RETRIEVED KNOWLEDGE & PAST MEMORIES: Context provided under '## Reference Domain Knowledge' or "
             "'## Past Session Context' consists of external reference material or prior context from past interactions. "
             "NEVER claim, quote, or paraphrase retrieved reference material or past memory entries as if the user said them in the "
-            "current turn. Only reference past context explicitly as prior context (e.g., 'In a past session, we discussed...' "
-            "or 'Based on reference materials...'). The current user prompt is the ONLY source for what the user is saying right now.\n"
-            "3. ACTIVE CAPABILITIES & CONVERSATIONAL BOUNDARIES: You are currently operating in a pure voice/text "
-            "conversational mode. You do NOT have active local tool-execution capabilities (such as browser automation, "
-            "taking screenshots, mouse/keyboard control, or file modifications) enabled in this turn. Describe yourself strictly "
-            "as a conversational assistant, sounding board, and knowledge advisor. NEVER claim, fabricate, or pretend to perform "
-            "system actions, Playwright browser control, window focus, or local file edits."
+            "current turn. Only reference past context explicitly as prior context.\n"
+            "3. INTEGRATED VOICE & VISION SYSTEM vs. OS ACTION TOOLS: You ARE fully integrated into ARCHER's desktop environment "
+            "with real, working voice input (Faster-Whisper STT), natural voice output (Kokoro TTS), and a real-time camera/observer "
+            "pipeline that feeds posture, emotion, and visual scene descriptions into your context. NEVER claim you lack voice or camera "
+            "capabilities. However, you do NOT have local OS file-editing, Playwright browser control, screenshot capturing, or window-focus "
+            "execution tools enabled in this turn. Describe yourself as a conversational voice/vision assistant.\n"
+            "4. HARD ANTI-FABRICATION RULE FOR DATA & FIGURES: NEVER state, invent, or estimate specific prices, stock quotes, "
+            "percentage changes, revenue figures, exact dollar amounts, or timestamps unless they are explicitly provided in the "
+            "Reference Domain Knowledge or Past Session Context. If asked for current stock prices or live data when no live data is in "
+            "context, state plainly and clearly that you do not have live market data access.\n"
+            "5. SPOKEN RESPONSE FORMAT: You are a voice-first assistant. Always respond in plain, natural spoken prose. NEVER use markdown "
+            "formatting (no asterisks, headers, bold, bullet points) or emojis, as these are read literally by the text-to-speech engine."
         )
 
         # 3. Stance Tag Scoring & Register Assembly
@@ -306,14 +353,18 @@ class CoreAgent:
         if "coaching" in stance_tags:
             stance_prompt += "\n[Stance: High-Performance Fitness & Athletic Coaching Register - Speak with direct, discipline-focused authority. Focus on physiological reality, recovery parameters, progressive overload, and biomechanical posture/form. Direct action rather than offering soft cliches or accepting excuses.]"
         if "financial" in stance_tags:
-            stance_prompt += "\n[Stance: Analytical Market & Investment Register - Provide precise, risk-aware, data-grounded market analysis. Express figures in percentages and dollar amounts together, maintain risk discipline, and present options calmly without asserting certainty or making trade execution promises.]"
+            stance_prompt += "\n[Stance: Analytical Market & Investment Register - Provide precise, risk-aware, data-grounded market analysis. Maintain risk discipline. NEVER invent or state specific stock prices, percentage moves, or revenue figures without explicit live data in context; if live figures are requested without data available, state plainly that you do not have live market data access.]"
         if "accountability" in stance_tags:
             stance_prompt += "\n[Stance: Executive-Function & Accountability Register - Break tasks into immediate, low-friction micro-steps. Acknowledge friction or procrastination without judgment, avoid lecturing, and gently re-anchor focus.]"
         if "research_rd" in stance_tags:
             stance_prompt += "\n[Stance: Technical R&D & Engineering Register - Maintain technical precision, systemic problem solving, architectural clarity, and clean code principles. Focus on root cause diagnostics and empirical data.]"
 
-        # 4. Domain Knowledge Retrieval
+        # 4. Domain Knowledge Retrieval & Visual Q&A
         domain_kb = self.retrieve_domain_knowledge(stance_tags, text)
+        visual_desc = self._check_visual_query(text)
+        if visual_desc:
+            domain_kb = (domain_kb + f"\n[Live Camera Feed Description] {visual_desc}").strip()
+
         kb_block = f"\n\n## Reference Domain Knowledge (External Reference - NOT spoken by user)\n{domain_kb}" if domain_kb else ""
 
         # 5. Personal Memory Retrieval

@@ -49,6 +49,26 @@ class TTSBackend(ABC):
         ...
 
 
+import re
+
+def sanitize_text_for_tts(text: str) -> str:
+    """
+    Sanitize text before TTS synthesis.
+    Strips markdown formatting, headers, bullet points, asterisks, hash signs, and emojis
+    to prevent TTS from reading raw formatting literal names ("asterisk", "hash", "smiley face").
+    """
+    if not text:
+        return ""
+    t = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    t = re.sub(r'[\U00010000-\U0010ffff]', '', t)
+    t = re.sub(r'^#+\s*', '', t, flags=re.MULTILINE)
+    t = re.sub(r'[*_`~]+', '', t)
+    t = re.sub(r'^\s*[-*+]\s+', '', t, flags=re.MULTILINE)
+    t = re.sub(r'^\s*\d+\.\s+', '', t, flags=re.MULTILINE)
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+
 class CloudTTS(TTSBackend):
     """ElevenLabs cloud TTS backend with streaming support."""
 
@@ -64,6 +84,9 @@ class CloudTTS(TTSBackend):
 
     def synthesize(self, text: str) -> tuple[bytes, int]:
         """Synthesize text using ElevenLabs streaming TTS."""
+        text = sanitize_text_for_tts(text)
+        if not text:
+            return b"", 24000
         try:
             client = self._get_client()
 
@@ -110,6 +133,9 @@ class LocalTTS(TTSBackend):
 
     def synthesize(self, text: str) -> tuple[bytes, int]:
         """Synthesize text using Kokoro-82M neural TTS engine."""
+        text = sanitize_text_for_tts(text)
+        if not text:
+            return b"", 24000
         import io
         import time
         import numpy as np

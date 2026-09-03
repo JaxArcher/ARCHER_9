@@ -75,6 +75,15 @@ class WakeWordDetector:
         if self._model is None:
             return False
 
+        from archer.voice.audio import AudioManager
+        # Bypass wake word processing if mic is muted
+        try:
+            from archer.voice import get_audio_manager
+            if get_audio_manager().is_mic_muted():
+                return False
+        except Exception:
+            pass
+
         # Convert bytes to numpy array
         audio_array = np.frombuffer(audio_chunk, dtype=np.int16)
 

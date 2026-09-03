@@ -33,6 +33,7 @@ class EventType(str, Enum):
     TTS_END = "voice.tts_end"
     BARGE_IN = "voice.barge_in"
     FILLER_PLAY = "voice.filler_play"
+    MIC_MUTE_TOGGLED = "voice.mic_mute_toggled"
 
     # HALT
     HALT = "system.halt"

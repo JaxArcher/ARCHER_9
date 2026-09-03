@@ -219,6 +219,26 @@ class MainWindow(QMainWindow):
         self._toggle_btn.clicked.connect(self._on_toggle_mode)
         toolbar.addWidget(self._toggle_btn)
 
+        # Mic Mute button
+        self._mic_btn = QPushButton("🎤 MIC ON")
+        self._mic_btn.setFixedSize(90, 28)
+        self._mic_btn.setStyleSheet("""
+            QPushButton {
+                background: #102a10;
+                color: #44ff44;
+                border: 1px solid #239b23;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #103a10;
+                border-color: #44ff44;
+            }
+        """)
+        self._mic_btn.clicked.connect(self._on_toggle_mic)
+        toolbar.addWidget(self._mic_btn)
+
         # HALT button — always visible, always functional
         self._halt_btn = QPushButton("⛔ HALT")
         self._halt_btn.setFixedSize(80, 28)
@@ -527,6 +547,49 @@ class MainWindow(QMainWindow):
         new_mode = self._toggle.toggle()
         self._mode_label.setText(f"  ☁ CLOUD  " if new_mode == "cloud" else "  🖥 LOCAL  ")
         logger.info(f"Mode toggled to: {new_mode}")
+
+    def _on_toggle_mic(self) -> None:
+        """Handle mic mute button click."""
+        try:
+            from archer.voice import get_audio_manager
+            am = get_audio_manager()
+            is_muted = not am.is_mic_muted()
+            am.set_mic_muted(is_muted)
+            if is_muted:
+                self._mic_btn.setText("🔇 MIC MUTED")
+                self._mic_btn.setStyleSheet("""
+                    QPushButton {
+                        background: #3a1010;
+                        color: #ff4444;
+                        border: 1px solid #9b2323;
+                        border-radius: 4px;
+                        font-size: 11px;
+                        font-weight: bold;
+                    }
+                    QPushButton:hover {
+                        background: #5a1010;
+                        border-color: #ff4444;
+                    }
+                """)
+                self._orb.set_state("idle")
+            else:
+                self._mic_btn.setText("🎤 MIC ON")
+                self._mic_btn.setStyleSheet("""
+                    QPushButton {
+                        background: #102a10;
+                        color: #44ff44;
+                        border: 1px solid #239b23;
+                        border-radius: 4px;
+                        font-size: 11px;
+                        font-weight: bold;
+                    }
+                    QPushButton:hover {
+                        background: #103a10;
+                        border-color: #44ff44;
+                    }
+                """)
+        except Exception as e:
+            logger.error(f"Failed to toggle mic mute: {e}")
 
     def _on_halt_clicked(self) -> None:
         """Handle HALT button click."""
