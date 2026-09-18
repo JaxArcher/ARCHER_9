@@ -180,16 +180,31 @@ class LocalSTT(STTBackend):
                 )
                 return ""
 
-            # 2. Check segments for high no_speech_prob or known hallucination phrases
+            # 2. Check segments for high no_speech_prob, low confidence, or known
+            #    hallucination phrases. A fixed phrase list can only ever catch
+            #    hallucinations Whisper has produced before ("thank you",
+            #    "thanks for watching", etc.) — it can't catch novel ones like
+            #    "Thank you for your service." made up from a noise burst.
+            #    avg_logprob is Whisper's own confidence in the words it chose,
+            #    independent of whether the phrase is a known offender; -1.0 is
+            #    the same default OpenAI's own CLI uses to flag likely garbage.
             segment_list = list(segments)
             valid_texts = []
             _HALLUCINATION_PHRASES = {"thank you", "thank you.", "thanks for watching", "subtitles by", "you", "amara.org"}
+            _LOGPROB_FLOOR = -1.0
 
             for seg in segment_list:
                 no_speech_prob = getattr(seg, "no_speech_prob", 0.0)
+                avg_logprob = getattr(seg, "avg_logprob", 0.0)
                 seg_text = seg.text.strip()
                 if isinstance(no_speech_prob, (int, float)) and no_speech_prob > 0.6:
                     logger.debug(f"Discarding segment '{seg_text}' (no_speech_prob={no_speech_prob:.2f})")
+                    continue
+                if isinstance(avg_logprob, (int, float)) and avg_logprob < _LOGPROB_FLOOR:
+                    logger.info(
+                        f"Discarding low-confidence segment '{seg_text}' "
+                        f"(avg_logprob={avg_logprob:.2f} < {_LOGPROB_FLOOR}) — likely hallucinated"
+                    )
                     continue
                 if seg_text.lower() in _HALLUCINATION_PHRASES and (not isinstance(duration_after_vad, (int, float)) or duration_after_vad < 1.2):
                     logger.info(f"Discarding Whisper hallucination phrase '{seg_text}' on short VAD audio")
@@ -226,13 +241,23 @@ class STTService:
         self._toggle = get_toggle_service()
         self._bus = get_event_bus()
 
-    def transcribe(self, audio_data: bytes, sample_rate: int = 16000) -> str:
+    def transcribe(
+        self, audio_data: bytes, sample_rate: int = 16000, publish_event: bool = True
+    ) -> str:
         """
         Transcribe audio data to text using the currently active backend.
 
         Args:
             audio_data: Raw PCM audio bytes (int16, mono)
             sample_rate: Sample rate of the audio
+            publish_event: Whether to publish an STT_FINAL event on the bus.
+                The GUI conversation panel renders every STT_FINAL as a
+                "You:" line, so callers doing internal/speculative
+                transcription (e.g. the voice pipeline's barge-in
+                self-echo probe) must pass False — otherwise probe audio
+                that's later discarded as self-echo (or silence) still
+                flashes onto the screen as if the user said it. Defaults
+                to True to preserve normal user-utterance behavior.
 
         Returns:
             Transcribed text string.
@@ -245,11 +270,12 @@ class STTService:
                 elapsed = (time.monotonic() - start_time) * 1000
                 logger.info(f"STT (cloud) completed in {elapsed:.0f}ms")
 
-                self._bus.publish(Event(
-                    type=EventType.STT_FINAL,
-                    source="stt",
-                    data={"text": text, "backend": "cloud", "latency_ms": elapsed},
-                ))
+                if publish_event:
+                    self._bus.publish(Event(
+                        type=EventType.STT_FINAL,
+                        source="stt",
+                        data={"text": text, "backend": "cloud", "latency_ms": elapsed},
+                    ))
                 return text
 
             except Exception as e:
@@ -262,11 +288,12 @@ class STTService:
             elapsed = (time.monotonic() - start_time) * 1000
             logger.info(f"STT (local) completed in {elapsed:.0f}ms")
 
-            self._bus.publish(Event(
-                type=EventType.STT_FINAL,
-                source="stt",
-                data={"text": text, "backend": "local", "latency_ms": elapsed},
-            ))
+            if publish_event:
+                self._bus.publish(Event(
+                    type=EventType.STT_FINAL,
+                    source="stt",
+                    data={"text": text, "backend": "local", "latency_ms": elapsed},
+                ))
             return text
 
         except Exception as e:

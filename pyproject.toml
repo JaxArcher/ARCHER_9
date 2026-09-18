@@ -35,7 +35,9 @@ dependencies = [
     "sounddevice==0.5.1",
     "soundfile==0.13.1",
     "numpy==1.26.4",
+    "scipy==1.17.1",  # anti-aliased resample_poly for mic/TTS resampling -- fixes aliasing noise that was fooling webrtcvad (2026-09-16). Already present as a transitive dep, pinned here since audio.py now imports it directly.
     "pyaec==1.0.1",
+    "soundcard>=0.4.3",  # WASAPI loopback reference capture — sounddevice/PortAudio has no loopback support
 
     # --- Voice Authentication ---
     "speechbrain==1.0.2",
@@ -59,6 +61,7 @@ dependencies = [
     "mss==9.0.2",
     "Pillow==11.1.0",
     "playwright==1.49.1",
+    "psutil==6.1.1",  # CPU% for the SYSTEM dashboard card (2026-09-16)
 
     # --- Scheduling ---
     "apscheduler==3.10.4",
@@ -83,6 +86,7 @@ dev = [
 
 [project.scripts]
 archer = "archer.__main__:main"
+archer-web = "archer.web_main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -87,12 +87,24 @@ class WakeWordDetector:
         # Convert bytes to numpy array
         audio_array = np.frombuffer(audio_chunk, dtype=np.int16)
 
-        # RMS energy floor guard: if chunk is pitch-black silence (<50 RMS), skip inference to prevent model drift
-        rms = float(np.sqrt(np.mean(audio_array.astype(np.float64) ** 2)))
-        if rms < 50.0:
-            return False
-
-        # Feed to model
+        # Removed 2026-09-17 (Col's report + reproduced from his log): a
+        # prior "RMS energy floor guard" here skipped calling
+        # self._model.predict() entirely on any near-silent chunk (<50
+        # RMS), meant to "prevent model drift". openWakeWord's model is a
+        # STREAMING classifier -- its melspectrogram/embedding stages
+        # need a continuous run of predict() calls to build up their
+        # internal rolling buffer before a score means anything. Skipping
+        # inference during every quiet gap (which is most of the time,
+        # including the brief pauses between syllables while actually
+        # saying the wake phrase) starved that buffer, so the first
+        # attempt after any silence never had enough context to cross
+        # threshold -- reproduced exactly as Col described: first
+        # "hey jarvis" does nothing, then a second attempt (even a minute
+        # later, just "hey") fires instantly, because the buffer was left
+        # sitting on partial state from the first attempt's non-skipped
+        # frames with nothing since to refresh or clear it. Feeding every
+        # chunk (silence included) is the model's normal, designed usage
+        # -- it has its own internal smoothing and doesn't need this gate.
         self._model.predict(audio_array)
 
         # Check all wake word scores

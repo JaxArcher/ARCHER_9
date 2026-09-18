@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
 from loguru import logger
 
 from archer.core.event_bus import Event, EventType, get_event_bus
+from archer.gui.console_widget import ConsoleWidget
 
 
 # Agent color map (matches conversation.py and orb_widget.py)
@@ -139,6 +140,12 @@ class ArtifactPane(QWidget):
         """)
         self._tabs.currentChanged.connect(self._on_tab_changed)
 
+        # Pinned "Console" tab — always tab 0, never evicted by the
+        # artifact-rotation logic below. Tails ARCHER's own log file so
+        # there's no need to alt-tab to the terminal to see what's happening.
+        self._reserved_tabs = 1
+        self._tabs.addTab(ConsoleWidget(), "\U0001F5A5 Console")
+
         # Add idle state tab
         self._add_idle_tab()
 
@@ -192,9 +199,10 @@ class ArtifactPane(QWidget):
         """Add a new artifact tab (GUI thread)."""
         self._artifacts.append(payload)
 
-        # Remove idle tab if it's the only tab
-        if self._tabs.count() == 1 and self._tabs.tabText(0) == "ARCHER":
-            self._tabs.removeTab(0)
+        # Remove idle tab if it's the only non-reserved tab
+        idle_index = self._reserved_tabs
+        if self._tabs.count() == self._reserved_tabs + 1 and self._tabs.tabText(idle_index) == "ARCHER":
+            self._tabs.removeTab(idle_index)
 
         # Create the content widget based on type
         content_widget = self._create_content_widget(payload)
@@ -210,9 +218,10 @@ class ArtifactPane(QWidget):
         color = QColor(_AGENT_COLORS.get(payload.agent, "#888888"))
         self._tabs.tabBar().setTabTextColor(index, color)
 
-        # Remove excess tabs (keep MAX_TABS)
-        while self._tabs.count() > MAX_TABS:
-            self._tabs.removeTab(0)
+        # Remove excess tabs (keep MAX_TABS), oldest artifact first —
+        # never touch the reserved Console tab at index 0.
+        while self._tabs.count() > MAX_TABS + self._reserved_tabs:
+            self._tabs.removeTab(self._reserved_tabs)
             if self._artifacts and len(self._artifacts) > MAX_TABS:
                 self._artifacts.pop(0)
 

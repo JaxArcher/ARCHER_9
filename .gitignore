@@ -47,3 +47,6 @@ ARCHER_v2/
 
 # Special files
 nul
+
+# Scratch debug audio recordings (grows unbounded, not meant to be tracked)
+scratch/

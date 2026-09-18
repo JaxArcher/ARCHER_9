@@ -7,8 +7,9 @@ Key pattern: archer:buffer:{user_id}:{session_id}
 """
 
 import json
+import threading
 from datetime import timedelta
-from typing import Any
+from typing import Any, Callable
 
 import redis
 from loguru import logger
@@ -80,6 +81,58 @@ class RedisBuffer:
             )
         except Exception as e:
             logger.error(f"Redis heartbeat failed: {e}")
+
+    # --- Pub/Sub (2026-09-16) ---
+    # Added so the standalone observer service (archer/observer_service.py
+    # -- its own OS process, decoupled from the desktop GUI / browser
+    # server so observation doesn't depend on either being open) can reach
+    # CoreAgent, wherever CoreAgent happens to be running. The in-process
+    # EventBus only ever worked because everything used to share one
+    # process; this is the cross-process equivalent, using infrastructure
+    # (Redis) already running for session-recovery snapshots above.
+
+    def publish(self, channel: str, data: dict[str, Any]) -> None:
+        """Publish one JSON-encoded message to a channel. Best-effort --
+        if Redis is unreachable this just logs and returns, same as every
+        other method here; a dropped observer event is not worth crashing
+        over."""
+        if not self._client:
+            return
+        try:
+            self._client.publish(channel, json.dumps(data))
+        except Exception as e:
+            logger.debug(f"Redis publish to {channel} failed (non-fatal): {e}")
+
+    def subscribe(self, channel: str, callback: Callable[[dict[str, Any]], None]) -> None:
+        """Subscribe to a channel and invoke callback(data) for every
+        message, on a dedicated background daemon thread. Safe to call
+        multiple times for different channels/callbacks -- each gets its
+        own thread and its own pubsub connection."""
+        if not self._client:
+            logger.debug(f"Redis unavailable -- subscribe({channel}) is a no-op.")
+            return
+
+        def _listen():
+            pubsub = self._client.pubsub()
+            pubsub.subscribe(channel)
+            logger.info(f"Redis subscribed to '{channel}'.")
+            try:
+                for message in pubsub.listen():
+                    if message.get("type") != "message":
+                        continue
+                    try:
+                        data = json.loads(message["data"])
+                    except Exception as e:
+                        logger.debug(f"Redis message on {channel} was not valid JSON: {e}")
+                        continue
+                    try:
+                        callback(data)
+                    except Exception as e:
+                        logger.error(f"Redis subscriber callback for {channel} failed: {e}")
+            except Exception as e:
+                logger.warning(f"Redis subscription to {channel} ended (non-fatal): {e}")
+
+        threading.Thread(target=_listen, daemon=True, name=f"redis-sub-{channel}").start()
 
 
 # Global singleton

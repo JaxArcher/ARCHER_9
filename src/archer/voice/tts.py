@@ -65,6 +65,19 @@ def sanitize_text_for_tts(text: str) -> str:
     t = re.sub(r'[*_`~]+', '', t)
     t = re.sub(r'^\s*[-*+]\s+', '', t, flags=re.MULTILINE)
     t = re.sub(r'^\s*\d+\.\s+', '', t, flags=re.MULTILINE)
+    # Normalize "smart"/typographic punctuation the LLM commonly emits
+    # (curly quotes, en/em dashes, ellipsis character) down to plain ASCII.
+    # Kokoro's phonemizer has occasionally raised on specific words when
+    # they contain a curly apostrophe (e.g. "can't" with U+2019 instead of
+    # a straight U+0027) — cheap to normalize up front rather than debug
+    # per-word phonemizer failures.
+    _SMART_PUNCT = {
+        "‘": "'", "’": "'", "‚": "'", "‛": "'",
+        "“": '"', "”": '"', "„": '"', "‟": '"',
+        "–": "-", "—": "-", "…": "...",
+    }
+    for smart, plain in _SMART_PUNCT.items():
+        t = t.replace(smart, plain)
     t = re.sub(r'\s+', ' ', t).strip()
     return t
 
@@ -131,6 +144,17 @@ class LocalTTS(TTSBackend):
         except BaseException as e:
             logger.warning(f"Failed to initialize Kokoro pipeline: {e}. Falling back to HTTP.")
 
+    @staticmethod
+    def _strip_to_ascii_safe(text: str) -> str:
+        """
+        Last-resort fallback text: drop anything outside plain ASCII
+        letters/digits/basic punctuation. Used only as a retry after the
+        original (already-sanitized) text fails Kokoro's phonemizer —
+        catches stray unicode Kokoro's G2P dictionary chokes on that
+        sanitize_text_for_tts's known-character replacements didn't cover.
+        """
+        return re.sub(r"[^A-Za-z0-9 .,!?'\-]", "", text).strip()
+
     def synthesize(self, text: str) -> tuple[bytes, int]:
         """Synthesize text using Kokoro-82M neural TTS engine."""
         text = sanitize_text_for_tts(text)
@@ -142,10 +166,16 @@ class LocalTTS(TTSBackend):
         import soundfile as sf
 
         if self._kokoro_pipeline is not None:
-            try:
-                generator = self._kokoro_pipeline(text, voice="af_sarah")
-                chunks = [chunk[2] for chunk in generator]
-                if chunks:
+            for attempt_text in (text, self._strip_to_ascii_safe(text)):
+                if not attempt_text:
+                    continue
+                try:
+                    generator = self._kokoro_pipeline(attempt_text, voice="am_onyx")
+                    chunks = [chunk[2] for chunk in generator]
+                    if not chunks:
+                        logger.warning(f"Kokoro produced 0 audio chunks for text: '{attempt_text}'")
+                        continue
+
                     audio_float = np.concatenate(chunks).astype(np.float32)
                     buf = io.BytesIO()
                     sf.write(buf, audio_float, 24000, format="WAV")
@@ -162,8 +192,15 @@ class LocalTTS(TTSBackend):
                         pass
 
                     return audio_bytes, 24000
-            except Exception as e:
-                logger.error(f"Kokoro neural synthesis error: {e}")
+                except Exception as e:
+                    # Log the exact text that broke synthesis — this is the
+                    # only way to root-cause phonemizer failures on specific
+                    # words/punctuation rather than guessing after the fact.
+                    logger.error(f"Kokoro neural synthesis error on text '{attempt_text}': {e}")
+                    if attempt_text == text:
+                        logger.info("Retrying Kokoro synthesis with ASCII-stripped text...")
+                        continue
+                    break
 
         # Fallback to HTTP server if Kokoro pipeline is unavailable
         import httpx
@@ -199,11 +236,27 @@ class LocalTTS(TTSBackend):
 
 # Pre-recorded conversational fillers
 FILLER_PHRASES = [
-    "Let me think about that...",
-    "One moment...",
-    "Hmm...",
-    "Let me check on that...",
-    "Just a sec...",
+    "Let me think about that. Just a second.",
+    "One moment while I look into this.",
+    "Hmm... Let me check on that",
+    "Let me check on that.  I'll be right back",
+    "Just a sec while I look into it",
+    "I'm right on top of that, sir",
+    "One sec.... Checking...",
+]
+
+# Verbal acknowledgment played immediately after wake word detection —
+# gives audible confirmation that ARCHER is listening, so the user isn't
+# relying on the orb or a terminal log to know it heard them.
+# Kept to at least 5 words each — a single word or two is easy to miss,
+# especially if the user is still mid-sentence saying the wake word itself.
+WAKE_ACK_PHRASES = [
+    "Yeah, what's up? I'm listening.",
+    "I'm here — how may I help you?",
+    "How can I help you today?",
+    "You rang? What's on your mind?",
+    "Yes sir, what can I do for you?",
+    "Go ahead, sir. I'm here.",
 ]
 
 
@@ -247,7 +300,7 @@ class TTSService:
             data={"text": text},
         ))
 
-        if self._toggle.is_cloud and self._cloud.is_available():
+        if self._toggle.is_cloud_tts and self._cloud.is_available():
             try:
                 audio_bytes, sample_rate = self._cloud.synthesize(text)
                 elapsed = (time.monotonic() - start_time) * 1000
@@ -262,7 +315,7 @@ class TTSService:
 
             except Exception as e:
                 logger.warning(f"Cloud TTS failed, falling back to local: {e}")
-                self._toggle.fallback_to_local(reason=f"tts_error: {e}")
+                self._toggle.fallback_tts_to_local(reason=f"tts_error: {e}")
 
         # Local fallback
         try:
@@ -284,6 +337,10 @@ class TTSService:
     def get_filler_text(self) -> str:
         """Get a random conversational filler phrase."""
         return random.choice(FILLER_PHRASES)
+
+    def get_wake_ack_text(self) -> str:
+        """Get a random wake-word acknowledgment phrase."""
+        return random.choice(WAKE_ACK_PHRASES)
 
     def cancel(self) -> None:
         """Cancel any pending TTS synthesis."""

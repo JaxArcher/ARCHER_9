@@ -151,6 +151,32 @@ def get_all_tools() -> List[Dict[str, Any]]:
     return _SKILLS_CACHE['tools']
 
 
+def get_all_tools_ollama_format() -> List[Dict[str, Any]]:
+    """Same tool set as get_all_tools(), reshaped for Ollama's function-
+    calling schema instead of Anthropic's.
+
+    Anthropic: {"name", "description", "input_schema": {...}}
+    Ollama:    {"type": "function", "function": {"name", "description",
+                "parameters": {...}}}
+
+    Both wrap the exact same JSON-schema object underneath (just under a
+    different key: input_schema vs parameters) -- this is a reshape, not a
+    re-derivation, so a tool added to any *_SKILL.md automatically shows up
+    correctly for both backends with no extra work.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["input_schema"],
+            },
+        }
+        for t in get_all_tools()
+    ]
+
+
 def get_tool_category(tool_name: str) -> str:
     """Get the category for a specific tool."""
     global _SKILLS_CACHE

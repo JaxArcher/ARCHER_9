@@ -836,20 +836,41 @@ class AgentOrchestrator:
                         logger.info(f"Executing PC tool: {tool_name}")
 
                     result = tool_executor.execute(tool_name, tool_input)
-                    # Don't send base64 images back to the model — summarize
+                    # Screenshots ARE sent to the model now, as a real image
+                    # content block — Claude's vision needs the actual pixels
+                    # to answer "what's on my screen" type questions; a text
+                    # summary like "Image captured successfully." can't do
+                    # that no matter what's in it. Anthropic's tool_result
+                    # content field accepts a list of blocks (text + image),
+                    # not just a string, so this is a data-shape fix, not a
+                    # new capability being bolted on.
                     if "image" in result:
-                        result_content = result.get("result", "Image captured successfully.")
+                        summary = result.get("result", "Screenshot captured.")
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tb["id"],
+                            "content": [
+                                {"type": "text", "text": str(summary)},
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/png",
+                                        "data": result["image"],
+                                    },
+                                },
+                            ],
+                        })
+                        logger.info(f"Tool result ({tool_name}): image ({len(result['image'])} b64 chars)")
                     else:
                         import json as _json
                         result_content = _json.dumps(result.get("result", result))
-
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tb["id"],
-                        "content": str(result_content),
-                    })
-
-                    logger.info(f"Tool result ({tool_name}): {str(result_content)[:100]}")
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tb["id"],
+                            "content": str(result_content),
+                        })
+                        logger.info(f"Tool result ({tool_name}): {str(result_content)[:100]}")
 
                 messages.append({"role": "user", "content": tool_results})
 

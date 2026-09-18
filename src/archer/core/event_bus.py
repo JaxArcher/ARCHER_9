@@ -33,6 +33,7 @@ class EventType(str, Enum):
     TTS_END = "voice.tts_end"
     BARGE_IN = "voice.barge_in"
     FILLER_PLAY = "voice.filler_play"
+    WAKE_ACK_PLAY = "voice.wake_ack_play"
     MIC_MUTE_TOGGLED = "voice.mic_mute_toggled"
 
     # HALT
@@ -50,6 +51,7 @@ class EventType(str, Enum):
 
     # Toggle events
     MODE_CHANGED = "system.mode_changed"
+    TTS_MODE_CHANGED = "system.tts_mode_changed"
 
     # Auth events
     AUTH_SUCCESS = "auth.success"
@@ -61,6 +63,8 @@ class EventType(str, Enum):
     GUI_TOGGLE_MODE = "gui.toggle_mode"
     GUI_HALT_BUTTON = "gui.halt_button"
     GUI_MUTE_TTS = "gui.mute_tts"
+    UI_SWITCH_TAB = "ui.switch_tab"
+    TASKS_CHANGED = "ui.tasks_changed"  # a task/habit tool mutated state (voice/text command, not just the tab UI) -- server.py rebroadcasts a fresh snapshot
 
     # Observer events (Phase 3, but schema is defined now)
     OBSERVATION_EVENT = "observer.observation"

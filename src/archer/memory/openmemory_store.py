@@ -104,7 +104,24 @@ class OpenMemoryStore:
         """
         Trigger a reflection process (associative graph updates).
         Usually called during nightly maintenance.
+
+        The installed openmemory-py build (confirmed live 2026-09-16 via
+        `dir(Memory)`) only exposes add/delete/delete_all/get/history/
+        openai/search/source -- no `reflect()`. This was previously an
+        unconditional call that logged a real ERROR every night for
+        something that was never going to work. Guard it instead: skip
+        cleanly with one INFO log if the method truly isn't there, so
+        maintenance logs stop reporting a false failure. If a future
+        openmemory-py version adds reflect(), this picks it up
+        automatically with no code change needed here.
         """
+        if not hasattr(self._om, "reflect"):
+            logger.info(
+                "OpenMemory reflection skipped: this openmemory-py build has no "
+                "reflect() method (only add/delete/delete_all/get/history/openai/"
+                "search/source are available) -- not an error, just unsupported."
+            )
+            return
         try:
             self._om.reflect()
             logger.info("OpenMemory reflection cycle completed.")

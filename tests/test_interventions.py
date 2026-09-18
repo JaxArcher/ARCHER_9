@@ -193,62 +193,12 @@ class TestInterventionEngine(unittest.TestCase):
         except OSError:
             pass
 
-    def test_sedentary_triggers_callback(self):
-        """Sedentary observation triggers trainer callback."""
-        from archer.core.event_bus import Event, EventType
-
-        event = Event(
-            type=EventType.OBSERVATION_EVENT,
-            source="observer.sedentary",
-            data={
-                "event_type": "sedentary",
-                "source": "webcam",
-                "confidence": 0.95,
-                "duration_minutes": 125,
-                "duration_hours": 2.08,
-            },
-        )
-        self.engine._on_observation(event)
+    def test_deliver_intervention_triggers_callback(self):
+        """Explicit intervention delivery calls speak callback."""
+        self.engine._deliver_intervention("trainer", "test_topic", "Test prompt")
         self.callback.assert_called_once()
         call_args = self.callback.call_args
-        self.assertEqual(call_args[0][0], "trainer")  # agent name
-
-    def test_emotion_triggers_therapist(self):
-        """Sustained distress emotion triggers therapist callback."""
-        from archer.core.event_bus import Event, EventType
-
-        event = Event(
-            type=EventType.OBSERVATION_EVENT,
-            source="observer.sustained_emotion",
-            data={
-                "event_type": "sustained_emotion",
-                "source": "webcam",
-                "confidence": 0.8,
-                "dominant_emotion": "sad",
-                "sustained_seconds": 1200,
-            },
-        )
-        self.engine._on_observation(event)
-        self.callback.assert_called_once()
-        call_args = self.callback.call_args
-        self.assertEqual(call_args[0][0], "therapist")
-
-    def test_neutral_emotion_no_trigger(self):
-        """Neutral or happy emotions don't trigger therapist."""
-        from archer.core.event_bus import Event, EventType
-
-        event = Event(
-            type=EventType.OBSERVATION_EVENT,
-            source="observer.sustained_emotion",
-            data={
-                "event_type": "sustained_emotion",
-                "confidence": 0.9,
-                "dominant_emotion": "happy",
-                "sustained_seconds": 1200,
-            },
-        )
-        self.engine._on_observation(event)
-        self.callback.assert_not_called()
+        self.assertEqual(call_args[0][0], "trainer")
 
     def test_low_confidence_ignored(self):
         """Low-confidence observations are ignored."""
@@ -256,74 +206,31 @@ class TestInterventionEngine(unittest.TestCase):
 
         event = Event(
             type=EventType.OBSERVATION_EVENT,
-            source="observer.sedentary",
+            source="observer.scene",
             data={
-                "event_type": "sedentary",
+                "event_type": "scene",
                 "confidence": 0.3,  # Below threshold
-                "duration_minutes": 125,
             },
         )
         self.engine._on_observation(event)
         self.callback.assert_not_called()
 
-    def test_cooldown_prevents_repeat(self):
-        """Cooldown prevents repeated interventions."""
-        from archer.core.event_bus import Event, EventType
-
-        event = Event(
-            type=EventType.OBSERVATION_EVENT,
-            source="observer.sedentary",
-            data={
-                "event_type": "sedentary",
-                "confidence": 0.95,
-                "duration_minutes": 125,
-            },
-        )
-
-        # First intervention
-        self.engine._on_observation(event)
-        self.assertEqual(self.callback.call_count, 1)
-
-        # Second should be blocked by cooldown
-        self.engine._on_observation(event)
-        self.assertEqual(self.callback.call_count, 1)
-
     def test_mark_ignored_tracks_count(self):
         """mark_ignored increments the ignore counter."""
-        self.engine.mark_ignored("trainer", "sedentary")
-        self.engine.mark_ignored("trainer", "sedentary")
+        self.engine.mark_ignored("trainer", "topic")
+        self.engine.mark_ignored("trainer", "topic")
 
-        # After 2 ignores, the key should have count 2
-        key = "trainer:sedentary"
+        key = "trainer:topic"
         self.assertEqual(self.engine._ignore_counts.get(key, 0), 2)
 
     def test_reset_ignores(self):
         """reset_ignores clears the counter for a topic."""
-        self.engine.mark_ignored("trainer", "sedentary")
-        self.engine.mark_ignored("trainer", "sedentary")
-        self.engine.reset_ignores("trainer", "sedentary")
+        self.engine.mark_ignored("trainer", "topic")
+        self.engine.mark_ignored("trainer", "topic")
+        self.engine.reset_ignores("trainer", "topic")
 
-        key = "trainer:sedentary"
+        key = "trainer:topic"
         self.assertNotIn(key, self.engine._ignore_counts)
-
-    def test_hunched_posture_triggers_trainer(self):
-        """Hunched posture triggers trainer callback."""
-        from archer.core.event_bus import Event, EventType
-
-        event = Event(
-            type=EventType.OBSERVATION_EVENT,
-            source="observer.posture",
-            data={
-                "event_type": "posture",
-                "confidence": 0.85,
-                "is_hunched": True,
-                "posture": "sitting",
-            },
-        )
-        self.engine._on_observation(event)
-        self.callback.assert_called_once()
-        call_args = self.callback.call_args
-        self.assertEqual(call_args[0][0], "trainer")
 
 
 if __name__ == "__main__":

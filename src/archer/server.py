@@ -3,21 +3,29 @@ ARCHER Mobile API Server
 FastAPI wrapper around existing agent orchestrator for mobile app access.
 """
 
+import asyncio
 import os
 import json
 import logging
 import datetime
+import threading
+import time as _time
+from pathlib import Path
 from typing import Optional, List, Dict, Any, Generator
 
-from fastapi import FastAPI, HTTPException, Header, Depends, Query
+from fastapi import FastAPI, HTTPException, Header, Depends, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
+import httpx
 
 from archer.agents.orchestrator import AgentOrchestrator
 from archer.config import get_config
 from archer.core.event_bus import get_event_bus, Event, EventType
+from archer.core.toggle import get_toggle_service
+from archer.memory.sqlite_store import get_sqlite_store
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -33,6 +41,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Local browser client (see web/ and web/CONTRACT.md) ---
+# Serves the browser UI and mounts its static assets. The client is a
+# second, symmetric VIEW onto the same live pipeline the PyQt6 GUI
+# watches (see the WebSocket bridge below) -- it doesn't carry audio.
+# Voice capture stays on this machine's own mic via the existing
+# AudioManager for the local case; only the later remote/LiveKit phase
+# needs audio to cross the network, since a remote device has its own mic.
+_WEB_DIR = Path(__file__).resolve().parents[2] / "web"
+if _WEB_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(_WEB_DIR)), name="static")
+
+    @app.get("/app")
+    async def serve_web_client():
+        """Serves the local browser client's entry point."""
+        return FileResponse(str(_WEB_DIR / "index.html"))
+else:
+    logger.warning(f"web/ directory not found at {_WEB_DIR} — browser client route ('/app') disabled.")
 
 # Authentication
 # In production, this should be a strong random token stored in .env
@@ -79,6 +105,66 @@ def set_orchestrator(orch: Any):
     """Inject a pre-initialized agent or orchestrator instance."""
     global _orchestrator
     _orchestrator = orch
+
+
+# Global observer pipeline instance (optional — None if observer deps
+# unavailable / disabled). Lets the WS bridge below release/reacquire the
+# camera on request (see ObserverPipeline.release_camera, added for the
+# barehands device-contention issue: only one process can hold a webcam
+# at a time on Windows).
+_observer = None
+
+def set_observer(observer: Any):
+    """Inject the running ObserverPipeline instance, if any."""
+    global _observer
+    _observer = observer
+
+
+@app.get("/camera_stream")
+async def camera_stream():
+    """Live MJPEG feed of ARCHER's own webcam, for the browser SYSTEM tab
+    (2026-09-16, Col's call -- the first barehands build had a live camera
+    visible in-browser, and dropping the desktop app's WebcamWidget loses
+    that unless the browser gets its own). Deliberately NOT a browser-side
+    getUserMedia() capture of the same physical device: the observer
+    pipeline already holds the camera open exclusively via OpenCV/DSHOW
+    (see camera_release_toggle's docstring -- Windows generally only lets
+    one process own a webcam at a time), so this reuses that SAME
+    already-open capture (get_latest_frame(), the same non-blocking read
+    person_id.py/vision queries/the old WebcamWidget all already share)
+    rather than fighting it for a second exclusive handle.
+
+    Standard multipart/x-mixed-replace MJPEG stream -- a plain <img
+    src="/camera_stream"> in the browser decodes this natively with no JS
+    or new client-side dependency, and no WebRTC signaling to build."""
+    async def generate():
+        import cv2
+        boundary = b"--frame"
+        while True:
+            if _observer is None or _observer.camera is None:
+                await asyncio.sleep(1.0)
+                continue
+            frame, _ts = _observer.camera.get_latest_frame()
+            if frame is None:
+                await asyncio.sleep(0.2)
+                continue
+            ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            if not ok:
+                await asyncio.sleep(0.1)
+                continue
+            yield (
+                boundary + b"\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                b"Content-Length: " + str(len(buffer)).encode() + b"\r\n\r\n"
+                + buffer.tobytes() + b"\r\n"
+            )
+            # ~10 fps -- matches the old desktop WebcamWidget's poll rate,
+            # plenty for a presence/status pane rather than a video call.
+            await asyncio.sleep(0.1)
+
+    return StreamingResponse(
+        generate(), media_type="multipart/x-mixed-replace; boundary=frame"
+    )
 
 
 # Endpoints
@@ -206,6 +292,663 @@ async def search_memory(
     except Exception as e:
         logger.error(f"Search error: {e}")
         raise HTTPException(status_code=500, detail="Search failed.")
+
+
+# --- Browser client event bridge ---
+# Forwards the internal event bus (archer.core.event_bus — the same one
+# the PyQt6 ConversationPanel subscribes to, see gui/conversation.py) to
+# every connected browser client over WebSocket. Message schema is
+# documented in web/CONTRACT.md — that file is the interface contract for
+# building/restyling the browser UI without touching this Python.
+#
+# The event bus calls subscriber callbacks SYNCHRONOUSLY on whatever
+# thread published the event (the voice pipeline runs on its own thread,
+# not the asyncio loop) — so callbacks can't just `await ws.send_text()`
+# directly. Instead they hand the message to the asyncio loop thread-
+# safely via call_soon_threadsafe, and a loop-side function does the
+# actual broadcast.
+_ws_clients: set[WebSocket] = set()
+_ws_loop: asyncio.AbstractEventLoop | None = None
+
+
+async def _ws_send_safe(ws: WebSocket, text: str) -> None:
+    try:
+        await ws.send_text(text)
+    except Exception:
+        _ws_clients.discard(ws)
+
+
+def _broadcast_ws(msg: dict) -> None:
+    """Runs ON the asyncio loop thread — scheduled via call_soon_threadsafe."""
+    if not _ws_clients:
+        return
+    text = json.dumps(msg, default=str)
+    for ws in list(_ws_clients):
+        asyncio.create_task(_ws_send_safe(ws, text))
+
+
+def _on_bus_event(msg_type: str, **data) -> None:
+    """Build a browser-facing message and hand it to the asyncio loop thread-safely."""
+    if _ws_loop is None:
+        return  # no browser client has connected yet
+    msg = {"type": msg_type, **data}
+    try:
+        _ws_loop.call_soon_threadsafe(_broadcast_ws, msg)
+    except RuntimeError:
+        pass  # loop already closed/shutting down
+
+
+def _register_event_bridge() -> None:
+    """Subscribe to the internal event bus once, at import time."""
+    bus = get_event_bus()
+    bus.subscribe(EventType.PIPELINE_STATE_CHANGED, lambda e: _on_bus_event(
+        "state", state=e.data.get("state", "idle")))
+    bus.subscribe(EventType.STT_PARTIAL, lambda e: _on_bus_event(
+        "stt_partial", text=e.data.get("text", "")))
+    bus.subscribe(EventType.STT_FINAL, lambda e: _on_bus_event(
+        "stt_final", text=e.data.get("text", "")))
+    bus.subscribe(EventType.AGENT_RESPONSE_START, lambda e: _on_bus_event(
+        "agent_response_start", elapsed=e.data.get("elapsed", 0.0)))
+    bus.subscribe(EventType.AGENT_RESPONSE_END, lambda e: _on_bus_event(
+        "agent_response", text=e.data.get("text", ""), agent=e.data.get("agent", "assistant")))
+    bus.subscribe(EventType.AGENT_SWITCH, lambda e: _on_bus_event(
+        "agent_switch", agent=e.data.get("new_agent", "assistant")))
+    bus.subscribe(EventType.WAKE_WORD_DETECTED, lambda e: _on_bus_event("wake_word"))
+    bus.subscribe(EventType.WAKE_ACK_PLAY, lambda e: _on_bus_event(
+        "assistant_line", text=e.data.get("text", "")))
+    bus.subscribe(EventType.FILLER_PLAY, lambda e: _on_bus_event(
+        "assistant_line", text=e.data.get("text", "")))
+    bus.subscribe(EventType.AUDIO_AMPLITUDE, lambda e: _on_bus_event(
+        "amplitude", value=e.data.get("amplitude", 0.0)))
+    bus.subscribe(EventType.MODE_CHANGED, lambda e: _on_bus_event(
+        "mode", mode=e.data.get("new_mode", "unknown")))
+    bus.subscribe(EventType.TTS_MODE_CHANGED, lambda e: _on_bus_event(
+        "tts_mode", mode=e.data.get("new_mode", "unknown")))
+    bus.subscribe(EventType.SYSTEM_START, lambda e: _on_bus_event("system_start"))
+    bus.subscribe(EventType.UI_SWITCH_TAB, lambda e: _on_bus_event(
+        "switch_tab", tab=e.data.get("tab", "")))
+    bus.subscribe(EventType.TASKS_CHANGED, lambda e: _broadcast_tasks_snapshot())
+    bus.subscribe_halt(lambda e: _on_bus_event("halt"))
+
+
+_register_event_bridge()
+
+
+# --- LOGS tab: tail ARCHER's own rotating log file into the browser ---
+# Mirrors gui/console_widget.py's polling logic exactly (same file --
+# config.log_dir / archer_YYYY-MM-DD.log -- same tail-from-near-the-end
+# behavior on first attach) so the browser LOGS tab shows the same thing
+# the desktop Console tab does. This is a port, not new design: the
+# desktop widget reads the file in-process because it's a Qt widget in
+# the same process; the browser needs it tailed server-side and pushed
+# over the same WS broadcast mechanism every other bridge message uses.
+_LOG_TAIL_INITIAL_BYTES = 12_000
+_log_tail_state: dict = {"path": None, "offset": 0}
+
+
+def _latest_log_file() -> Path | None:
+    """Find the most recently modified archer_*.log* file."""
+    try:
+        log_dir = Path(get_config().log_dir)
+        candidates = list(log_dir.glob("archer_*.log*"))
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: p.stat().st_mtime)
+    except Exception:
+        return None
+
+
+def _log_tail_loop() -> None:
+    """Background thread (started once, daemon): polls the log file every
+    750ms and broadcasts any new text as {"type": "log_line", "text": ...}.
+    Runs off the asyncio loop entirely -- _on_bus_event is the same
+    thread-safe hand-off every other bus->browser bridge message uses, so
+    this is safe to call from a plain Python thread."""
+    while True:
+        try:
+            latest = _latest_log_file()
+            if latest is not None:
+                if latest != _log_tail_state["path"]:
+                    # New file (first run, or rotation) -- seed near the
+                    # end rather than replaying the whole (possibly
+                    # multi-MB) file from the start.
+                    _log_tail_state["path"] = latest
+                    size = latest.stat().st_size
+                    _log_tail_state["offset"] = max(0, size - _LOG_TAIL_INITIAL_BYTES)
+                with open(latest, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(_log_tail_state["offset"])
+                    new_text = f.read()
+                    _log_tail_state["offset"] = f.tell()
+                if new_text:
+                    _on_bus_event("log_line", text=new_text)
+        except Exception as e:
+            logger.debug(f"Log tail read failed (non-critical): {e}")
+        _time.sleep(0.75)
+
+
+def _start_log_tailer() -> None:
+    threading.Thread(target=_log_tail_loop, daemon=True, name="archer-log-tailer").start()
+
+
+_start_log_tailer()
+
+
+@app.websocket("/ws/voice")
+async def ws_voice(websocket: WebSocket):
+    """
+    Browser client connection — see web/CONTRACT.md for the full message
+    schema. Pushes live pipeline state/transcript/agent-response events;
+    accepts inbound: typed text (bridged to GUI_TEXT_INPUT, the exact path
+    the desktop text box already uses), a halt command, and mode/mute
+    toggles (mirroring the desktop GUI's own toolbar buttons exactly). No
+    audio flows over this socket — see the comment above _ws_clients for why.
+    """
+    global _ws_loop
+    await websocket.accept()
+    _ws_loop = asyncio.get_running_loop()
+    _ws_clients.add(websocket)
+    logger.info(f"Browser client connected ({len(_ws_clients)} total)")
+
+    # Snapshot current mode/mute state for this one new client -- the
+    # broadcast events below only fire on the next *change*, so without
+    # this a freshly-opened tab would show stale defaults until something
+    # happens to toggle them.
+    try:
+        from archer.voice import get_audio_manager
+        am = get_audio_manager()
+        await _ws_send_safe(websocket, json.dumps({
+            "type": "hello",
+            "mode": get_toggle_service().mode,
+            "tts_mode": get_toggle_service().tts_mode,
+            "mic_muted": am.is_mic_muted(),
+            "tts_muted": am.is_tts_muted,
+            "camera_released": bool(_observer and _observer.is_camera_released),
+            "camera_available": _observer is not None,
+        }))
+    except Exception as e:
+        logger.debug(f"Could not send initial state snapshot to browser client: {e}")
+
+    # Seed the LOGS tab with recent history -- the background tailer thread
+    # only broadcasts NEW lines going forward, so without this a freshly
+    # opened tab would sit empty until the next line is actually written.
+    try:
+        latest = _latest_log_file()
+        if latest is not None:
+            with open(latest, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(max(0, latest.stat().st_size - _LOG_TAIL_INITIAL_BYTES))
+                initial_text = f.read()
+            if initial_text:
+                await _ws_send_safe(websocket, json.dumps({"type": "log_line", "text": initial_text}))
+    except Exception as e:
+        logger.debug(f"Could not send initial log tail to browser client: {e}")
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            bus = get_event_bus()
+            msg_type = msg.get("type")
+            if msg_type == "text_input":
+                text = (msg.get("text") or "").strip()
+                if text:
+                    bus.publish(Event(
+                        type=EventType.GUI_TEXT_INPUT,
+                        source="web_client",
+                        data={"text": text},
+                    ))
+            elif msg_type == "halt":
+                bus.publish_halt(source="web_client")
+            elif msg_type == "mode_toggle":
+                # ToggleService.mode setter publishes EventType.MODE_CHANGED
+                # itself, which the bridge above already broadcasts to every
+                # connected client (including this one) as {"type": "mode"}.
+                new_mode = get_toggle_service().toggle()
+                logger.info(f"Mode toggled to {new_mode} (via web client)")
+            elif msg_type == "tts_mode_toggle":
+                # Independent of mode_toggle above (2026-09-16) -- switches
+                # which voice ENGINE speaks (ElevenLabs vs Kokoro) without
+                # touching which LLM/STT the conversation itself uses.
+                # ToggleService.tts_mode setter publishes TTS_MODE_CHANGED
+                # itself, which the bridge above broadcasts as {"type":
+                # "tts_mode"} to every connected client.
+                new_tts_mode = get_toggle_service().toggle_tts()
+                logger.info(f"TTS mode toggled to {new_tts_mode} (via web client)")
+            elif msg_type == "mic_mute_toggle":
+                from archer.voice import get_audio_manager
+                am = get_audio_manager()
+                new_val = not am.is_mic_muted()
+                am.set_mic_muted(new_val)
+                _broadcast_ws({"type": "mic_mute", "muted": new_val})
+            elif msg_type == "tts_mute_toggle":
+                from archer.voice import get_audio_manager
+                am = get_audio_manager()
+                new_val = not am.is_tts_muted
+                am.set_tts_muted(new_val)
+                _broadcast_ws({"type": "tts_mute", "muted": new_val})
+            elif msg_type == "enroll_face":
+                # Blocks on camera frames for a few seconds (up to ~15s
+                # worst case) -- run off the event loop so it doesn't
+                # freeze every other connected client's WS traffic while
+                # it waits. See ObserverPipeline.enroll_current_person
+                # for why this is the actual fix for "doesn't recognize
+                # me": recognition logic was always running correctly,
+                # nothing had ever populated known_persons.
+                if _observer is None:
+                    _broadcast_ws({"type": "enroll_result", "success": False,
+                                   "error": "Observer isn't running."})
+                else:
+                    name = (msg.get("name") or "Col").strip() or "Col"
+                    _broadcast_ws({"type": "enroll_progress", "name": name})
+                    ok = await asyncio.to_thread(_observer.enroll_current_person, name)
+                    _broadcast_ws({"type": "enroll_result", "success": ok, "name": name})
+            elif msg_type == "camera_release_toggle":
+                # Frees/reacquires the physical webcam so another app (e.g.
+                # barehands) can open it — see ObserverPipeline.release_camera.
+                if _observer is None:
+                    logger.warning("camera_release_toggle received but no observer is running.")
+                elif _observer.is_camera_released:
+                    _observer.reacquire_camera()
+                    _broadcast_ws({"type": "observer_camera", "released": False})
+                else:
+                    _observer.release_camera()
+                    _broadcast_ws({"type": "observer_camera", "released": True})
+            elif msg_type == "memory_get_all":
+                # MEMORY tab initial load / manual refresh -- one bulk
+                # payload rather than four round trips (2026-09-16).
+                await _ws_send_safe(websocket, json.dumps(_build_memory_snapshot()))
+            elif msg_type == "memory_add_contact":
+                store = get_sqlite_store()
+                name = (msg.get("name") or "").strip()
+                if name:
+                    store.upsert_contact(
+                        name=name,
+                        relationship=(msg.get("relationship") or None),
+                        typical_interval_days=msg.get("typical_interval_days"),
+                    )
+                    _broadcast_ws(_build_memory_snapshot())
+            elif msg_type == "memory_log_interaction":
+                store = get_sqlite_store()
+                contact_name = (msg.get("contact_name") or "").strip()
+                if contact_name:
+                    store.log_interaction(
+                        contact_name=contact_name,
+                        interaction_type=(msg.get("interaction_type") or "in-person"),
+                        notes=(msg.get("notes") or None),
+                        sentiment_score=msg.get("sentiment_score"),
+                    )
+                    _broadcast_ws(_build_memory_snapshot())
+            elif msg_type == "memory_add_commitment":
+                store = get_sqlite_store()
+                contact_name = (msg.get("contact_name") or "").strip()
+                promise = (msg.get("promise") or "").strip()
+                if contact_name and promise:
+                    store.track_commitment(
+                        contact_name=contact_name,
+                        promise=promise,
+                        due_date=(msg.get("due_date") or None),
+                    )
+                    _broadcast_ws(_build_memory_snapshot())
+            elif msg_type == "memory_resolve_commitment":
+                store = get_sqlite_store()
+                commitment_id = msg.get("commitment_id")
+                if commitment_id is not None:
+                    store.resolve_commitment(
+                        int(commitment_id), fulfilled=bool(msg.get("fulfilled", True))
+                    )
+                    _broadcast_ws(_build_memory_snapshot())
+            elif msg_type == "memory_confirm_person":
+                # Col names a recurring stranger from the "Unrecognized
+                # People" pane -- pull the embedding InsightFace already
+                # captured for this face-cluster off the resolved row and
+                # enroll it as a known person, same store call the live
+                # "this is Sarah" path uses (CoreAgent._check_person_
+                # introduction). No re-capture, no second InsightFace pass.
+                store = get_sqlite_store()
+                confirmation_id = msg.get("id")
+                name = (msg.get("name") or "").strip()
+                if confirmation_id is not None and name:
+                    row = store.resolve_pending_person_confirmation(
+                        int(confirmation_id), status="confirmed", confirmed_name=name
+                    )
+                    if row and row.get("embedding"):
+                        store.add_known_person(name=name, embedding=row["embedding"])
+                        logger.info(f"Enrolled '{name}' from browser MEMORY tab confirmation.")
+                    _broadcast_ws(_build_memory_snapshot())
+            elif msg_type == "memory_dismiss_person":
+                # A one-off stranger (delivery driver, etc.) Col doesn't
+                # want to name -- clears it from the pane without enrolling
+                # anyone. upsert_pending_person_confirmation() won't
+                # resurrect a dismissed row for this same face.
+                store = get_sqlite_store()
+                confirmation_id = msg.get("id")
+                if confirmation_id is not None:
+                    store.resolve_pending_person_confirmation(int(confirmation_id), status="dismissed")
+                    _broadcast_ws(_build_memory_snapshot())
+            elif msg_type == "tasks_get_all":
+                await _ws_send_safe(websocket, json.dumps(_build_tasks_snapshot()))
+            elif msg_type == "tasks_add":
+                title = (msg.get("title") or "").strip()
+                if title:
+                    get_sqlite_store().add_task(
+                        title=title,
+                        due_date=(msg.get("due_date") or None),
+                        source="user",
+                    )
+                    _broadcast_ws(_build_tasks_snapshot())
+            elif msg_type == "tasks_complete":
+                task_id = msg.get("task_id")
+                if task_id is not None:
+                    get_sqlite_store().complete_task(int(task_id))
+                    _broadcast_ws(_build_tasks_snapshot())
+            elif msg_type == "tasks_delete":
+                task_id = msg.get("task_id")
+                if task_id is not None:
+                    get_sqlite_store().delete_task(int(task_id))
+                    _broadcast_ws(_build_tasks_snapshot())
+            elif msg_type == "habits_add":
+                name = (msg.get("name") or "").strip()
+                if name:
+                    get_sqlite_store().add_habit(name=name, frequency=(msg.get("frequency") or "daily"))
+                    _broadcast_ws(_build_tasks_snapshot())
+            elif msg_type == "habits_complete":
+                name = (msg.get("name") or "").strip()
+                if name:
+                    get_sqlite_store().complete_habit(name)
+                    _broadcast_ws(_build_tasks_snapshot())
+            elif msg_type == "habits_delete":
+                name = (msg.get("name") or "").strip()
+                if name:
+                    get_sqlite_store().delete_habit(name)
+                    _broadcast_ws(_build_tasks_snapshot())
+            elif msg_type == "system_get_all":
+                # SYSTEM tab initial load / manual refresh -- devices,
+                # local models, and GPU/ollama metrics in one payload,
+                # same "one bulk round trip" pattern as memory_get_all /
+                # tasks_get_all (2026-09-16).
+                await _ws_send_safe(websocket, json.dumps(await _build_system_snapshot()))
+            elif msg_type == "system_switch_mic":
+                device_index = msg.get("device_index")
+                if device_index is not None:
+                    from archer.voice import get_audio_manager
+                    try:
+                        get_audio_manager().switch_input_device(int(device_index))
+                    except Exception as e:
+                        logger.warning(f"Mic switch failed: {e}")
+                    _broadcast_ws(await _build_system_snapshot())
+            elif msg_type == "system_switch_speaker":
+                device_index = msg.get("device_index")
+                if device_index is not None:
+                    from archer.voice import get_audio_manager
+                    try:
+                        get_audio_manager().switch_output_device(int(device_index))
+                    except Exception as e:
+                        logger.warning(f"Speaker switch failed: {e}")
+                    _broadcast_ws(await _build_system_snapshot())
+            elif msg_type == "system_switch_model":
+                model = (msg.get("model") or "").strip()
+                if model:
+                    agent = get_orchestrator()
+                    agent.primary_model = model
+                    logger.info(f"Local 'brain' model switched to '{model}' from browser SYSTEM tab.")
+                    _broadcast_ws(await _build_system_snapshot())
+            elif msg_type == "browser_get_screenshot":
+                # Mirrors the SAME Playwright browser ARCHER's own
+                # browser-control tools already drive (tools/pc_control.py)
+                # into a dashboard pane (2026-09-16, Col's ask) -- read-only
+                # for now, no click/type forwarding yet. Screenshot capture
+                # is a blocking Playwright call, so it runs off the event
+                # loop (same reasoning as enroll_face below).
+                agent = get_orchestrator()
+                image_b64 = None
+                try:
+                    pc = agent.pc_controller
+                    if pc is not None:
+                        image_b64 = await asyncio.to_thread(pc.browser_screenshot)
+                except Exception as e:
+                    logger.debug(f"Browser screenshot unavailable: {e}")
+                await _ws_send_safe(websocket, json.dumps({
+                    "type": "browser_screenshot",
+                    "image_b64": image_b64,
+                    "active": image_b64 is not None,
+                }))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _ws_clients.discard(websocket)
+        logger.info(f"Browser client disconnected ({len(_ws_clients)} total)")
+
+
+def _person_snapshot_data_uri(snapshot_path: Optional[str]) -> Optional[str]:
+    """Read a face snapshot JPEG off disk and inline it as a data: URI for
+    the browser -- these files live under data/snapshots/ (see
+    person_id.py) and were never served over HTTP before, so the simplest
+    fix is embedding the bytes directly in the WS payload rather than
+    adding a new static route. Best-effort: a missing/unreadable file just
+    means no thumbnail, not a broken pane."""
+    if not snapshot_path:
+        return None
+    try:
+        raw = Path(snapshot_path).read_bytes()
+        import base64
+        return "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
+    except Exception as e:
+        logger.debug(f"Could not read person snapshot '{snapshot_path}': {e}")
+        return None
+
+
+def _build_memory_snapshot() -> dict:
+    """One bulk payload for the browser Memory tab -- relationships/social
+    components (contacts, interactions, commitments) plus the pattern-
+    recognition/recursive-learning output (learned entities, recurring
+    conversation patterns). See sqlite_store.py's 2026-09-16 additions and
+    memory/pattern_learner.py."""
+    store = get_sqlite_store()
+    pending_people = store.get_pending_person_confirmations(status="pending", limit=50)
+    for p in pending_people:
+        p["snapshot_data_uri"] = _person_snapshot_data_uri(p.get("snapshot_path"))
+        p.pop("embedding", None)  # raw BLOB -- not JSON-serializable, not needed by the browser
+    entities = store.get_learned_entities(limit=100)
+    patterns = store.get_conversation_patterns(limit=50)
+    try:
+        from archer.integrations.notes_sync import sync_learned_patterns
+        sync_learned_patterns(entities, patterns)
+    except Exception as e:
+        logger.debug(f"notes_sync (learned patterns) failed (non-fatal): {e}")
+    return {
+        "type": "memory_snapshot",
+        "contacts": store.get_contacts(),
+        "commitments": store.get_commitments(),
+        "entities": entities,
+        "patterns": patterns,
+        # "While you were away" (2026-09-16): every Blindspot intervention
+        # ever decided, most recent first, regardless of whether it's been
+        # folded into a CoreAgent conversation yet -- see blindspot_agent.py
+        # and core_agent.py's startup catch-up. Independent of that
+        # delivery mechanism; this is purely for visibility in the browser.
+        "interventions": store.get_recent_interventions(limit=50),
+        # "Unrecognized People" (2026-09-16): recurring faces InsightFace
+        # can't match to known_persons, waiting on a name. The OTHER half
+        # of no-manual-enrollment (see CoreAgent._check_person_introduction
+        # for the live "this is Sarah" half) -- this is what happens when
+        # nobody ever says who a recurring visitor is out loud. Confirming
+        # or dismissing one is a round trip through memory_confirm_person /
+        # memory_dismiss_person below.
+        "pending_people": pending_people,
+    }
+
+
+def _build_tasks_snapshot() -> dict:
+    """One bulk payload for the browser TASKS card -- tasks and habits, both
+    in v1 together per Col's call. See sqlite_store.py's 2026-09-16
+    additions and skills/tasks_SKILL.md (available to every agent persona,
+    not just the core Assistant). Also mirrors both out to barehands' Notes
+    pane (see notes_sync.py) every time this is built -- i.e. every time
+    the underlying data actually changed, from any surface."""
+    store = get_sqlite_store()
+    tasks = store.get_tasks()
+    habits = store.get_habits()
+    try:
+        from archer.integrations.notes_sync import sync_tasks_and_habits
+        sync_tasks_and_habits(tasks, habits)
+    except Exception as e:
+        logger.debug(f"notes_sync (tasks/habits) failed (non-fatal): {e}")
+    return {
+        "type": "tasks_snapshot",
+        "tasks": tasks,
+        "habits": habits,
+    }
+
+
+def _broadcast_tasks_snapshot() -> None:
+    """Push a fresh tasks_snapshot to every connected client -- used both
+    after a direct browser-tab write (see the WS handlers below) and when
+    EventType.TASKS_CHANGED fires from a voice/text tool call
+    (tasks_SKILL.md via UniversalToolExecutor), so the tab stays live no
+    matter which surface made the change. Mirrors _on_bus_event's
+    thread-safe hand-off, just without wrapping a "type" key that
+    _build_tasks_snapshot() already provides."""
+    if _ws_loop is None:
+        return
+    try:
+        _ws_loop.call_soon_threadsafe(_broadcast_ws, _build_tasks_snapshot())
+    except RuntimeError:
+        pass
+
+
+async def _ollama_tags(base_url: str) -> list[dict]:
+    """Every model pulled and available to this Ollama instance (GET
+    /api/tags -- what `ollama list` shows), not just what's currently
+    loaded into memory. Best-effort: an unreachable instance just means an
+    empty list for it, not a broken SYSTEM tab."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{base_url}/api/tags")
+            resp.raise_for_status()
+            return resp.json().get("models", [])
+    except Exception as e:
+        logger.debug(f"Could not reach Ollama /api/tags at {base_url}: {e}")
+        return []
+
+
+async def _ollama_ps(base_url: str) -> list[dict]:
+    """Models currently loaded into memory on this Ollama instance, with
+    size_vram vs size telling GPU vs CPU residency -- the browser
+    equivalent of running `ollama ps` yourself (2026-09-16, Col's ask
+    after the ~100s-to-first-token delay investigation). Best-effort, same
+    reasoning as _ollama_tags."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{base_url}/api/ps")
+            resp.raise_for_status()
+            return resp.json().get("models", [])
+    except Exception as e:
+        logger.debug(f"Could not reach Ollama /api/ps at {base_url}: {e}")
+        return []
+
+
+def _gpu_metrics() -> dict | None:
+    """Total/used/free VRAM on the GPU via pynvml (already an installed
+    dependency -- see torch.cuda's own pynvml import at boot). Returns
+    None if pynvml or the driver isn't reachable rather than raising, so a
+    headless/CPU-only box just shows no GPU card instead of an error."""
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            name = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", errors="ignore")
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            try:
+                temp_c = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            except Exception:
+                temp_c = None
+            return {
+                "name": name,
+                "total_mb": round(mem.total / (1024 * 1024)),
+                "used_mb": round(mem.used / (1024 * 1024)),
+                "free_mb": round(mem.free / (1024 * 1024)),
+                "gpu_util_pct": util.gpu,
+                "temp_c": temp_c,
+            }
+        finally:
+            pynvml.nvmlShutdown()
+    except Exception as e:
+        logger.debug(f"GPU metrics unavailable: {e}")
+        return None
+
+
+def _cpu_metrics() -> dict | None:
+    """CPU utilization via psutil (2026-09-16, Col's ask for a CPU chart
+    alongside GPU/VRAM/temp/tokens). cpu_percent(interval=None) is
+    non-blocking and measures since the LAST call -- the module-level
+    priming call right after import means the very first real snapshot
+    is already meaningful instead of psutil's usual first-call 0.0."""
+    try:
+        import psutil
+        return {"cpu_util_pct": psutil.cpu_percent(interval=None)}
+    except Exception as e:
+        logger.debug(f"CPU metrics unavailable: {e}")
+        return None
+
+
+try:
+    import psutil as _psutil_prime
+    _psutil_prime.cpu_percent(interval=None)  # prime the internal baseline
+except Exception:
+    pass
+
+
+async def _build_system_snapshot() -> dict:
+    """One bulk payload for the browser SYSTEM tab (2026-09-16, Col's ask
+    after diagnosing a ~100s local-model delay by hand with `ollama ps` /
+    `nvidia-smi`): GPU/VRAM headroom, which models are actually loaded on
+    GPU vs CPU per Ollama instance, every locally-pulled model (for the
+    'brain' dropdown), and audio I/O devices (for the mic/speaker
+    dropdowns) -- so this diagnostic work is a glance at a tab from now on
+    instead of a terminal round-trip."""
+    config = get_config()
+    from archer.config import _list_audio_devices
+
+    main_tags, observer_tags, main_ps, observer_ps = await asyncio.gather(
+        _ollama_tags(config.ollama_base_url),
+        _ollama_tags(config.observer_ollama_url),
+        _ollama_ps(config.ollama_base_url),
+        _ollama_ps(config.observer_ollama_url),
+    )
+    # Dedupe by name -- the "brain" dropdown offers every model pulled on
+    # either instance, since either Ollama server can technically serve
+    # gemma4:e4b if asked.
+    seen = {}
+    for m in main_tags + observer_tags:
+        seen[m.get("name") or m.get("model")] = m
+    available_models = sorted(seen.keys())
+
+    agent = get_orchestrator()
+    devices = _list_audio_devices()
+
+    return {
+        "type": "system_snapshot",
+        "gpu": _gpu_metrics(),
+        "cpu": _cpu_metrics(),
+        "tokens_per_sec": getattr(agent, "_last_tokens_per_sec", None),
+        "ollama_loaded": [
+            {**m, "instance": "main (11434)"} for m in main_ps
+        ] + [
+            {**m, "instance": "observer (11435)"} for m in observer_ps
+        ],
+        "available_models": available_models,
+        "current_model": getattr(agent, "primary_model", None),
+        "mic_devices": [d for d in devices if d["max_input"] > 0],
+        "speaker_devices": [d for d in devices if d["max_output"] > 0],
+        "current_mic_index": config.mic_device_index,
+        "current_speaker_index": config.speaker_device_index,
+    }
 
 
 def start_server(host: str = None, port: int = None):

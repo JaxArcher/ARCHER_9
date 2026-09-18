@@ -1,0 +1,45 @@
+ARCHER Startup Commands:
+.\.venv\Scripts\python.exe -m archer
+.\.venv\Scripts\python.exe -m archer.web_main
+.\.venv\Scripts\archer-web.exe
+Barehand for local http://127.0.0.1:8200/app
+python -m archer.web_main runs the module directly with whatever Python/venv you invoke it with. Works immediately, no install step.
+archer-web is a shorter console-script shortcut (defined in pyproject.toml) that does the exact same thing. It only exists if ARCHER's been installed as a package into your environment (pip install -e . or similar) — since your .venv already has ARCHER installed that way, archer-web should just work as a shorthand.
+
+
+PS D:\ARCHER_9> D:\ARCHER_9\.venv\Scripts\python.exe -c "import sounddevice as sd; [print(i, d['name'], 'in='+str(d['max_input_channels']), 'out='+str(d['max_output_channels'])) for i, d in enumerate(sd.query_devices())]"
+
+PS D:\ARCHER_9> D:\ARCHER_9\.venv\Scripts\python.exe -c "import sounddevice as sd; apis = sd.query_hostapis(); [print(i, apis[d['hostapi']]['name'], '|', d['name'], 'in='+str(d['max_input_channels']), 'out='+str(d['max_output_channels'])) for i, d in enumerate(sd.query_devices())]"
+0 MME | Microsoft Sound Mapper - Input in=2 out=0
+1 MME | Microphone (HD Webcam eMeet C96 in=2 out=0
+2 MME | Microphone (JLab GO Talk) in=2 out=0
+3 MME | Microsoft Sound Mapper - Output in=0 out=2
+4 MME | LG-SOUND BAR (NVIDIA High Defin in=0 out=2
+5 MME | Digital Output (Realtek(R) Audi in=0 out=2
+6 MME | Headphones (Bedroom speaker) in=0 out=2
+7 MME | Speakers (JLab GO Talk) in=0 out=2
+8 Windows DirectSound | Primary Sound Capture Driver in=2 out=0
+9 Windows DirectSound | Microphone (HD Webcam eMeet C960) in=2 out=0
+10 Windows DirectSound | Microphone (JLab GO Talk) in=2 out=0
+11 Windows DirectSound | Primary Sound Driver in=0 out=2
+12 Windows DirectSound | LG-SOUND BAR (NVIDIA High Definition Audio) in=0 out=2
+13 Windows DirectSound | Digital Output (Realtek(R) Audio) in=0 out=2
+14 Windows DirectSound | Headphones (Bedroom speaker) in=0 out=2
+15 Windows DirectSound | Speakers (JLab GO Talk) in=0 out=2
+16 Windows WASAPI | LG-SOUND BAR (NVIDIA High Definition Audio) in=0 out=2
+17 Windows WASAPI | Digital Output (Realtek(R) Audio) in=0 out=2
+18 Windows WASAPI | Headphones (Bedroom speaker) in=0 out=2
+19 Windows WASAPI | Speakers (JLab GO Talk) in=0 out=2
+20 Windows WASAPI | Microphone (JLab GO Talk) in=2 out=0
+21 Windows WASAPI | Microphone (HD Webcam eMeet C960) in=2 out=0
+22 Windows WDM-KS | SPDIF Out (HD Audio SPDIF out) in=0 out=2
+23 Windows WDM-KS | Microphone (HD Webcam eMeet C960) in=2 out=0
+24 Windows WDM-KS | Output () in=0 out=2
+25 Windows WDM-KS | Speakers (JLab GO Talk) in=0 out=2
+26 Windows WDM-KS | Microphone (JLab GO Talk) in=2 out=0
+27 Windows WDM-KS | Headphones () in=0 out=2
+28 Windows WDM-KS | Headset (@System32\drivers\bthhfenum.sys,#2;%1 Hands-Free%0
+;(Galaxy Buds FE)) in=0 out=1
+29 Windows WDM-KS | Headset (@System32\drivers\bthhfenum.sys,#2;%1 Hands-Free%0
+;(Galaxy Buds FE)) in=1 out=0
+30 Windows WDM-KS | Headphones () in=0 out=2

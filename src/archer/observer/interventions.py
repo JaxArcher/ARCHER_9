@@ -3,21 +3,6 @@ ARCHER Proactive Intervention Engine.
 
 Subscribes to OBSERVATION events from the Observer Pipeline and
 triggers proactive agent responses when conditions are met.
-
-Intervention rules (from SOUL.md files):
-
-Trainer:
-- Sedentary 2+ hours → one-sentence directive
-- If ignored twice → 4-hour cooldown on that topic
-
-Therapist:
-- Sustained stress/frustration/sadness for 20+ minutes → warm check-in
-- Never more than once per 2 hours on the same emotional topic
-- Crisis protocol → always fires, no cooldown
-
-Each intervention goes through the Orchestrator's streaming pipeline
-just like a user request, but the "user message" is a system-generated
-observation prompt that the agent responds to in-character.
 """
 
 from __future__ import annotations
@@ -27,21 +12,9 @@ import time
 from typing import Any, Callable
 
 from loguru import logger
-from archer.observer.emotion_confirmation import EmotionConfirmationManager
 from archer.core.event_bus import Event, EventType, get_event_bus
 from archer.memory.sqlite_store import get_sqlite_store
 
-
-# --- Intervention definitions ---
-
-# Emotions that trigger Therapist intervention
-_DISTRESS_EMOTIONS = {"sad", "angry", "fear", "disgust"}
-
-# Trainer sedentary cooldown (minutes)
-_TRAINER_SEDENTARY_COOLDOWN = 240.0  # 4 hours after 2 ignores
-
-# Therapist emotion cooldown (minutes)
-_THERAPIST_EMOTION_COOLDOWN = 120.0  # 2 hours
 
 # Minimum confidence to trigger interventions
 _MIN_CONFIDENCE = 0.5
@@ -78,9 +51,6 @@ class InterventionEngine:
         # Subscribe to observation events
         self._bus.subscribe(EventType.OBSERVATION_EVENT, self._on_observation)
 
-        # Add emotion confirmation manager
-        self._confirmation_mgr = EmotionConfirmationManager(self._store)
-
         logger.info("Intervention engine initialized.")
 
     def set_speak_callback(self, callback: Callable[[str, str], None]) -> None:
@@ -94,105 +64,6 @@ class InterventionEngine:
 
         if confidence < _MIN_CONFIDENCE:
             return
-
-        try:
-            if event_type == "sedentary":
-                self._handle_sedentary(event.data)
-            elif event_type == "sustained_emotion":
-                self._handle_sustained_emotion(event.data)
-            elif event_type == "posture" and event.data.get("is_hunched"):
-                self._handle_hunched_posture(event.data)
-        except Exception as e:
-            logger.error(f"Intervention handler error: {e}")
-
-    def _handle_sedentary(self, data: dict[str, Any]) -> None:
-        """
-        Handle sedentary alert — routes to Trainer.
-
-        Rules:
-        - Fire after 2+ hours of sitting
-        - If ignored twice, enter 4-hour cooldown
-        """
-        agent = "trainer"
-        topic = "sedentary"
-        key = f"{agent}:{topic}"
-
-        # Check ignore count
-        with self._lock:
-            ignores = self._ignore_counts.get(key, 0)
-            if ignores >= 2:
-                # Check if cooldown has expired
-                if self._store.check_cooldown(agent, topic, _TRAINER_SEDENTARY_COOLDOWN):
-                    logger.debug(f"Trainer sedentary intervention in cooldown (ignored {ignores}x)")
-                    return
-                else:
-                    # Cooldown expired — reset ignore count
-                    self._ignore_counts[key] = 0
-                    ignores = 0
-
-        # Check normal cooldown (don't fire more than once per session without reset)
-        if self._store.check_cooldown(agent, topic, 120.0):  # 2-hour minimum gap
-            return
-
-        duration_minutes = data.get("duration_minutes", 120)
-        hours = duration_minutes / 60.0
-
-        prompt = (
-            f"[SYSTEM: Observer detected that the user has been sitting for "
-            f"{hours:.1f} hours without standing. Generate a brief, one-sentence "
-            f"sedentary alert in your Trainer voice. Keep it to ONE sentence. "
-            f"Be direct and action-oriented.]"
-        )
-
-        self._deliver_intervention(agent, topic, prompt)
-
-    def _handle_sustained_emotion(self, data: dict[str, Any]) -> None:
-        """
-        Handle sustained emotional distress — routes to Therapist with confirmation.
-        
-        NEW: Always asks for confirmation before intervening (per user requirement)
-        """
-        dominant = data.get("dominant_emotion", "neutral")
-        if dominant not in _DISTRESS_EMOTIONS:
-            return
-        
-        confidence = data.get("confidence", 0.0)
-    
-    # Generate confirmation question
-        question = self._confirmation_mgr.generate_confirmation_question(dominant, confidence)
-        
-        # Create pending confirmation
-        obs_id = data.get("observation_id", 0)
-        self._confirmation_mgr.create_pending_confirmation(dominant, confidence, obs_id)
-        
-        # Deliver confirmation question via Therapist (NOT full intervention yet)
-        if self._speak_callback is not None:
-            try:
-                self._speak_callback("therapist", question)
-                logger.info(f"Emotion confirmation question sent: {dominant} (conf: {confidence:.2f})")
-            except Exception as e:
-                logger.error(f"Confirmation question delivery failed: {e}")
-
-    def _handle_hunched_posture(self, data: dict[str, Any]) -> None:
-        """
-        Handle hunched posture detection — routes to Trainer.
-
-        Gentler than sedentary — just a posture reminder.
-        """
-        agent = "trainer"
-        topic = "posture"
-
-        # 30-minute cooldown for posture reminders
-        if self._store.check_cooldown(agent, topic, 30.0):
-            return
-
-        prompt = (
-            "[SYSTEM: Observer detected that the user is hunching. "
-            "Generate a brief posture reminder in your Trainer voice. "
-            "ONE sentence maximum. Be direct but not aggressive.]"
-        )
-
-        self._deliver_intervention(agent, topic, prompt)
 
     def _deliver_intervention(
         self,
@@ -255,16 +126,10 @@ class InterventionEngine:
             count = self._ignore_counts[key]
 
         if count >= 2:
-            # Enter extended cooldown
-            if agent == "trainer":
-                cooldown = _TRAINER_SEDENTARY_COOLDOWN
-            else:
-                cooldown = _THERAPIST_EMOTION_COOLDOWN
-
             self._store.set_cooldown(agent, topic)
             logger.info(
                 f"Intervention {agent}/{topic} ignored {count}x — "
-                f"entering {cooldown}min cooldown"
+                f"entering cooldown"
             )
 
     def reset_ignores(self, agent: str, topic: str) -> None:

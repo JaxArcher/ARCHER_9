@@ -185,3 +185,49 @@ class TestVoiceActivityDetector:
         chunk = b"\x00" * 960
         is_speaking = vad.process_audio(chunk)
         assert isinstance(is_speaking, bool)
+
+
+class TestAudioRobustness:
+    """Tests for audio manager and pipeline exception handling."""
+
+    def test_play_audio_empty_array_handling(self):
+        """play_audio and play_audio_bytes should gracefully ignore empty arrays without crashing."""
+        from archer.voice.audio import get_audio_manager
+        am = get_audio_manager()
+
+        # Should not raise ValueError: array of sample points is empty
+        am.play_audio(np.array([], dtype=np.float32))
+        am.play_audio_bytes(b"")
+
+    def test_pipeline_loop_exception_recovery(self):
+        """VoicePipeline loop should catch exceptions, publish error event, and recover state to IDLE."""
+        from archer.voice.pipeline import VoicePipeline, VoicePipelineState
+        from archer.core.event_bus import get_event_bus, EventType
+        import time
+
+        pipeline = VoicePipeline()
+        bus = get_event_bus()
+        errors = []
+
+        def _on_err(e):
+            errors.append(e)
+
+        bus.subscribe(EventType.SYSTEM_ERROR, _on_err)
+
+        # Mock audio manager to raise an exception once during loop processing
+        mock_audio = MagicMock()
+        mock_audio.get_audio_chunk.side_effect = [RuntimeError("Simulated audio read crash"), None]
+        pipeline._audio = mock_audio
+
+        pipeline._running.set()
+        # Run one iteration of pipeline loop in a thread
+        import threading
+        t = threading.Thread(target=pipeline._pipeline_loop, daemon=True)
+        t.start()
+        time.sleep(0.6)
+        pipeline._running.clear()
+        t.join(timeout=1.0)
+
+        assert len(errors) >= 1
+        assert "Simulated audio read crash" in errors[0].data.get("message", "")
+        assert pipeline.state == VoicePipelineState.IDLE

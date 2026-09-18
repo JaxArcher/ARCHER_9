@@ -32,8 +32,33 @@ class ArcherConfig(BaseSettings):
     )
 
     # --- Mode ---
+    # Personal single-user assistant: default to local models. Cloud is
+    # available via the toggle whenever a cloud-delegation trigger fires
+    # (see CoreAgent.evaluate_cloud_delegation) or the user flips it
+    # explicitly -- it should never be the silent default.
     default_mode: Literal["cloud", "local"] = Field(
-        default="cloud", alias="ARCHER_DEFAULT_MODE"
+        default="local", alias="ARCHER_DEFAULT_MODE"
+    )
+
+    # TTS engine is its OWN toggle, independent of default_mode above
+    # (2026-09-16, Col's call). default_mode governs conversation (LLM) +
+    # STT only.
+    #
+    # Flipped to "local" 2026-09-16 (Col's call): originally defaulted to
+    # "cloud" (ElevenLabs) on the assumption the monthly subscription
+    # covered usage — turned out ElevenLabs bills per-credit on top of the
+    # subscription and Col's .env key was actually a key ID, not a usable
+    # secret (repeated 400 invalid_api_key on both TTS and STT). The
+    # existing cloud-failure auto-fallback (ToggleService, see
+    # trigger_cloud_fallback below) already caught this live and flipped
+    # the persisted toggle_state row to local, but that's a reactive patch
+    # per-install; this changes what a FRESH install (or a cleared
+    # toggle_state table) starts with, so a broken/unset ElevenLabs key
+    # doesn't cost a failed round-trip on every single turn before falling
+    # back. Flip back to "cloud" here (or via the browser TTS toggle) once
+    # the ElevenLabs key is fixed, if cloud voice is still wanted.
+    default_tts_mode: Literal["cloud", "local"] = Field(
+        default="local", alias="ARCHER_DEFAULT_TTS_MODE"
     )
 
     # --- Audio ---
@@ -70,13 +95,25 @@ class ArcherConfig(BaseSettings):
 
     # --- Voice Pipeline ---
     wake_word: str = "hey_archer"  # Supported built-in fallback triggers: Alexa, Hey Jarvis, Hey Mycroft, Hey Rhasspy
-    wake_word_threshold: float = 0.3
+    # 0.20 was far too permissive — real detections score 0.85-0.98, but
+    # background noise / audio-stream glitches routinely score 0.2-0.3 on
+    # one of the 4 simultaneously-running models, causing false wake-ups.
+    # Raised to sit well above the noise floor and well below genuine hits.
+    wake_word_threshold: float = 0.55
     vad_aggressiveness: int = 2  # webrtcvad: 0-3. Level 3 rejects speech on low-gain mics.
     stt_provider: str = Field(default="whisper", alias="ARCHER_STT_PROVIDER")  # whisper or parakeet
     stt_model: str = "base.en"  # Faster-Whisper model for local STT
     stt_model_large: str = "large-v3"  # For accuracy mode
     voice_auth_threshold: float = 0.85  # Cosine similarity for voice verification
-    filler_timeout_ms: int = 600  # Play filler if no response in 600ms
+    # Play a filler ("One moment...") only if the first sentence hasn't
+    # arrived within this window. Raised from 600ms now that the pipeline
+    # speed fixes (brevity limit, gated ambient context, no vision-loop
+    # contention) got typical first-token latency well under a second —
+    # 600ms was firing on nearly every request. Kept nonzero (rather than
+    # disabled outright) as a safety net for genuinely slow calls (cloud
+    # delegation, vision analysis) where silence would otherwise look like
+    # ARCHER froze.
+    filler_timeout_ms: int = 3000
 
     # --- Agent ---
     claude_model: str = "claude-sonnet-5"
@@ -115,25 +152,114 @@ class ArcherConfig(BaseSettings):
     therapist_model: str = Field(default="qwen/qwen3.5-397b-a17b", alias="ARCHER_THERAPIST_MODEL")
     trainer_model: str = Field(default="qwen/qwen3.6-35b-a3b", alias="ARCHER_TRAINER_MODEL")
     investment_model: str = Field(default="qwen/qwen3.5-397b-a17b", alias="ARCHER_INVESTMENT_MODEL")
-    observer_model: str = Field(default="qwen2.5vl:7b", alias="ARCHER_OBSERVER_MODEL")
+    # qwen2.5vl:7b hits a known upstream Ollama/llama.cpp bug: it crashes
+    # with HTTP 500 on specific real-world images (works fine on synthetic
+    # warmup images) even on the latest Ollama release — see
+    # https://github.com/ollama/ollama/issues/14170. moondream is smaller,
+    # far more mature in Ollama's vision pipeline, and was the original
+    # model used here before this was ever changed.
+    observer_model: str = Field(default="moondream", alias="ARCHER_OBSERVER_MODEL")
 
     # Local Vision (Ollama)
-    ollama_base_url: str = Field(default="http://127.0.0.1:11434", alias="OLLAMA_HOST")
-    observer_ollama_url: str = Field(default="http://127.0.0.1:11435", alias="OBSERVER_OLLAMA_HOST")  # CPU-bound Ollama instance
+    # NOTE: alias is intentionally NOT "OLLAMA_HOST" — that's Ollama's own
+    # standard env var for telling `ollama serve` which address to bind to.
+    # Reusing it here meant that setting OLLAMA_HOST to start a second
+    # (port 11435) Ollama instance for the observer/vision pipeline
+    # silently overrode THIS setting too if it ever leaked out of that one
+    # shell into ARCHER's own environment (e.g. set persistently rather
+    # than per-window) — breaking the main qwen3:8b chat calls with
+    # "Request URL is missing an 'http://' or 'https://' protocol." since
+    # the raw OLLAMA_HOST value (host:port, no scheme) got used directly.
+    ollama_base_url: str = Field(default="http://127.0.0.1:11434", alias="ARCHER_OLLAMA_BASE_URL")
+    # This second instance was originally run CPU-only (CUDA_VISIBLE_DEVICES="")
+    # to fully isolate it from the main GPU model. That turned out to be a bad
+    # trade for moondream specifically: it's a 1.4B model that only needs
+    # ~1.2GB of VRAM (confirmed via live Ollama logs — model + context +
+    # compute buffer), while CPU inference forced 20-60s cold-start waits and,
+    # worse, pinned the CPU hard enough to starve STT/audio scheduling during
+    # active conversation. There's easily 5-6GB of free VRAM left after
+    # qwen3:8b loads on a 16GB card, so moondream now belongs on GPU too — see
+    # scripts/start_observer_ollama.ps1, which starts it WITHOUT
+    # CUDA_VISIBLE_DEVICES set. Use a genuinely large vision model (not this
+    # one) if CPU isolation is ever needed again for VRAM reasons.
+    observer_ollama_url: str = Field(default="http://127.0.0.1:11435", alias="OBSERVER_OLLAMA_HOST")
     use_local_vision: bool = True
+
+    # --- Observer motion-gating (2026-09-16) ---
+    # The standalone observer service (archer/observer_service.py) no
+    # longer analyzes on a flat timer regardless of activity -- it stays
+    # fully quiet until Reolink's own ONVIF person-detection signal opens
+    # an active window (see observer/pipeline.py's notify_motion), then
+    # analyzes at this tighter cadence for as long as signals keep
+    # arriving, plus at least this many seconds after the last one
+    # (Col's explicit ask). observer_analysis_frequency (above/below,
+    # wherever it's defined) becomes the fallback flat-timer cadence used
+    # only when no network_camera_url is configured at all -- some ambient
+    # observation without a motion signal to gate on beats none.
+    observer_motion_active_interval: float = Field(default=5.0, alias="ARCHER_OBSERVER_ACTIVE_INTERVAL")
+    observer_motion_tail_seconds: float = Field(default=30.0, alias="ARCHER_OBSERVER_MOTION_TAIL")
+
+    # --- Staleness / neglect reasoning (2026-09-16) ---
+    # Deliberately NOT a hardcoded checklist (Col's explicit requirement)
+    # -- observer/staleness_reasoner.py asks the local model to use its
+    # own judgment over a window of recent scene descriptions, rather than
+    # being told what to look for (dishes, laundry, etc). Runs on its own
+    # cadence, independent of motion -- the whole point is noticing things
+    # that stayed the same for too long, which by definition won't be
+    # caught by a motion trigger.
+    observer_staleness_interval_hours: float = Field(default=4.0, alias="ARCHER_OBSERVER_STALENESS_INTERVAL_HOURS")
+    observer_staleness_lookback_hours: float = Field(default=48.0, alias="ARCHER_OBSERVER_STALENESS_LOOKBACK_HOURS")
 
     # Local Fallback
     local_fallback_model: str = Field(default="qwen3.5:4b", alias="ARCHER_LOCAL_MODEL")
     enable_auto_fallback: bool = Field(default=True, alias="ARCHER_ENABLE_FALLBACK")
 
+    # ARCHER "reflective mode" profile learning (2026-09-17, see
+    # /areas/reflective-mode.md). Gates CoreAgent._maybe_extract_profile_insight
+    # -- the write path that distills a reflective conversation into a
+    # standing profile_facts row. Defaults OFF: Col's explicit call was to
+    # hold off on any of his real personal/biographical data entering
+    # ARCHER's memory until the system is stable. The read side (the
+    # standing profile block in build_context_system_prompt) works
+    # regardless of this flag -- it just has nothing to read until either
+    # this is turned on or a fact is inserted directly -- but the WRITE
+    # path must stay behind this flag so a live conversation can't
+    # silently start recording personal disclosures before Col says so.
+    profile_learning_enabled: bool = Field(default=False, alias="ARCHER_PROFILE_LEARNING_ENABLED")
+
     # Local Primary Model (CoreAgent Single-Agent Architecture)
+    # Switched from qwen3:8b (text-only) to gemma4:e4b (2026-09-16, Col's
+    # call): natively multimodal at every size (no separate vision adapter),
+    # ~86% tool-calling accuracy in third-party benchmarks — needed so the
+    # LOCAL model can both call tools (screenshots, PC control, etc.) and
+    # actually see the image a screenshot tool returns, not just be told
+    # one was taken. ~9.6GB VRAM (e4b tag) on a 16GB card, leaving room for
+    # moondream (still used separately for webcam vision — see
+    # observer_model below and core_agent.py's _check_visual_query).
+    # Requires `ollama pull gemma4:e4b` on the machine running Ollama —
+    # ARCHER does not and cannot pull models for you.
     core_primary_model: str = Field(
-        default="qwen3:8b", alias="ARCHER_CORE_PRIMARY_MODEL"
+        default="gemma4:e4b", alias="ARCHER_CORE_PRIMARY_MODEL"
     )
+
+    # --- Nightly Maintenance (2026-09-16) ---
+    # memory/maintenance.py's run_maintenance() (daily consolidation +
+    # OpenMemory reflection) existed fully built but was never scheduled
+    # anywhere -- start_maintenance_scheduler() fires it once per day at
+    # this local hour (24h clock). 3am is a quiet-hours default; change if
+    # ARCHER is regularly still in active use at that time.
+    maintenance_hour: int = Field(default=3, alias="ARCHER_MAINTENANCE_HOUR")
 
     # --- HALT ---
     halt_phrase: str = "archer halt"
     halt_response_ms: int = 150  # Max time to respond to HALT
+
+    # --- barehands (optional third-party gesture/face bridge) ---
+    # Path to a locally-cloned https://github.com/jaredrhod/barehands checkout.
+    # ARCHER never clones/installs this itself (untrusted-source download
+    # policy) -- the user sets this up by hand, then points ARCHER at it.
+    # Empty string (default) disables the bridge entirely, silently.
+    barehands_dir: str = Field(default="", alias="ARCHER_BAREHANDS_DIR")
 
     model_config = {
         "env_file": ".env",

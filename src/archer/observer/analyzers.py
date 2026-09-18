@@ -44,258 +44,6 @@ def _frame_to_jpeg_b64(frame: np.ndarray, quality: int = 70) -> str:
         return ""
 
 
-class EmotionAnalyzer:
-    """
-    Detect facial emotions via DeepFace container.
-
-    Sends JPEG frames to the DeepFace HTTP service and returns
-    emotion classification results.
-    """
-
-    def __init__(self) -> None:
-        self._config = get_config()
-        self._url = f"{self._config.deepface_url}/analyze"
-        self._available = True
-        self._last_check = 0.0
-        self._check_interval = 60.0  # Re-check availability every 60s
-        self._angry_window: list[float] = []  # Timestamps of recent angry detections
-
-    def analyze(self, frame: np.ndarray) -> list[DetectionResult]:
-        """
-        Analyze a frame for facial emotions.
-
-        Returns a list of DetectionResult for each detected face.
-        """
-        if not self._is_available():
-            return []
-
-        try:
-            import httpx
-
-            b64_frame = _frame_to_jpeg_b64(frame)
-            if not b64_frame:
-                return []
-
-            resp = httpx.post(
-                self._url,
-                json={
-                    "image": b64_frame,
-                    "actions": ["emotion"],
-                },
-                timeout=5.0,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            now = time.monotonic()
-            results = []
-            for face in data.get("results", []):
-                dominant = face.get("dominant_emotion", "neutral")
-                emotions = face.get("emotion", {})
-                confidence = emotions.get(dominant, 0.0) / 100.0
-
-                # False-positive mitigation for "angry":
-                # Require >= 0.75 confidence AND 2+ detections within a 90s window before emitting "angry"
-                if dominant == "angry":
-                    if confidence < 0.75:
-                        # Fall back to neutral or highest non-angry emotion
-                        sorted_emotions = sorted([(k, v) for k, v in emotions.items() if k != "angry"], key=lambda x: x[1], reverse=True)
-                        dominant = sorted_emotions[0][0] if sorted_emotions else "neutral"
-                        confidence = emotions.get(dominant, 0.0) / 100.0
-                    else:
-                        self._angry_window = [t for t in self._angry_window if now - t < 90.0]
-                        self._angry_window.append(now)
-                        if len(self._angry_window) < 2:
-                            # Not yet sustained across multiple readings — suppress angry for now
-                            dominant = "neutral"
-                            confidence = 0.5
-
-                results.append(DetectionResult(
-                    source="webcam",
-                    event_type="emotion",
-                    confidence=confidence,
-                    data={
-                        "dominant_emotion": dominant,
-                        "emotions": emotions,
-                        "face_region": face.get("region", {}),
-                    },
-                ))
-            return results
-
-        except Exception as e:
-            logger.debug(f"Emotion analysis unavailable: {e}")
-            self._available = False
-            self._last_check = time.monotonic()
-            return []
-
-    def _is_available(self) -> bool:
-        """Check if DeepFace service is available (with cooldown)."""
-        if self._available:
-            return True
-        if time.monotonic() - self._last_check > self._check_interval:
-            self._available = True  # Try again
-            return True
-        return False
-
-
-class PoseAnalyzer:
-    """
-    Detect body posture and sedentary behavior via MediaPipe container.
-
-    Sends JPEG frames to the MediaPipe HTTP service and returns
-    pose landmark data.
-    """
-
-    def __init__(self) -> None:
-        self._config = get_config()
-        self._url = f"{self._config.mediapipe_url}/pose"
-        self._available = True
-        self._last_check = 0.0
-        self._check_interval = 60.0
-
-    def analyze(self, frame: np.ndarray) -> list[DetectionResult]:
-        """
-        Analyze a frame for body posture.
-
-        Returns a DetectionResult with pose landmark data.
-        """
-        if not self._is_available():
-            return []
-
-        try:
-            import httpx
-
-            b64_frame = _frame_to_jpeg_b64(frame)
-            if not b64_frame:
-                return []
-
-            resp = httpx.post(
-                self._url,
-                json={"image": b64_frame},
-                timeout=5.0,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            results = []
-            if data.get("detected"):
-                posture = data.get("posture", "unknown")
-                confidence = data.get("confidence", 0.0)
-
-                results.append(DetectionResult(
-                    source="webcam",
-                    event_type="posture",
-                    confidence=confidence,
-                    data={
-                        "posture": posture,
-                        "landmarks": data.get("landmarks", []),
-                        "is_sitting": data.get("is_sitting", False),
-                        "is_hunched": data.get("is_hunched", False),
-                    },
-                ))
-            return results
-
-        except Exception as e:
-            logger.debug(f"Pose analysis unavailable: {e}")
-            self._available = False
-            self._last_check = time.monotonic()
-            return []
-
-    def _is_available(self) -> bool:
-        """Check if MediaPipe service is available (with cooldown)."""
-        if self._available:
-            return True
-        if time.monotonic() - self._last_check > self._check_interval:
-            self._available = True
-            return True
-        return False
-
-
-class SedentaryTracker:
-    """
-    Track sedentary behavior based on pose analysis results.
-
-    Does NOT dispatch to an external service — this runs locally by
-    monitoring the presence/absence of the user in frame and whether
-    they appear to be sitting.
-
-    Triggers:
-    - Sitting detected for 2+ hours without standing → sedentary alert
-    - Person disappears from frame → timer pauses
-    """
-
-    def __init__(self, threshold_minutes: float = 120.0) -> None:
-        self._threshold_seconds = threshold_minutes * 60.0
-        self._sitting_since: float | None = None
-        self._total_sitting_seconds: float = 0.0
-        self._last_update: float = 0.0
-        self._alerted = False
-
-    def update(self, pose_result: DetectionResult | None) -> DetectionResult | None:
-        """
-        Update sedentary tracking with the latest pose analysis.
-
-        Args:
-            pose_result: A DetectionResult from PoseAnalyzer, or None if
-                        no person detected in frame.
-
-        Returns:
-            A sedentary DetectionResult if the threshold is breached,
-            or None otherwise.
-        """
-        now = time.monotonic()
-
-        if pose_result is None or not pose_result.data.get("is_sitting", False):
-            # Not sitting or not in frame — pause timer
-            if self._sitting_since is not None:
-                elapsed = now - self._sitting_since
-                self._total_sitting_seconds += elapsed
-                self._sitting_since = None
-            self._last_update = now
-            return None
-
-        # Person is sitting
-        if self._sitting_since is None:
-            self._sitting_since = now
-
-        elapsed_sitting = self._total_sitting_seconds
-        if self._sitting_since is not None:
-            elapsed_sitting += now - self._sitting_since
-
-        self._last_update = now
-
-        if elapsed_sitting >= self._threshold_seconds and not self._alerted:
-            self._alerted = True
-            hours = elapsed_sitting / 3600.0
-            return DetectionResult(
-                source="webcam",
-                event_type="sedentary",
-                confidence=0.95,
-                data={
-                    "duration_minutes": elapsed_sitting / 60.0,
-                    "duration_hours": hours,
-                    "message": f"Sitting for {hours:.1f} hours",
-                },
-            )
-
-        return None
-
-    def reset(self) -> None:
-        """Reset the sedentary timer (e.g. after the user stands up)."""
-        self._sitting_since = None
-        self._total_sitting_seconds = 0.0
-        self._alerted = False
-        logger.debug("Sedentary tracker reset.")
-
-    @property
-    def sitting_duration_seconds(self) -> float:
-        """Get current accumulated sitting duration in seconds."""
-        total = self._total_sitting_seconds
-        if self._sitting_since is not None:
-            total += time.monotonic() - self._sitting_since
-        return total
-
-
 class SceneAnalyzer:
     """
     Semantic scene understanding via local Vision Language Model (Qwen2-VL).
@@ -341,13 +89,23 @@ class SceneAnalyzer:
                 return []
 
             prompt = (
-                "Analyze this frame. Respond with valid JSON strictly matching this structure:\n"
+                "Analyze this frame. Focus on person behavior and actions (e.g. sitting at desk, cooking, on phone, pacing, working) "
+                "as well as notable objects. Respond with valid JSON strictly matching this structure:\n"
                 "{\n"
-                '  "description": "2-3 concise sentences of what you see",\n'
+                '  "description": "2-3 concise sentences of what the person is doing and the scene context",\n'
                 '  "objects": [{"object_type": "item_name", "confidence": 0.9, "location": "desk"}]\n'
                 "}"
             )
 
+            # 60s, not 30s — a cold vision-model load (CUDA kernel
+            # compilation on first inference after the model has been idle
+            # past its keep_alive window) can take 20-30s on its own before
+            # generation starts. See core_agent.py's identical fix for the
+            # full story; this call hits the same Ollama instance and was
+            # very likely the reason the GUI's Observer Feed panel has
+            # been stuck on "Waiting for analysis..." — the very first
+            # periodic analysis call after the model unloads would time
+            # out here the same way.
             resp = httpx.post(
                 self._ollama_url,
                 json={
@@ -356,7 +114,7 @@ class SceneAnalyzer:
                     "images": [b64_frame],
                     "stream": False,
                 },
-                timeout=30.0,
+                timeout=60.0,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -418,4 +176,5 @@ class SceneAnalyzer:
             self._available = True
             return True
         return False
+
 

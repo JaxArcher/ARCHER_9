@@ -265,7 +265,9 @@ class ConversationPanel(QWidget):
         self._bus.subscribe(EventType.SYSTEM_START, self._on_system_start)
         self._bus.subscribe(EventType.AGENT_REQUEST, self._on_agent_request)
         self._bus.subscribe(EventType.AGENT_RESPONSE_START, self._on_agent_response_start)
-        
+        self._bus.subscribe(EventType.WAKE_ACK_PLAY, self._on_wake_ack_play)
+        self._bus.subscribe(EventType.FILLER_PLAY, self._on_filler_play)
+
         import time # Needed for timestamps if we use time.time()
         self._time = time
 
@@ -381,6 +383,18 @@ class ConversationPanel(QWidget):
 
     def _on_wake_word(self, event: Event) -> None:
         self.update_wake_word_signal.emit(True)
+
+    def _on_wake_ack_play(self, event: Event) -> None:
+        """Show the wake-word acknowledgment ARCHER just spoke."""
+        text = event.data.get("text", "")
+        if text:
+            self.append_message("assistant", self._current_agent, text)
+
+    def _on_filler_play(self, event: Event) -> None:
+        """Show the conversational filler ARCHER just spoke (e.g. 'One moment...')."""
+        text = event.data.get("text", "")
+        if text:
+            self.append_message("assistant", self._current_agent, text)
 
     def _on_halt(self, event: Event) -> None:
         self.append_message("system", "", "⛔ HALT — All operations stopped.")

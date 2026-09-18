@@ -12,6 +12,8 @@ from archer.tools.pc_control import PCController
 from archer.canvas.renderer import execute_canvas_tool
 from archer.skills.skills_registry import get_tool_category
 from archer.tools.inventory_tools import InventoryTools
+from archer.core.event_bus import get_event_bus, Event, EventType
+from archer.memory.sqlite_store import get_sqlite_store
 
 
 class UniversalToolExecutor:
@@ -20,6 +22,7 @@ class UniversalToolExecutor:
     def __init__(self):
         self._pc_controller = PCController()
         self._inventory_tools = InventoryTools()
+        self._store = get_sqlite_store()
         self._confirmation_required = {
             'open_url', 'click', 'type_text', 'hotkey', 'focus_window',
             'browser_click', 'browser_type', 'close_browser'
@@ -37,6 +40,10 @@ class UniversalToolExecutor:
                 return {'result': result}
             elif category == 'inventory':
                 return self._exec_inventory_tool(tool_name, tool_input)
+            elif category == 'ui_control':
+                return self._exec_ui_control_tool(tool_name, tool_input)
+            elif category == 'tasks':
+                return self._exec_tasks_tool(tool_name, tool_input)
             else:
                 return {'error': f'Unknown tool category: {category}'}
                 
@@ -143,3 +150,96 @@ class UniversalToolExecutor:
             
         else:
             return {'error': f'Unknown inventory tool: {tool_name}'}
+
+    def _exec_ui_control_tool(self, tool_name: str, inp: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute tools that control ARCHER's own browser/desktop interface."""
+        if tool_name == 'switch_tab':
+            tab_name = (inp.get('tab_name') or '').strip().lower()
+            if not tab_name:
+                return {'error': 'tab_name is required'}
+            get_event_bus().publish(Event(
+                type=EventType.UI_SWITCH_TAB,
+                source='tool_executor',
+                data={'tab': tab_name},
+            ))
+            return {'result': {'success': True, 'tab': tab_name}}
+
+        else:
+            return {'error': f'Unknown UI control tool: {tool_name}'}
+
+    def _exec_tasks_tool(self, tool_name: str, inp: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute task/habit tools (tasks_SKILL.md). Available to every
+        agent persona -- get_all_tools() is unscoped by persona/stance tag,
+        so this is true by construction, not something requiring separate
+        per-persona wiring (Col's call, 2026-09-16).
+
+        Publishes EventType.TASKS_CHANGED after any write so the browser
+        TASKS tab refreshes even when the change came from a voice/text
+        command rather than a click in the tab itself -- same pattern as
+        the MEMORY tab's memory_snapshot broadcast."""
+        def _notify_changed():
+            get_event_bus().publish(Event(
+                type=EventType.TASKS_CHANGED, source='tool_executor', data={},
+            ))
+
+        if tool_name == 'add_task':
+            title = (inp.get('title') or '').strip()
+            if not title:
+                return {'error': 'title is required'}
+            task_id = self._store.add_task(
+                title=title,
+                due_date=inp.get('due_date'),
+                source=inp.get('source') or 'user',
+            )
+            _notify_changed()
+            return {'result': {'task_id': task_id, 'title': title}}
+
+        elif tool_name == 'list_tasks':
+            return {'result': self._store.get_tasks(status=inp.get('status'))}
+
+        elif tool_name == 'complete_task':
+            task_id = inp.get('task_id')
+            if task_id is None:
+                return {'error': 'task_id is required'}
+            self._store.complete_task(int(task_id))
+            _notify_changed()
+            return {'result': {'success': True, 'task_id': task_id}}
+
+        elif tool_name == 'delete_task':
+            task_id = inp.get('task_id')
+            if task_id is None:
+                return {'error': 'task_id is required'}
+            self._store.delete_task(int(task_id))
+            _notify_changed()
+            return {'result': {'success': True, 'task_id': task_id}}
+
+        elif tool_name == 'add_habit':
+            name = (inp.get('name') or '').strip()
+            if not name:
+                return {'error': 'name is required'}
+            habit_id = self._store.add_habit(name=name, frequency=inp.get('frequency') or 'daily')
+            _notify_changed()
+            return {'result': {'habit_id': habit_id, 'name': name}}
+
+        elif tool_name == 'list_habits':
+            return {'result': self._store.get_habits()}
+
+        elif tool_name == 'complete_habit':
+            name = (inp.get('name') or '').strip()
+            if not name:
+                return {'error': 'name is required'}
+            result = self._store.complete_habit(name)
+            if 'error' not in result:
+                _notify_changed()
+            return {'result': result}
+
+        elif tool_name == 'delete_habit':
+            name = (inp.get('name') or '').strip()
+            if not name:
+                return {'error': 'name is required'}
+            self._store.delete_habit(name)
+            _notify_changed()
+            return {'result': {'success': True, 'name': name}}
+
+        else:
+            return {'error': f'Unknown tasks tool: {tool_name}'}

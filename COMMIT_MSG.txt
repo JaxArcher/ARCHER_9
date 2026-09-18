@@ -1,0 +1,86 @@
+ARCHER stabilization: standalone observer, single-agent core, dashboard consolidation
+
+Major architecture work from this session (see project memory for full
+decision log; summarized here by area):
+
+Observer/Blindspot decoupling
+- New standalone archer/observer_service.py: camera capture, Reolink
+  motion/person detection, scene analysis (moondream), person
+  identification (InsightFace), and staleness/neglect reasoning now run
+  independent of any GUI/browser session, installable as a Windows
+  Service (scripts/install_observer_service.ps1) so it starts at boot.
+- BlindspotAgent's decision-making (SeverityScorer/InterventionEngine)
+  moved into the observer service too, so interventions get decided
+  during GUI-downtime, not just while a session is open. Decided
+  interventions persist to a new pending_interventions table and push
+  live over Redis; CoreAgent does a startup catch-up sweep and surfaces
+  them as a "While You Were Away" list.
+- Cross-process events (observer detections, blindspot flags) bridge to
+  CoreAgent via Redis pub/sub (archer:observer:events,
+  archer:blindspot:interventions), independent of SQLite polling.
+
+Vision / visual Q&A
+- Cut the moondream captioning hop for on-demand "look at this" queries:
+  gemma4:e4b (and Claude in cloud mode) now see the actual webcam frame
+  directly via Ollama's images field / Claude's vision content block.
+  Moondream is unaffected everywhere else (still feeds SceneAnalyzer's
+  ambient passes).
+- Identity is answered via InsightFace embedding matching on the same
+  frame, never asked of a vision-language model (avoids hallucinated
+  names). Passive introduction-based auto-enrollment
+  (CoreAgent._check_person_introduction) plus a pending_person_
+  confirmations queue surfaced in the browser MEMORY tab.
+- Fixed: gemma4:e4b (Gemma 3n) 400s on Ollama's /api/chat when a request
+  carries both "tools" and an "images" attachment together. _stream_local
+  now omits "tools" for any round that has an image attached, and logs
+  Ollama's actual error body on failure instead of just httpx's generic
+  status message.
+
+Voice pipeline
+- Fixed self-hearing/wake-ack bleed during LISTENING and a barge-in
+  race during SPEAKING (acoustic echo with no AEC, open speakers).
+- Fixed a real double-invocation bug in the LISTENING branch's state
+  machine: _process_utterance() blocks the pipeline thread until the
+  agent's first sentence is ready, which can take 50-90s on a slow/
+  visual turn. Nothing reset _heard_speech/_listen_start while blocked,
+  so the very next "hard timeout: cap utterance at 30s" check in the
+  SAME loop iteration was re-firing _process_utterance() a second time
+  immediately after the first returned -- bumping _turn_seq, stopping
+  playback, and closing the just-dispatched turn's own agent generator
+  before it was ever spoken. Every turn slower than ~30s was silently
+  self-cancelling. Both trigger paths now `continue` immediately after
+  dispatching.
+- Split audio capture/playback startup into independent retry paths
+  (one Bluetooth device failing was taking down an otherwise-working
+  wired mic too) and fixed the WASAPI .start()-time format rejection
+  that bypassed the whole fallback ladder.
+- Contextual (LLM-generated) "one moment" filler acknowledgments,
+  racing the real response instead of always using the static bank.
+- Ollama cold-start warm-up calls for both instances (main + observer).
+
+Core agent / memory
+- agents/orchestrator.py confirmed dead code; CoreAgent is the live
+  single-agent architecture.
+- New profile_facts table + gated (off by default) profile-insight
+  extraction, wired into both the local system prompt and the
+  Blindspot decision engine; never sent on cloud-delegated turns.
+- Nightly consolidation/maintenance pipeline (previously built but
+  never scheduled) connected, synthesis step switched to the local
+  model, fixed to not fire immediately on startup.
+- Real-time (per-turn) pattern/entity extraction feeding a recall glossary
+  back into future system prompts.
+
+Dashboard / browser client
+- Consolidated 6 browser tabs into one Dashboard tab (Gesture stays
+  separate); camera feed, system logs, memory, tasks, and system
+  controls merged into a single grid of cards.
+- Live MJPEG camera stream endpoint, GPU/VRAM + per-Ollama-instance
+  metrics, model/mic/speaker dropdowns with live hot-swap, read-only
+  browser-mirror pane, and rolling performance sparklines.
+
+This commit captures the working tree as-is: real content changes are
+concentrated in ~35 files (core_agent.py, voice/pipeline.py, config.py,
+sqlite_store.py, blindspot_agent.py, observer/*, server.py, voice/audio.py,
+etc. -- see `git diff --ignore-all-space --stat` for the exact list); the
+remaining files in this diff are CRLF/LF line-ending churn only, verified
+with --ignore-all-space beforehand (no textual differences).

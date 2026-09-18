@@ -43,6 +43,46 @@ load_dotenv(_env_path, override=True)
 from archer.config import get_config
 
 
+class _FlushingFileSink:
+    """
+    Guarantees every log line is actually visible on disk immediately —
+    to `tail`, to the GUI's Console tab, to anything else reading the
+    file — rather than waiting on whatever Python's IO layer or the OS
+    decides to buffer.
+
+    loguru's own file sink already defaults to buffering=1 (line-buffered),
+    which should have been enough, but in practice it wasn't: the log
+    file's mtime sat completely frozen at the startup line through full
+    conversation turns, across many separate ARCHER restarts. Rather than
+    keep guessing at why line-buffering wasn't taking effect (Windows
+    file-sharing semantics, an interaction with one of the many native
+    ML libraries ARCHER loads, etc.), this sink just flushes AND fsyncs
+    after every single write, removing the ambiguity entirely. The
+    trade-off is losing loguru's built-in rotation/retention/compression
+    (which need a path-string sink) — acceptable for a personal debug
+    log at this volume; the date is baked into the filename at startup
+    instead, same naming convention as before.
+    """
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = open(path, "a", encoding="utf-8", buffering=1)
+
+    def write(self, message: str) -> None:
+        self._file.write(message)
+        self._file.flush()
+        try:
+            os.fsync(self._file.fileno())
+        except OSError:
+            pass  # Some filesystems don't support fsync; flush() already pushed it out of the Python buffer.
+
+    def stop(self) -> None:
+        try:
+            self._file.close()
+        except Exception:
+            pass
+
+
 def setup_logging() -> None:
     """Configure loguru for ARCHER."""
     config = get_config()
@@ -51,11 +91,17 @@ def setup_logging() -> None:
     logger.remove()
 
     # Console handler
+    # Timestamp includes milliseconds (2026-09-17) -- second-only
+    # resolution repeatedly made it impossible to tell true execution
+    # order apart from same-second logging noise while chasing the voice
+    # pipeline's turn-overlap bugs (multiple threads legitimately log
+    # within the same wall-clock second; without sub-second precision
+    # there's no way to tell which one actually happened first).
     logger.add(
         sys.stderr,
         level="INFO",
         format=(
-            "<green>{time:HH:mm:ss}</green> | "
+            "<green>{time:HH:mm:ss.SSS}</green> | "
             "<level>{level: <8}</level> | "
             "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | "
             "<level>{message}</level>"
@@ -63,14 +109,16 @@ def setup_logging() -> None:
         colorize=True,
     )
 
-    # File handler
-    log_file = config.log_dir / "archer_{time:YYYY-MM-DD}.log"
+    # File handler — see _FlushingFileSink for why this isn't a plain
+    # path-string sink (loguru's built-in file sink wasn't reliably
+    # flushing to disk in practice, which broke both `tail`-ing the log
+    # and the GUI's live Console tab).
+    import datetime as _datetime
+    log_file_path = config.log_dir / f"archer_{_datetime.date.today():%Y-%m-%d}.log"
     logger.add(
-        str(log_file),
+        _FlushingFileSink(log_file_path),
         level="DEBUG",
-        rotation="10 MB",
-        retention="7 days",
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} | {message}",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} | {message}",
     )
 
 
@@ -104,6 +152,12 @@ def main() -> None:
         logger.warning(
             "No ELEVENLABS_API_KEY set. Cloud TTS/STT won't work without it."
         )
+
+    # Auto-start both Ollama instances (main + observer/moondream) if
+    # they're not already running -- Col no longer needs to manually run
+    # `ollama serve` / start_observer_ollama.ps1 first (2026-09-16).
+    from archer.integrations.ollama_bootstrap import start_ollama_instances
+    start_ollama_instances()
 
     # Initialize memory store (creates DB tables)
     logger.info("Initializing memory store...")
@@ -173,8 +227,19 @@ def main() -> None:
 
     threading.Thread(target=_start_observer_containers, daemon=True, name="DockerStart").start()
 
-    # Initialize Observer pipeline (Phase 3)
-    logger.info("Initializing observer pipeline...")
+    # Initialize Observer pipeline (Phase 3) — camera-preview-only mode
+    # (2026-09-16). Real ambient observation (analysis, SQLite logging,
+    # Blindspot triggers) now belongs to the standalone
+    # archer/observer_service.py, running as its own always-on process so
+    # it doesn't depend on the desktop GUI being open at all (Col's call).
+    # This instance exists purely to feed the GUI's own live webcam widget
+    # and face-enrollment flow — run_analysis=False means it opens the
+    # camera but never runs its own analysis thread, so it doesn't
+    # duplicate the observer service's work or double-log every
+    # observation. CoreAgent gets real observation data from the observer
+    # service via Redis (see core_agent.py's subscriber), not from this
+    # instance.
+    logger.info("Initializing observer pipeline (camera-preview mode)...")
     observer = None
     intervention_engine = None
     try:
@@ -183,11 +248,12 @@ def main() -> None:
 
         observer = ObserverPipeline(
             analysis_interval=config.observer_analysis_frequency,
+            run_analysis=False,
         )
 
         # Create intervention engine with proactive delivery callback
         intervention_engine = InterventionEngine(
-            speak_callback=lambda text: pipeline._call_agent_with_filler(text),
+            speak_callback=lambda agent, text: pipeline._call_agent_with_filler(text),
         )
 
         # Start the observer in a background thread
@@ -207,12 +273,22 @@ def main() -> None:
         logger.warning(f"Observer initialization failed (non-fatal): {e}")
         logger.info("Observer features disabled.")
 
+    from archer.integrations.barehands_bridge import start_barehands_bridge
+    start_barehands_bridge()
+
+    # Nightly maintenance (daily consolidation + OpenMemory reflection) —
+    # fully built but never actually scheduled anywhere until now
+    # (2026-09-16). See memory/maintenance.py.
+    from archer.memory.maintenance import start_maintenance_scheduler
+    start_maintenance_scheduler()
+
     # Start API Server (Phase 1 / Mobile Bridge)
     def _start_api_server():
         try:
             import uvicorn
-            from archer.server import app, set_orchestrator
+            from archer.server import app, set_orchestrator, set_observer
             set_orchestrator(core_agent)
+            set_observer(observer)
             logger.info(f"Starting API Server on {config.api_host}:{config.api_port}...")
             uvicorn.run(app, host=config.api_host, port=config.api_port, log_level="warning")
         except Exception as e:

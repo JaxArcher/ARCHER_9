@@ -1,0 +1,120 @@
+<!--
+  ARCHER browser client — entry point.
+  Served by archer/server.py at /app (assets under /static/...).
+  See CONTRACT.md before changing anything here.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ARCHER</title>
+  <link rel="stylesheet" href="/static/css/ui.css" />
+  <link rel="stylesheet" href="/static/css/orb.css" />
+</head>
+<body>
+  <div id="archer-shell">
+    <div id="archer-toolbar">
+      <span id="archer-status" class="status-dot" title="Connection status"></span>
+      <button id="archer-mode-btn" type="button" title="Toggle whether ARCHER's brain runs LOCAL (Ollama, private, no API cost) or CLOUD (Claude/NVIDIA, smarter, needs internet)">MODE</button>
+      <button id="archer-mic-btn" type="button" title="Mute/unmute your microphone -- ARCHER stops listening for the wake word or any speech while muted">MIC</button>
+      <button id="archer-tts-btn" type="button" title="Mute/unmute ARCHER's spoken replies -- text replies still work while muted">SPEAKER</button>
+      <button id="archer-voice-engine-btn" type="button" title="Which voice engine speaks — ElevenLabs (cloud) or Kokoro (local), independent of the conversation MODE toggle">VOICE</button>
+      <button id="archer-camera-btn" type="button" title="Release the webcam so another app (e.g. barehands) can use it">CAMERA</button>
+      <button id="archer-enroll-btn" type="button" title="Look at the camera and enroll your face so ARCHER recognizes you">ENROLL FACE</button>
+      <button id="archer-halt-btn" type="button" title="Emergency stop -- interrupts whatever ARCHER is currently doing/saying">HALT</button>
+    </div>
+
+    <div id="archer-tabs">
+      <button class="tab-btn active" data-tab="dashboard" type="button">DASHBOARD</button>
+      <button class="tab-btn" data-tab="gesture" type="button">GESTURE</button>
+    </div>
+
+    <!-- Always-visible control strip (2026-09-16, Col's ask: "these boxes
+         should be at the top of the screen" -- the brain-model and mic/
+         speaker dropdowns used to live inside the scrollable System card,
+         which meant scrolling within a small sidebar to reach them. Built
+         by system.js, same as the rest of the System card, just a
+         different mount point that isn't inside the scrolling dashboard
+         grid. -->
+    <div id="archer-controls-bar"></div>
+
+    <div id="archer-tab-content">
+      <!-- Consolidated 2026-09-16 (Col's call): everything except Gesture
+           (which stays separate since barehands is a self-contained,
+           full-bleed pane) lives on one Dashboard now -- orb/chat, live
+           camera + GPU/model/device controls, system logs, memory, and
+           tasks, all at a glance instead of spread across five tabs.
+           Each section below keeps its ORIGINAL id and is built by its
+           ORIGINAL js file unchanged (logs.js/memory.js/tasks.js/
+           system.js each just fill in their own container) -- only the
+           lazy-load trigger inside each of those files changed, from
+           "my own tab was clicked" to "the Dashboard tab is active". -->
+      <div id="tab-dashboard" class="tab-panel active">
+        <div id="archer-dashboard-grid">
+          <!-- Primary row (2026-09-16 redesign, per Col's mockup): orb,
+               chat, and the live camera + GPU/model/mic/speaker controls
+               all together at the top, in one glance, no scrolling needed
+               to reach the controls. tab-system keeps its original id and
+               is still built entirely by system.js unchanged -- only its
+               position in the DOM (and its width, via .archer-system-sidebar)
+               moved. -->
+          <div id="archer-dashboard-primary">
+            <div id="archer-root">
+              <div id="archer-orb-column">
+                <div data-archer-orb></div>
+              </div>
+              <div id="archer-chat-column">
+                <div id="archer-live"></div>
+                <div id="archer-transcript"></div>
+                <form id="archer-text-form">
+                  <input id="archer-text-input" type="text" placeholder="Type a message..." autocomplete="off" />
+                  <button type="submit">Send</button>
+                </form>
+              </div>
+              <div id="tab-system" class="archer-dashboard-card archer-system-sidebar">
+                <!-- js/system.js builds this: live camera, GPU/VRAM, performance charts, brain model + mic/speaker dropdowns -->
+              </div>
+            </div>
+          </div>
+
+          <div id="archer-dashboard-secondary">
+            <div id="tab-logs" class="archer-dashboard-card">
+              <!-- js/logs.js builds this: raw application log tail -->
+            </div>
+            <div id="tab-memory" class="archer-dashboard-card">
+              <!-- js/memory.js builds this: while-you-were-away, unrecognized people -->
+            </div>
+            <div id="tab-tasks" class="archer-dashboard-card">
+              <!-- js/tasks.js builds this: open tasks, read-only -->
+            </div>
+            <div id="tab-browser" class="archer-dashboard-card">
+              <!-- js/browser.js builds this: live mirror of ARCHER's own Playwright browser -->
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-gesture" class="tab-panel">
+        <!-- js/barehands.js mounts barehands' stage.html here, full-bleed
+             within this tab only -- it does not affect the Dashboard tab or
+             the toolbar above. See CONTRACT.md. -->
+        <p id="archer-gesture-placeholder">
+          barehands will connect when you open this tab (needs its own server.py running separately — see CONTRACT.md)
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+  <script src="/static/js/orb.js"></script>
+  <script src="/static/js/ui.js"></script>
+  <script src="/static/js/tabs.js"></script>
+  <script src="/static/js/logs.js"></script>
+  <script src="/static/js/memory.js"></script>
+  <script src="/static/js/tasks.js"></script>
+  <script src="/static/js/system.js"></script>
+  <script src="/static/js/browser.js"></script>
+  <script src="/static/js/barehands.js"></script>
+</body>
+</html>
