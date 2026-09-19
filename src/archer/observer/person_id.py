@@ -112,6 +112,46 @@ class PersonIdentifier:
             if not faces:
                 return []
 
+            # Filter out faces too small/low-confidence to plausibly be
+            # someone actually sitting in front of this webcam (2026-09-19,
+            # Col's report: a TV playing a show with a 4-person video-chat
+            # grid on screen produced SEVEN separate "unrecognized person"
+            # detections in one frame -- InsightFace correctly found the
+            # faces rendered on the TV, but nothing distinguished "a real
+            # person using the camera" from "a face displayed on a screen,
+            # photo, mask, or mannequin in the background" (same root cause
+            # as the mannequin/tribal-mask false-positive from 2026-09-18).
+            # This isn't true liveness detection, just a practical proxy:
+            # someone actually at the webcam fills a large fraction of the
+            # frame with their face; anything rendered across the room on a
+            # TV/monitor/photo reads much smaller and/or less confidently.
+            frame_h = frame.shape[0]
+            MIN_FACE_HEIGHT_RATIO = 0.12
+            MIN_DET_SCORE = 0.55
+            faces = [
+                f for f in faces
+                if (f.bbox[3] - f.bbox[1]) >= frame_h * MIN_FACE_HEIGHT_RATIO
+                and float(getattr(f, "det_score", 1.0)) >= MIN_DET_SCORE
+            ]
+            if not faces:
+                return []
+
+            # A second, blunter guard: several faces at once is exactly what
+            # a screen/photo/video-chat-grid in the background looks like,
+            # and is not realistic for a single person at a home webcam.
+            # Skip identification entirely rather than reporting a room full
+            # of strangers -- better to say nothing than to flood the
+            # pending-confirmation queue and the spoken response with false
+            # "unrecognized person" hits.
+            MAX_PLAUSIBLE_FACES = 3
+            if len(faces) > MAX_PLAUSIBLE_FACES:
+                logger.info(
+                    f"Person ID: {len(faces)} faces detected in one frame -- "
+                    "likely a screen or photo in the background rather than "
+                    "real visitors. Skipping identification for this frame."
+                )
+                return []
+
             known_persons = store.get_known_persons()
             known_embeddings: List[Tuple[str, np.ndarray]] = []
             for kp in known_persons:

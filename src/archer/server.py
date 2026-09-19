@@ -374,63 +374,89 @@ def _register_event_bridge() -> None:
 _register_event_bridge()
 
 
-# --- LOGS tab: tail ARCHER's own rotating log file into the browser ---
-# Mirrors gui/console_widget.py's polling logic exactly (same file --
-# config.log_dir / archer_YYYY-MM-DD.log -- same tail-from-near-the-end
-# behavior on first attach) so the browser LOGS tab shows the same thing
-# the desktop Console tab does. This is a port, not new design: the
-# desktop widget reads the file in-process because it's a Qt widget in
-# the same process; the browser needs it tailed server-side and pushed
-# over the same WS broadcast mechanism every other bridge message uses.
-_LOG_TAIL_INITIAL_BYTES = 12_000
-_log_tail_state: dict = {"path": None, "offset": 0}
+# --- LOGS tab: curated "what ARCHER is doing right now" feed ---
+# Replaced 2026-09-18 (Col's request) -- this used to tail ARCHER's own
+# raw DEBUG-level rotating log file (archer_YYYY-MM-DD.log) straight into
+# the browser, mirroring gui/console_widget.py's desktop Console tab. In
+# practice that was mostly httpx polling noise ("GET /api/ps 200 OK"
+# every second, from every SYSTEM-tab metrics poll) with the actually
+# useful lines buried in it -- Col's own words: "whatever is showing
+# there currently is never anything useful." This subscribes to the SAME
+# event-bus events server.py already bridges to the browser for other
+# purposes (state changes, transcripts, responses, camera checks) and
+# turns each into one plain-English line on the same log_line channel
+# the LOGS pane already renders -- no frontend change needed, just a
+# different (better) source for the text.
+from collections import deque as _deque
+_status_line_history: _deque = _deque(maxlen=50)
 
 
-def _latest_log_file() -> Path | None:
-    """Find the most recently modified archer_*.log* file."""
-    try:
-        log_dir = Path(get_config().log_dir)
-        candidates = list(log_dir.glob("archer_*.log*"))
-        if not candidates:
-            return None
-        return max(candidates, key=lambda p: p.stat().st_mtime)
-    except Exception:
-        return None
+def _status_line(text: str) -> None:
+    line = f"{_time.strftime('%H:%M:%S')} | {text}\n"
+    _status_line_history.append(line)
+    _on_bus_event("log_line", text=line)
 
 
-def _log_tail_loop() -> None:
-    """Background thread (started once, daemon): polls the log file every
-    750ms and broadcasts any new text as {"type": "log_line", "text": ...}.
-    Runs off the asyncio loop entirely -- _on_bus_event is the same
-    thread-safe hand-off every other bus->browser bridge message uses, so
-    this is safe to call from a plain Python thread."""
+def _register_status_line_bridge() -> None:
+    bus = get_event_bus()
+
+    _STATE_LINES = {
+        "listening": "🎤 Listening...",
+        "processing": "🤔 Thinking -- request sent to the model...",
+        "speaking": "🔊 Speaking the response...",
+        "idle": "💤 Idle -- waiting for the wake word.",
+    }
+
+    def _on_state(e: Event) -> None:
+        line = _STATE_LINES.get(e.data.get("state", ""))
+        if line:
+            _status_line(line)
+
+    bus.subscribe(EventType.PIPELINE_STATE_CHANGED, _on_state)
+    bus.subscribe(EventType.WAKE_WORD_DETECTED, lambda e: _status_line("🎤 Wake word detected."))
+    bus.subscribe(EventType.STT_FINAL, lambda e: _status_line(
+        f"📝 Heard: \"{e.data.get('text', '')}\""))
+    bus.subscribe(EventType.VISUAL_QUERY, lambda e: _status_line(
+        f"👁️ {e.data.get('note', '')}"))
+    bus.subscribe(EventType.FILLER_PLAY, lambda e: _status_line(
+        f"💬 Still thinking -- playing filler: \"{e.data.get('text', '')}\""))
+    bus.subscribe(EventType.AGENT_RESPONSE_START, lambda e: _status_line(
+        f"✍️ First words arriving ({e.data.get('elapsed', 0.0):.1f}s after the request)."))
+    bus.subscribe(EventType.AGENT_RESPONSE_END, lambda e: _status_line(
+        f"✅ Response ready: \"{e.data.get('text', '')[:150]}\""))
+    bus.subscribe(EventType.SYSTEM_ERROR, lambda e: _status_line(
+        f"⚠️ Error: {e.data.get('message', '')}"))
+    bus.subscribe(EventType.MODE_CHANGED, lambda e: _status_line(
+        f"🔀 Switched to {e.data.get('new_mode', 'unknown')} mode."))
+    bus.subscribe_halt(lambda e: _status_line("🛑 HALT -- stopped."))
+
+
+_register_status_line_bridge()
+
+
+# --- Cross-process "GUI is active" heartbeat (2026-09-19) ---
+# Moondream moved back to CPU-only (Col's call -- GPU headroom matters
+# more than the earlier contention risk, now that this flag lets the
+# standalone observer service actually pause itself). Refreshes a short-
+# TTL Redis key for as long as at least one browser client is connected,
+# so ObserverPipeline._analysis_loop (running in a completely different
+# OS process) knows to skip its CPU-heavy moondream analysis cycles while
+# ARCHER is actually in use, and resume automatically once nobody's
+# connected. TTL-based, not a start/stop message, on purpose: if this
+# process is killed rather than shut down cleanly, the flag just expires
+# on its own a few seconds later instead of leaving the observer paused
+# forever. See RedisBuffer.mark_gui_active's docstring for the full
+# reasoning.
+def _gui_active_heartbeat_loop() -> None:
+    from archer.memory.redis_buffer import get_redis_buffer
+    redis_buffer = get_redis_buffer()
     while True:
-        try:
-            latest = _latest_log_file()
-            if latest is not None:
-                if latest != _log_tail_state["path"]:
-                    # New file (first run, or rotation) -- seed near the
-                    # end rather than replaying the whole (possibly
-                    # multi-MB) file from the start.
-                    _log_tail_state["path"] = latest
-                    size = latest.stat().st_size
-                    _log_tail_state["offset"] = max(0, size - _LOG_TAIL_INITIAL_BYTES)
-                with open(latest, "r", encoding="utf-8", errors="replace") as f:
-                    f.seek(_log_tail_state["offset"])
-                    new_text = f.read()
-                    _log_tail_state["offset"] = f.tell()
-                if new_text:
-                    _on_bus_event("log_line", text=new_text)
-        except Exception as e:
-            logger.debug(f"Log tail read failed (non-critical): {e}")
-        _time.sleep(0.75)
+        if _ws_clients:
+            redis_buffer.mark_gui_active()
+        _time.sleep(3.0)
 
 
-def _start_log_tailer() -> None:
-    threading.Thread(target=_log_tail_loop, daemon=True, name="archer-log-tailer").start()
-
-
-_start_log_tailer()
+threading.Thread(target=_gui_active_heartbeat_loop, daemon=True, name="archer-gui-active-heartbeat").start()
 
 
 @app.websocket("/ws/voice")
@@ -468,19 +494,16 @@ async def ws_voice(websocket: WebSocket):
     except Exception as e:
         logger.debug(f"Could not send initial state snapshot to browser client: {e}")
 
-    # Seed the LOGS tab with recent history -- the background tailer thread
-    # only broadcasts NEW lines going forward, so without this a freshly
-    # opened tab would sit empty until the next line is actually written.
+    # Seed the LOGS tab with recent curated status history -- events only
+    # broadcast going forward, so without this a freshly opened tab would
+    # sit empty until the next thing actually happens.
     try:
-        latest = _latest_log_file()
-        if latest is not None:
-            with open(latest, "r", encoding="utf-8", errors="replace") as f:
-                f.seek(max(0, latest.stat().st_size - _LOG_TAIL_INITIAL_BYTES))
-                initial_text = f.read()
-            if initial_text:
-                await _ws_send_safe(websocket, json.dumps({"type": "log_line", "text": initial_text}))
+        if _status_line_history:
+            await _ws_send_safe(websocket, json.dumps({
+                "type": "log_line", "text": "".join(_status_line_history)
+            }))
     except Exception as e:
-        logger.debug(f"Could not send initial log tail to browser client: {e}")
+        logger.debug(f"Could not send initial status history to browser client: {e}")
 
     try:
         while True:
@@ -719,6 +742,29 @@ async def ws_voice(websocket: WebSocket):
     finally:
         _ws_clients.discard(websocket)
         logger.info(f"Browser client disconnected ({len(_ws_clients)} total)")
+
+        # Reset the "brain" model back to the configured default once
+        # nobody's left to be driving a manually-picked one (2026-09-19,
+        # Col's call): the SYSTEM tab dropdown lets you try any locally
+        # pulled model (e.g. llama3.2-vision) for a session, but that's a
+        # deliberate one-off choice, not something that should silently
+        # keep running as the primary model -- including handling tool
+        # calls -- after you've closed the tab and forgotten about it.
+        # Only resets if it actually drifted from the default, so this is
+        # a no-op on every ordinary disconnect where nobody touched the
+        # dropdown.
+        if not _ws_clients:
+            try:
+                config = get_config()
+                agent = get_orchestrator()
+                if getattr(agent, "primary_model", None) != config.core_primary_model:
+                    logger.info(
+                        f"Last browser client disconnected -- resetting 'brain' model "
+                        f"from '{agent.primary_model}' back to default '{config.core_primary_model}'."
+                    )
+                    agent.primary_model = config.core_primary_model
+            except Exception as e:
+                logger.debug(f"Brain-model reset on disconnect failed (non-fatal): {e}")
 
 
 def _person_snapshot_data_uri(snapshot_path: Optional[str]) -> Optional[str]:

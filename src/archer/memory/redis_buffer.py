@@ -103,6 +103,51 @@ class RedisBuffer:
         except Exception as e:
             logger.debug(f"Redis publish to {channel} failed (non-fatal): {e}")
 
+    # --- Cross-process "is a live ARCHER session open" flag (2026-09-19) ---
+    # Added so the standalone observer service (its own OS process, per
+    # the 2026-09-16 decoupling above) can know whether server.py's
+    # browser client is currently connected, even though they don't share
+    # memory. Needed because moondream is moving back to CPU-only (Col's
+    # call): CPU inference is fine in isolation, but it previously starved
+    # STT/audio scheduling when it ran WHILE ARCHER was actively being
+    # used. Process separation alone doesn't fix that -- both processes
+    # still share the same physical CPU cores -- so this lets the
+    # observer actually pause its own CPU-heavy analysis for the window
+    # that matters, instead of relying on GPU isolation to sidestep the
+    # problem entirely.
+    #
+    # TTL-based rather than an explicit start/stop message on purpose: if
+    # ARCHER's process is killed or crashes instead of shutting down
+    # cleanly, a one-shot "session ended" message would never arrive and
+    # the observer would stay paused forever. A short-lived key that the
+    # GUI side refreshes every few seconds just expires naturally instead.
+    _GUI_ACTIVE_KEY = "archer:gui_active"
+    _GUI_ACTIVE_TTL_S = 8  # server.py's heartbeat refreshes this every ~3s
+
+    def mark_gui_active(self) -> None:
+        """Call repeatedly (every few seconds) from whichever process owns
+        the GUI/WS server, for as long as at least one client is
+        connected. See server.py's heartbeat loop."""
+        if not self._client:
+            return
+        try:
+            self._client.setex(self._GUI_ACTIVE_KEY, self._GUI_ACTIVE_TTL_S, "1")
+        except Exception as e:
+            logger.debug(f"Redis mark_gui_active failed (non-fatal): {e}")
+
+    def is_gui_active(self) -> bool:
+        """Best-effort check of the flag above. Fails OPEN (returns False,
+        i.e. "no session detected") if Redis is unreachable -- a Redis
+        outage should degrade to the observer running as if it's alone,
+        not to it staying permanently paused."""
+        if not self._client:
+            return False
+        try:
+            return bool(self._client.exists(self._GUI_ACTIVE_KEY))
+        except Exception as e:
+            logger.debug(f"Redis is_gui_active check failed (non-fatal): {e}")
+            return False
+
     def subscribe(self, channel: str, callback: Callable[[dict[str, Any]], None]) -> None:
         """Subscribe to a channel and invoke callback(data) for every
         message, on a dedicated background daemon thread. Safe to call

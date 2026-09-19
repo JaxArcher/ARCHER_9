@@ -18,12 +18,15 @@ Col asked for this to be automatic instead of a manual pre-flight step.
 start_ollama_instances() below checks whether each instance is already
 reachable and, if not, launches `ollama serve` itself with the right
 OLLAMA_HOST for that instance -- as a background thread, so it doesn't
-block ARCHER's own startup while Ollama loads. Both instances now run on
-GPU with no CUDA_VISIBLE_DEVICES override (see config.py's
-observer_ollama_url comment for why moondream moved off CPU) -- this
-explicitly strips that env var from the child process rather than
-inheriting it, so a persistently-set system value can't silently force
-either instance onto CPU the way it used to.
+block ARCHER's own startup while Ollama loads. The main instance runs on
+GPU (CUDA_VISIBLE_DEVICES left unset/stripped so a persistently-set
+system value can't silently force it onto CPU). The observer instance
+(moondream) is forced CPU-only again as of 2026-09-19 (Col's call,
+reverting the 2026-09-16 GPU move) -- GPU headroom matters more now that
+the observer can actually pause its own CPU-bound analysis while
+ARCHER's GUI/browser session is active (see RedisBuffer.mark_gui_active
+and observer/pipeline.py's _analysis_loop), which is what made the
+original CPU-vs-STT contention problem possible in the first place.
 
 Best-effort and non-fatal throughout, same as __main__.py's existing
 docker-compose auto-start for the observer containers: if `ollama` isn't
@@ -60,14 +63,24 @@ def _host_from_url(url: str) -> str:
     return url.split("://", 1)[-1]
 
 
-def _spawn_ollama_serve(host: str, log_path: Path) -> bool:
+def _spawn_ollama_serve(host: str, log_path: Path, force_cpu: bool = False) -> bool:
     """Launch `ollama serve` bound to `host`, detached, no visible console
     window. Returns whether the process was launched at all (not whether
     it came up successfully -- the caller polls _ollama_reachable for
-    that)."""
+    that).
+
+    force_cpu (2026-09-19): moondream moved back to CPU-only -- see
+    start_ollama_instances' call site and RedisBuffer.mark_gui_active's
+    docstring for why this is safe again now that the observer can pause
+    itself while ARCHER's GUI/browser session is active. Explicitly SETS
+    CUDA_VISIBLE_DEVICES="" (rather than leaving it unset) so a
+    persistently-set system value can't accidentally hand it a GPU."""
     env = os.environ.copy()
     env["OLLAMA_HOST"] = host
-    env.pop("CUDA_VISIBLE_DEVICES", None)  # see module docstring
+    if force_cpu:
+        env["CUDA_VISIBLE_DEVICES"] = ""
+    else:
+        env.pop("CUDA_VISIBLE_DEVICES", None)  # see module docstring
 
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,14 +116,16 @@ def _spawn_ollama_serve(host: str, log_path: Path) -> bool:
         return False
 
 
-def _ensure_instance(label: str, base_url: str, log_filename: str, log_dir: Path) -> None:
+def _ensure_instance(
+    label: str, base_url: str, log_filename: str, log_dir: Path, force_cpu: bool = False
+) -> None:
     if _ollama_reachable(base_url):
         logger.info(f"Ollama ({label}) already running at {base_url}.")
         return
 
     logger.info(f"Ollama ({label}) not reachable at {base_url} -- starting it...")
     log_path = log_dir / log_filename
-    if not _spawn_ollama_serve(_host_from_url(base_url), log_path):
+    if not _spawn_ollama_serve(_host_from_url(base_url), log_path, force_cpu=force_cpu):
         return
 
     # Poll rather than assume it's instantly ready -- binding the port and
@@ -165,7 +180,10 @@ def start_ollama_instances() -> None:
 
     def _run():
         _ensure_instance("main / gemma4:e4b", config.ollama_base_url, "ollama_main.log", config.log_dir)
-        _ensure_instance("observer / moondream", config.observer_ollama_url, "ollama_observer.log", config.log_dir)
+        _ensure_instance(
+            "observer / moondream", config.observer_ollama_url, "ollama_observer.log", config.log_dir,
+            force_cpu=True,
+        )
         # Warm both models into VRAM now rather than on the user's first
         # real question / the observer's first analysis cycle -- see
         # _warm_up_model. Sequential on this same background thread is

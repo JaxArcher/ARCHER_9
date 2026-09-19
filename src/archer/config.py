@@ -171,17 +171,24 @@ class ArcherConfig(BaseSettings):
     # "Request URL is missing an 'http://' or 'https://' protocol." since
     # the raw OLLAMA_HOST value (host:port, no scheme) got used directly.
     ollama_base_url: str = Field(default="http://127.0.0.1:11434", alias="ARCHER_OLLAMA_BASE_URL")
-    # This second instance was originally run CPU-only (CUDA_VISIBLE_DEVICES="")
-    # to fully isolate it from the main GPU model. That turned out to be a bad
-    # trade for moondream specifically: it's a 1.4B model that only needs
-    # ~1.2GB of VRAM (confirmed via live Ollama logs — model + context +
-    # compute buffer), while CPU inference forced 20-60s cold-start waits and,
-    # worse, pinned the CPU hard enough to starve STT/audio scheduling during
-    # active conversation. There's easily 5-6GB of free VRAM left after
-    # qwen3:8b loads on a 16GB card, so moondream now belongs on GPU too — see
-    # scripts/start_observer_ollama.ps1, which starts it WITHOUT
-    # CUDA_VISIBLE_DEVICES set. Use a genuinely large vision model (not this
-    # one) if CPU isolation is ever needed again for VRAM reasons.
+    # History: this second instance originally ran CPU-only
+    # (CUDA_VISIBLE_DEVICES="") to fully isolate it from the main GPU
+    # model. That was a bad trade at the time: CPU inference forced 20-60s
+    # cold-start waits and, worse, pinned the CPU hard enough to starve
+    # STT/audio scheduling during active conversation -- so on 2026-09-16
+    # it moved to GPU instead (~1.2GB VRAM, confirmed via live Ollama
+    # logs), trading VRAM for safety.
+    #
+    # Reverted back to CPU-only on 2026-09-19 (Col's call): GPU headroom
+    # matters more now (every GB counts toward fitting a real vision
+    # model), and the thing that made CPU risky -- the observer running
+    # its analysis cycle WHILE ARCHER was actively being used -- is now
+    # actually prevented: ObserverPipeline._analysis_loop checks a
+    # Redis-backed cross-process flag (RedisBuffer.is_gui_active,
+    # refreshed by server.py's heartbeat) and skips its own analysis
+    # cycle entirely while any browser client is connected. See
+    # integrations/ollama_bootstrap.py's force_cpu param, which is what
+    # actually sets CUDA_VISIBLE_DEVICES="" for this instance now.
     observer_ollama_url: str = Field(default="http://127.0.0.1:11435", alias="OBSERVER_OLLAMA_HOST")
     use_local_vision: bool = True
 
@@ -236,10 +243,23 @@ class ArcherConfig(BaseSettings):
     # one was taken. ~9.6GB VRAM (e4b tag) on a 16GB card, leaving room for
     # moondream (still used separately for webcam vision — see
     # observer_model below and core_agent.py's _check_visual_query).
-    # Requires `ollama pull gemma4:e4b` on the machine running Ollama —
-    # ARCHER does not and cannot pull models for you.
+    #
+    # Switched again 2026-09-19 (Col's find, confirmed against Ollama's own
+    # library listing): the plain "gemma4:e4b" tag turned out to be
+    # packaged TEXT-ONLY in Ollama despite Gemma 4's architecture having a
+    # real vision+audio projector -- that's the actual root cause of the
+    # whole "camera feed isn't being seen" investigation (empirically
+    # confirmed: even a bare, ARCHER-free request to plain gemma4:e4b with
+    # an image attached produced ungrounded hallucinations, never a real
+    # description). "gemma4:e4b-it-qat" is a separate Ollama tag that DOES
+    # bundle that projector -- Ollama's own listing states it supports
+    # both text and image input -- while remaining the same underlying
+    # instruction-tuned Gemma 4 model, just QAT-quantized (~6.1GB, smaller
+    # than plain e4b's ~9.6GB too).
+    # Requires `ollama pull gemma4:e4b-it-qat` on the machine running
+    # Ollama — ARCHER does not and cannot pull models for you.
     core_primary_model: str = Field(
-        default="gemma4:e4b", alias="ARCHER_CORE_PRIMARY_MODEL"
+        default="gemma4:e4b-it-qat", alias="ARCHER_CORE_PRIMARY_MODEL"
     )
 
     # --- Nightly Maintenance (2026-09-16) ---

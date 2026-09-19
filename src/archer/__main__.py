@@ -64,9 +64,9 @@ class _FlushingFileSink:
     instead, same naming convention as before.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, mode: str = "a") -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._file = open(path, "a", encoding="utf-8", buffering=1)
+        self._file = open(path, mode, encoding="utf-8", buffering=1)
 
     def write(self, message: str) -> None:
         self._file.write(message)
@@ -122,6 +122,38 @@ def setup_logging() -> None:
     )
 
 
+def setup_latest_log_mirror() -> None:
+    """
+    Fixed-name latest-run log mirror (2026-09-18, Col's request): the
+    dated per-day file setup_logging() already writes is the durable
+    history, but reporting an issue to Claude meant manually copy-pasting
+    the terminal window's text into a fresh upload every time instead.
+    This writes that same console content (INFO and up -- matching what
+    was actually being copy-pasted; DEBUG would just be noise for a
+    hand-off report) to one fixed path, truncated ("w") at the start of
+    every run. The flushing sink means it's live on disk for the WHOLE
+    run, not written only at shutdown -- so whatever's in the file when
+    the program closes (cleanly, via Ctrl+C, or a crash) is already the
+    complete record of that run.
+
+    Deliberately NOT called from inside setup_logging() itself: that
+    function is shared by all three entry points (__main__.py,
+    web_main.py, observer_service.py), and the standalone observer
+    service normally runs continuously in the background WHILE web_main.py
+    is separately launched and closed -- two processes independently
+    truncating the same fixed-name file would race and corrupt it. Call
+    this only from the interactive entry points (desktop/browser) whose
+    console output Col actually hands off; the standalone service's own
+    dated file is unaffected and still gets written normally.
+    """
+    latest_log_path = Path("docs/reports/latest_session_log.log")
+    logger.add(
+        _FlushingFileSink(latest_log_path, mode="w"),
+        level="INFO",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} | {message}",
+    )
+
+
 def main() -> None:
     """Main entry point for ARCHER."""
     # Set Qt attribute for QWebEngineView BEFORE any QCoreApplication/QApplication instance is created
@@ -134,6 +166,7 @@ def main() -> None:
         pass
 
     setup_logging()
+    setup_latest_log_mirror()
     logger.info("=" * 60)
     logger.info("  ARCHER — Advanced Responsive Computing Helper")
     logger.info("  Phase 4: PC Control + Finance + Full GUI")

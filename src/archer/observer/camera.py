@@ -241,6 +241,22 @@ class WebcamCapture:
                 pass
             self._cap = None
 
+        # Clear the last frame too -- confirmed 2026-09-18 as a real risk,
+        # not just theoretical: get_latest_frame() only ever checked
+        # "is it None", never how old it is, so without this, a caller
+        # (e.g. CoreAgent's on-demand Visual Q&A) that reads a frame after
+        # this camera was stopped/released -- for instance while the
+        # device was freed for barehands' gesture control -- would
+        # silently get back whatever was captured before the stop, with a
+        # normal-looking (non-None) return and no error. That's
+        # indistinguishable from a live frame to the caller, and would
+        # have the model confidently describe a scene that could be
+        # minutes old. See the staleness check added in
+        # CoreAgent._check_visual_query for the second half of this fix.
+        with self._frame_lock:
+            self._latest_frame = None
+            self._frame_timestamp = 0.0
+
         logger.info(
             f"Webcam capture stopped. "
             f"Frames captured: {self._frames_captured}, errors: {self._errors}"

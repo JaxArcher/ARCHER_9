@@ -11,6 +11,7 @@
   <title>ARCHER</title>
   <link rel="stylesheet" href="/static/css/ui.css" />
   <link rel="stylesheet" href="/static/css/orb.css" />
+  <link rel="stylesheet" href="/static/css/cursor.css" />
 </head>
 <body>
   <div id="archer-shell">
@@ -28,6 +29,7 @@
     <div id="archer-tabs">
       <button class="tab-btn active" data-tab="dashboard" type="button">DASHBOARD</button>
       <button class="tab-btn" data-tab="gesture" type="button">GESTURE</button>
+      <button id="archer-cursor-toggle" type="button" aria-pressed="true">CURSOR FX: ON</button>
     </div>
 
     <!-- Always-visible control strip (2026-09-16, Col's ask: "these boxes
@@ -83,7 +85,7 @@
               <!-- js/logs.js builds this: raw application log tail -->
             </div>
             <div id="tab-memory" class="archer-dashboard-card">
-              <!-- js/memory.js builds this: while-you-were-away, unrecognized people -->
+              <!-- js/memory.js builds this: while-you-were-away -->
             </div>
             <div id="tab-tasks" class="archer-dashboard-card">
               <!-- js/tasks.js builds this: open tasks, read-only -->
@@ -116,5 +118,6 @@
   <script src="/static/js/system.js"></script>
   <script src="/static/js/browser.js"></script>
   <script src="/static/js/barehands.js"></script>
+  <script src="/static/js/cursor.js"></script>
 </body>
 </html>

@@ -238,10 +238,10 @@ class LocalTTS(TTSBackend):
 FILLER_PHRASES = [
     "Let me think about that. Just a second.",
     "One moment while I look into this.",
-    "Hmm... Let me check on that",
-    "Let me check on that.  I'll be right back",
+    "Hummmmmmm... Let me check on that",
+    "Hummmm",
     "Just a sec while I look into it",
-    "I'm right on top of that, sir",
+    "I'm right on top of that",
     "One sec.... Checking...",
 ]
 
@@ -345,6 +345,20 @@ class TTSService:
     def cancel(self) -> None:
         """Cancel any pending TTS synthesis."""
         self._cancelled.set()
+
+    def reset_cancel(self) -> None:
+        """Clear a pending cancellation flag before a NEW turn starts
+        speaking. Added 2026-09-17: _process_utterance() (pipeline.py)
+        calls cancel() unconditionally at the start of every utterance to
+        stop a PREVIOUS turn's straggling audio -- but the flag was only
+        ever cleared lazily, inside synthesize() itself, on whichever call
+        happened to run next. That meant it was silently eaten by the NEW
+        turn's own first synthesize() call instead of the old turn it was
+        meant for, dropping the first sentence of every single response
+        (confirmed live: only sentence 2+ of each reply was ever spoken).
+        _speak_response_streaming calls this once, right as a turn's
+        speaking phase actually begins, before its first synthesize() call."""
+        self._cancelled.clear()
 
     def _on_halt(self, event: Event) -> None:
         """HALT handler — cancel all TTS."""

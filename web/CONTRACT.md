@@ -224,3 +224,22 @@ web/
     browser.js        builds the Browser (mirror) card, including its primary-row reflow when active
     barehands.js      mounts barehands into the Gesture tab, if reachable
 ```
+
+## Cursor effects
+
+`css/cursor.css` and `js/cursor.js` add a 46px cyan HUD pointer with
+three rotating rings, a bounded eight-dot trail, and hover/click highlights.
+The CURSOR FX button beside Dashboard/Gesture saves its setting locally
+(`archer.cursor.enabled`). Text fields and selects retain their native cursor;
+touch/pen input and reduced-motion preferences use the standard pointer.
+The overlay never intercepts clicks. No backend or WebSocket changes.
+
+Gesture runs on a different origin (port 8794), so its page loads matching
+`barehands/assets/cursor.css` and `cursor.js`. Keep these two copies identical
+to the web files when editing. A source-and-origin-checked postMessage
+handshake synchronizes the setting when the iframe mounts and on toggles.
+Standalone barehands uses its own stored preference.
+
+To review: switch to the cursor branch, start ARCHER normally, and hard-refresh
+`http://127.0.0.1:8200/app`. Move across Dashboard and Gesture, type into the
+message field, toggle CURSOR FX, and refresh to verify persistence.

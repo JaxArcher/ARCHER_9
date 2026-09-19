@@ -30,12 +30,13 @@ from loguru import logger
 _env_path = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(_env_path, override=True)
 
-from archer.__main__ import setup_logging  # reuses the exact same logging setup
+from archer.__main__ import setup_logging, setup_latest_log_mirror  # reuses the exact same logging setup
 from archer.config import get_config
 
 
 def main() -> None:
     setup_logging()
+    setup_latest_log_mirror()
     logger.info("=" * 60)
     logger.info("  ARCHER — Web-Only Mode (no desktop GUI)")
     logger.info("=" * 60)

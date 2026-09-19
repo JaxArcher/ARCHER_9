@@ -459,6 +459,23 @@ class CoreAgent:
     # observer_ollama_url instance turned out not to be running at all).
     VISION_UNAVAILABLE = "__VISION_UNAVAILABLE__"
 
+    def _publish_visual_status(self, note: str) -> None:
+        """Best-effort push of a human-readable "what the camera check just
+        did" line to the browser's LOGS pane (2026-09-18, Col's request --
+        see server.py's status-line bridge for where this actually gets
+        rendered). Separate from the logger.info/.warning calls right next
+        to each call site: those go to the DEBUG-level file log Col rarely
+        looks at live; this is specifically for the curated, in-the-moment
+        feed. Never let a broadcast failure break the actual visual query."""
+        try:
+            self._bus.publish(Event(
+                type=EventType.VISUAL_QUERY,
+                source="core_agent",
+                data={"note": note},
+            ))
+        except Exception:
+            pass
+
     def _check_visual_query(self, text: str) -> Optional[Dict[str, Any]]:
         """
         If text asks a visual question ("what do you see", "look at this", "how many fingers am I holding up"),
@@ -523,13 +540,69 @@ class CoreAgent:
         try:
             from archer.observer.pipeline import ObserverPipeline
             pipeline = ObserverPipeline.get_instance()
+            # Explicit released-camera check (2026-09-18): the browser's
+            # "Camera" button frees the physical device so barehands'
+            # gesture control can grab exclusive access (Windows only
+            # allows one owner). Before this, get_latest_frame() would
+            # still happily hand back whatever frame was captured right
+            # before release -- camera.py's stop() now clears it, but
+            # checking is_camera_released here too gives an honest,
+            # specific reason instead of a generic "no frame" one.
+            if pipeline and pipeline.is_camera_released:
+                logger.warning(
+                    "Visual Q&A: camera is currently released (freed for another "
+                    "app, e.g. barehands gesture control) -- no live frame available."
+                )
+                self._publish_visual_status(
+                    "Camera is released (freed for another app) -- can't look right now."
+                )
+                return self.VISION_UNAVAILABLE
             if pipeline and pipeline.camera:
                 frame, timestamp = pipeline.camera.get_latest_frame()
+                # Staleness check: get_latest_frame() previously only ever
+                # checked "is it None", never how OLD it is. A frame more
+                # than a few capture-intervals old (this camera runs at
+                # ~2 FPS / 0.5s intervals) means something's wrong with
+                # the capture loop even though the object itself looks
+                # fine -- treat it the same as no frame rather than let
+                # the model confidently describe a stale scene.
+                frame_age = (time.monotonic() - timestamp) if frame is not None else None
+                if frame is not None and frame_age is not None and frame_age > 3.0:
+                    logger.warning(
+                        f"Visual Q&A: latest frame is {frame_age:.1f}s old (stale) -- "
+                        "treating as unavailable rather than attaching it."
+                    )
+                    self._publish_visual_status(
+                        f"Latest camera frame is {frame_age:.1f}s old (stale) -- skipping it."
+                    )
+                    frame = None
                 if frame is not None:
                     import cv2
                     import base64
                     _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                    img_b64 = base64.b64encode(buffer.tobytes()).decode("utf-8")
+                    img_bytes = buffer.tobytes()
+                    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+
+                    # Debug dump (2026-09-18, Col's request): the audio
+                    # pipeline has saved every played clip to scratch/ for
+                    # a while now specifically so a "did it actually hear
+                    # right" question can be answered by listening to the
+                    # file instead of guessing from logs alone. Nothing
+                    # equivalent existed for vision, so a "did it actually
+                    # SEE right" question -- like this one -- had no way to
+                    # be settled except debating the model's own words.
+                    # Mirrors that same pattern for the exact JPEG bytes
+                    # actually sent to gemma4:e4b.
+                    debug_frame_path = None
+                    try:
+                        import os
+                        os.makedirs("scratch", exist_ok=True)
+                        ts = int(time.time() * 1000)
+                        debug_frame_path = f"scratch/visual_qna_frame_{ts}.jpg"
+                        with open(debug_frame_path, "wb") as f:
+                            f.write(img_bytes)
+                    except Exception as e:
+                        logger.debug(f"Visual Q&A frame debug dump failed (non-fatal): {e}")
 
                     # Identity, from InsightFace face-embedding matching on
                     # THIS exact frame -- not from moondream or gemma4:e4b
@@ -565,17 +638,22 @@ class CoreAgent:
 
                     logger.info(
                         f"Visual Q&A: attaching frame directly to {self.primary_model} "
+                        f"(age={frame_age:.2f}s, saved to {debug_frame_path or 'N/A'}) "
                         f"({identity_note})"
                     )
+                    self._publish_visual_status(f"Looking at the camera -- {identity_note}")
                     return {"image_b64": img_b64, "identity_note": identity_note}
                 else:
                     logger.warning("Visual Q&A: no camera frame available yet (frame is None).")
+                    self._publish_visual_status("No camera frame available yet.")
                     return self.VISION_UNAVAILABLE
             else:
                 logger.warning("Visual Q&A: ObserverPipeline or camera not available.")
+                self._publish_visual_status("Camera isn't available right now.")
                 return self.VISION_UNAVAILABLE
         except Exception as e:
             logger.warning(f"Visual Q&A query failed: {e}")
+            self._publish_visual_status(f"Camera check failed: {e}")
             return self.VISION_UNAVAILABLE
 
     # Introduction phrasing that plausibly names a person who's currently
@@ -940,7 +1018,46 @@ class CoreAgent:
             # face-recognition identity note is text.
             visual_image_b64 = visual_result.get("image_b64")
             identity_note = visual_result.get("identity_note", "")
-            domain_kb = (domain_kb + f"\n[Live Camera Feed] {identity_note}").strip()
+            # The VISION_UNAVAILABLE branch above already learned the hard
+            # way (2026-09-16) that leaving the model with no explicit
+            # calibration instruction lets it confidently invent details it
+            # never actually saw. That guardrail only covered a totally
+            # missing frame -- but a frame that DID get captured can be just
+            # as unreliable (640x480 @ 2fps webcam, dim/backlit room, motion
+            # blur), and confirmed live 2026-09-17: on the same camera setup,
+            # in the same session, gemma4:e4b gave a confident, ungrounded-
+            # sounding answer ("you look very polished and prepared...
+            # confident and ready to go") on one turn and correctly admitted
+            # "the camera view is currently unclear" on the very next one --
+            # with nothing in the prompt telling it when to do which. This
+            # instruction applies the same standard to every attached frame,
+            # not just a missing one.
+            domain_kb = (
+                domain_kb + f"\n[Live Camera Feed] {identity_note} "
+                "An image IS attached to this message -- actually look at it "
+                "and describe what's really there (objects, setting, posture, "
+                "what the person is doing) before deciding whether to hedge. "
+                "Confirmed live 2026-09-18: this system was over-correcting "
+                "into 'the camera view is unclear' as a reflexive default on "
+                "images that were, in fact, perfectly clear -- that is just as "
+                "wrong as confidently inventing details, and 'unclear' is not "
+                "a safe default answer. Only fall back to admitting "
+                "uncertainty for a SPECIFIC detail you genuinely can't make "
+                "out after actually looking (e.g. a small object, exact text, "
+                "something out of frame or occluded) -- never as a blanket "
+                "substitute for describing the image. "
+                "Every image attached here is a brand-new, independent "
+                "capture taken THIS exact turn -- never assume it matches, "
+                "repeats, or continues from any earlier turn in the "
+                "conversation, and never claim the picture looks the same as "
+                "one you described before; each one must be evaluated fresh, "
+                "on its own. If the user asks about a specific part of the "
+                "scene, such as the background, answer that part "
+                "specifically by naming the actual objects, furniture, and "
+                "colors you can identify -- a vague one-word category is not "
+                "an acceptable substitute for actually describing what is "
+                "there."
+            ).strip()
 
         # 4b. Passive person-learning (2026-09-16, Col's call): runs on
         # EVERY turn, not just visual questions -- "this is Sarah" isn't
@@ -1341,6 +1458,27 @@ class CoreAgent:
             if visual_image_b64:
                 user_message["images"] = [visual_image_b64]
             messages.append(user_message)
+
+        # Hard proof of what's actually going out the door (2026-09-19):
+        # the model has twice now denied receiving any image on turns where
+        # _check_visual_query definitely returned a valid, non-empty
+        # base64 string (confirmed by inspecting the matching debug frame
+        # dump on disk). Prompt wording changes didn't touch that -- next
+        # step is confirming, not guessing, whether the outgoing Ollama
+        # payload genuinely carries the image bytes. This line is the
+        # ground truth for that, surfaced in BOTH the file log and the
+        # curated LOGS pane so it's visible without digging.
+        if visual_image_b64:
+            b64_len = len(visual_image_b64)
+            logger.info(
+                f"CoreAgent (local): outgoing payload user message HAS "
+                f"'images' key, 1 image, base64 length={b64_len} chars "
+                f"(~{b64_len * 3 // 4 // 1024}KB decoded)."
+            )
+            self._publish_visual_status(
+                f"Sending image to {self.primary_model} -- payload confirmed "
+                f"to include it ({b64_len * 3 // 4 // 1024}KB)."
+            )
             history_count = len(self._conversation_history)
 
         logger.info(

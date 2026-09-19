@@ -1219,6 +1219,15 @@ class VoicePipeline:
         self._barge_check_heard_speech = False
         self._barge_check_silence_frames = 0
         self._current_speaking_text = ""
+        # Also clear TTS's own cancellation flag -- _process_utterance()
+        # (called at the very start of handling this turn) unconditionally
+        # calls self._tts.cancel() to stop a PREVIOUS turn's straggling
+        # audio, but that flag is only ever cleared lazily on whichever
+        # synthesize() call runs next. Without this reset, THIS turn's own
+        # first synthesize() call below eats that stale cancellation and
+        # silently drops the first sentence of every response (confirmed
+        # live 2026-09-17: only sentence 2+ was ever actually spoken).
+        self._tts.reset_cancel()
         self._set_state(VoicePipelineState.SPEAKING)
 
         collected_text = []

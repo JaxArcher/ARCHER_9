@@ -128,6 +128,19 @@ class ObserverPipeline:
         # warnings on turns that had nothing to do with vision at all. Ambient
         # monitoring only actually needs to run while the user is IDLE/not
         # actively talking to ARCHER.
+        #
+        # This check went dead the moment observation moved into its own
+        # standalone process (2026-09-16) -- self._voice_pipeline_state
+        # only ever updates via the in-process EventBus subscription right
+        # below, and the standalone observer_service.py has no VoicePipeline
+        # publishing to it, so it just sat at "IDLE" forever, always passing.
+        # Moondream got moved to GPU around the same time specifically to
+        # route around that (see config.py's observer_ollama_url comment),
+        # trading VRAM for safety. Reverted 2026-09-19 (Col's call): GPU
+        # headroom matters more now, and a Redis-backed cross-process flag
+        # (see _on_gui_active_check / RedisBuffer.is_gui_active) makes this
+        # check work for real again even split across two OS processes, so
+        # CPU is safe to use once more without the earlier contention.
         self._voice_pipeline_state = "IDLE"
         self._bus.subscribe(EventType.PIPELINE_STATE_CHANGED, self._on_voice_state_changed)
 
@@ -431,12 +444,24 @@ class ObserverPipeline:
                 continue
 
             if self._voice_pipeline_state != "IDLE":
-                # See _on_voice_state_changed -- only meaningful if this
-                # pipeline is co-located with a VoicePipeline, which the
-                # standalone observer service never is.
+                # Only ever true if this pipeline happens to be co-located
+                # with a VoicePipeline in the same process (not the case
+                # for the standalone observer service) -- kept for that
+                # case, but is_gui_active() below is what actually matters
+                # for the normal deployment.
                 logger.debug(
                     f"Observer analysis cycle skipped — voice pipeline active ({self._voice_pipeline_state})"
                 )
+                continue
+
+            if self._redis.is_gui_active():
+                # Cross-process equivalent of the check above (2026-09-19)
+                # -- see RedisBuffer.is_gui_active's docstring. Moondream
+                # runs on CPU again as of this change, so this is the thing
+                # actually preventing it from starving STT/audio scheduling
+                # while ARCHER's session is open, regardless of which OS
+                # process is running it.
+                logger.debug("Observer analysis cycle skipped — ARCHER GUI/browser session is active.")
                 continue
 
             try:

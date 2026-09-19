@@ -48,6 +48,7 @@ class EventType(str, Enum):
     ARTIFACT_DISPLAY = "agent.artifact_display"
     AGENT_INTERVENTION = "agent.intervention"
     ACTION_COMPLETED = "agent.action_completed"
+    VISUAL_QUERY = "agent.visual_query"  # camera-frame attach attempt for a visual Q&A turn, success or failure -- see core_agent.py._check_visual_query
 
     # Toggle events
     MODE_CHANGED = "system.mode_changed"
