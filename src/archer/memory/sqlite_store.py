@@ -103,6 +103,25 @@ class SQLiteStore:
                     enrolled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
 
+                -- Extra face references per known person (2026-10-06).
+                -- known_persons holds exactly one embedding per name, and
+                -- naming a face upserted over it -- so on 2026-09-19 naming
+                -- "Person_2" as Col replaced Col's own enrollment with one
+                -- poor early sighting, and after that Col matched from
+                -- neither camera. The close-up webcam and the across-the-room
+                -- Reolink see the same face very differently, so a person
+                -- needs one reference per view. person_id.py matches against
+                -- known_persons AND every row here.
+                CREATE TABLE IF NOT EXISTS known_person_references (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    embedding BLOB NOT NULL,
+                    source TEXT,
+                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_known_person_references_name
+                    ON known_person_references(name);
+
                 -- Person sightings (known & unrecognized repeat visitors)
                 CREATE TABLE IF NOT EXISTS person_sightings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -821,6 +840,44 @@ class SQLiteStore:
             return [dict(row) for row in cursor.fetchall()]
         finally:
             conn.close()
+
+    def add_known_person_reference(self, name: str, embedding: bytes, source: str | None = None) -> int:
+        """Add an extra face reference for a known person without touching
+        their primary enrollment (see known_person_references above)."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    "INSERT INTO known_person_references (name, embedding, source) VALUES (?, ?, ?)",
+                    (name, embedding, source),
+                )
+                conn.commit()
+                return cursor.lastrowid
+            finally:
+                conn.close()
+
+    def get_known_person_references(self) -> list[dict[str, Any]]:
+        """Every extra face reference, for person_id.py's matching."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute("SELECT * FROM known_person_references ORDER BY id ASC")
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def add_person_face(self, name: str, embedding: bytes, source: str | None = None) -> str:
+        """Name a face (2026-10-06). New name: becomes that person's primary
+        enrollment. Existing name: added as an extra reference instead of
+        overwriting the one they already have -- the overwrite is what
+        broke Col's recognition on 2026-09-19. Used by the "this is X"
+        introduction path, the person-confirmation WS message, and
+        scripts/name_person.py. Returns "enrolled" or "reference"."""
+        existing = {p["name"] for p in self.get_known_persons()}
+        if name in existing:
+            self.add_known_person_reference(name, embedding, source)
+            return "reference"
+        self.add_known_person(name=name, embedding=embedding)
+        return "enrolled"
 
     def log_person_sighting(
         self,

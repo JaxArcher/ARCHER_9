@@ -95,6 +95,18 @@ class ObserverPipeline:
         self._motion_active_until: float = 0.0
         self._motion_lock = threading.Lock()
 
+        # Reolink connectivity (2026-09-19, see set_reolink_detector and
+        # _has_working_motion_source): a configured network_camera_url used
+        # to be treated as "has a motion source" unconditionally, even if
+        # the ONVIF listener never actually connected -- which is exactly
+        # what happened silently since 2026-09-16 (reolink-aio was never
+        # installed), leaving _analysis_loop motion-gated on a signal that
+        # could never arrive and zero ambient observations logged the
+        # entire time.
+        self._reolink_detector = None
+        self._pipeline_started_at: float = 0.0
+        self._motion_source_fallback_warned = False
+
         # Register global instance
         global _observer_pipeline_instance
         with _observer_pipeline_lock:
@@ -172,6 +184,7 @@ class ObserverPipeline:
             )
 
         self._running.set()
+        self._pipeline_started_at = time.monotonic()
 
         if self._run_analysis:
             # Start analysis thread regardless — it handles no-camera gracefully
@@ -241,18 +254,29 @@ class ObserverPipeline:
             self._latest_detections = []
         logger.info("Observer camera released — device is free for other apps.")
 
-    def reacquire_camera(self) -> None:
-        """Re-open the camera after release_camera(), on whatever source was active before."""
+    def reacquire_camera(self) -> bool:
+        """Re-open the camera after release_camera(), on whatever source was active before.
+
+        Returns whether the device actually opened. On failure the camera
+        now stays marked as released (2026-10-06) -- it used to be marked
+        reacquired either way, which left the CAMERA button saying ARCHER
+        had the webcam while nothing was open, and gave callers nothing to
+        retry on. The usual transient cause is the browser not having
+        finished closing the device yet after the Gesture tab (barehands)
+        was left; server.py's camera_reacquire handler retries for that.
+        """
         if not self._camera_released.is_set():
-            return
+            return True
         logger.info(f"Reacquiring observer camera (source: {self._active_source})...")
         with self._camera_lock:
             self._camera = WebcamCapture(
                 camera_source=self._active_source, capture_interval=0.5
             )
             ok = self._camera.start() if self._running.is_set() else True
-        self._camera_released.clear()
-        logger.info(f"Observer camera reacquired ({'ok' if ok else 'failed to open'}).")
+        if ok:
+            self._camera_released.clear()
+        logger.info(f"Observer camera reacquired ({'ok' if ok else 'failed to open -- still released'}).")
+        return ok
 
     @property
     def is_running(self) -> bool:
@@ -397,6 +421,48 @@ class ObserverPipeline:
         process that also owns a VoicePipeline."""
         self._voice_pipeline_state = event.data.get("state", "IDLE")
 
+    def set_reolink_detector(self, detector) -> None:
+        """Wire in the ReolinkSmartDetector instance so _analysis_loop can
+        tell a genuinely connected motion source apart from a configured-
+        but-never-connected one (see is_connected's docstring). Optional --
+        if never called, behavior falls back to the old "URL configured =
+        treat as motion source" assumption."""
+        self._reolink_detector = detector
+
+    def _has_working_motion_source(self) -> bool:
+        """Whether there's a network camera AND (once past a startup grace
+        period) actual evidence its ONVIF listener is really connected --
+        rather than just a URL sitting in config. Without the grace period,
+        this would flap to flat-interval polling every time before the
+        async ONVIF handshake (a few seconds) has had a chance to complete."""
+        if not self._config.network_camera_url:
+            return False
+        if self._reolink_detector is None:
+            # No detector wired in (e.g. __main__.py's GUI-preview instance,
+            # which never runs the analysis thread anyway) -- old behavior.
+            return True
+        if self._reolink_detector.is_connected():
+            return True
+        # 45s (2026-09-21, widened from 30s): the listener's own internal
+        # connection attempt can legitimately take up to 30s now that it's
+        # allowed to run reolink_aio's full port/https auto-detect recovery
+        # (see reolink_listener.py) rather than being forced onto a single
+        # wrong port -- a matching 30s grace period here would race that,
+        # firing the "never connected" fallback right as a real connection
+        # was about to land.
+        grace_s = 45.0
+        if self._pipeline_started_at and (time.monotonic() - self._pipeline_started_at) < grace_s:
+            return True  # still within the ONVIF handshake grace window
+        if not self._motion_source_fallback_warned:
+            logger.warning(
+                "Reolink ONVIF listener never connected -- falling back to "
+                "flat-interval analysis instead of staying motion-gated on "
+                "a signal that isn't arriving. Check that reolink-aio is "
+                "installed and the camera is reachable/ONVIF-enabled."
+            )
+            self._motion_source_fallback_warned = True
+        return False
+
     def notify_motion(self) -> None:
         """Called by the Reolink ONVIF listener (observer/reolink_listener.py)
         whenever the camera's own onboard AI reports a person present.
@@ -422,12 +488,13 @@ class ObserverPipeline:
         Motion-gated analysis loop (see module docstring). While no
         network camera is configured at all, there's no motion signal to
         gate on, so this falls back to the previous flat-interval polling
-        instead of running literally forever with zero observation.
+        instead of running literally forever with zero observation. Same
+        fallback applies (2026-09-19) if a network camera IS configured but
+        its ONVIF listener never actually connects -- see
+        _has_working_motion_source.
         """
-        has_motion_source = bool(self._config.network_camera_url)
-
         while self._running.is_set():
-            if not has_motion_source:
+            if not self._has_working_motion_source():
                 time.sleep(self._analysis_interval)
             elif self._motion_active():
                 time.sleep(self._active_interval)
@@ -494,11 +561,24 @@ class ObserverPipeline:
                 "box": pd.get("box", []),
                 "confidence": pd.get("confidence", 0.0),
             })
+            # Exclude the raw embedding BLOB (2026-09-21 finding) -- pd
+            # carries it so CoreAgent can bind a live "this is Sarah" to
+            # this exact face without a second InsightFace pass, but
+            # _publish_observation JSON-serializes this payload for both
+            # the observation_events log and the Redis publish, and bytes
+            # isn't JSON serializable. Confirmed live: this was silently
+            # failing every single person_sighting observation ("Failed to
+            # log observation: Object of type bytes is not JSON
+            # serializable") -- the embedding itself is already persisted
+            # separately as a BLOB via log_person_sighting inside
+            # identify_persons(), so it isn't lost, just correctly left out
+            # of this JSON payload.
+            pd_for_log = {k: v for k, v in pd.items() if k != "embedding"}
             self._publish_observation(DetectionResult(
                 source=cam_source_str,
                 event_type="person_sighting",
                 confidence=pd.get("confidence", 0.9),
-                data=pd,
+                data=pd_for_log,
             ))
 
         with self._detections_lock:

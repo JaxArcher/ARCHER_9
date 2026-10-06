@@ -48,8 +48,6 @@ def main() -> None:
             "No ANTHROPIC_API_KEY set. Cloud mode won't work without it. "
             "Set it in .env or switch to local mode."
         )
-    if not config.elevenlabs_api_key and config.default_mode == "cloud":
-        logger.warning("No ELEVENLABS_API_KEY set. Cloud TTS/STT won't work without it.")
 
     # Auto-start both Ollama instances (main + observer/moondream) if
     # they're not already running -- Col no longer needs to manually run

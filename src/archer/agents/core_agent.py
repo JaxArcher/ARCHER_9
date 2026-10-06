@@ -459,6 +459,25 @@ class CoreAgent:
     # observer_ollama_url instance turned out not to be running at all).
     VISION_UNAVAILABLE = "__VISION_UNAVAILABLE__"
 
+    def _publish_tool_screenshot(self, image_b64: str, tool_name: str) -> None:
+        """Push a tool-captured image (currently just take_screenshot) to the
+        browser transcript (2026-09-19, Col's ask: "does it show the
+        screenshot in the gui? It should"). Before this, a screenshot only
+        ever reached the MODEL (attached to a follow-up message so it could
+        actually describe what's on screen) -- there was no path putting the
+        pixels in front of Col himself. Reuses EventType.ARTIFACT_PUSH,
+        which existed in the enum already but had no publisher or
+        subscriber anywhere -- this is that wiring. Best-effort: a failure
+        here should never break the tool call itself."""
+        try:
+            self._bus.publish(Event(
+                type=EventType.ARTIFACT_PUSH,
+                source="core_agent",
+                data={"image_b64": image_b64, "kind": "screenshot", "title": tool_name},
+            ))
+        except Exception:
+            pass
+
     def _publish_visual_status(self, note: str) -> None:
         """Best-effort push of a human-readable "what the camera check just
         did" line to the browser's LOGS pane (2026-09-18, Col's request --
@@ -733,7 +752,10 @@ class CoreAgent:
             if not emb_bytes:
                 return None
 
-            self._store.add_known_person(name=name, embedding=emb_bytes)
+            # add_person_face, not add_known_person (2026-10-06): naming a
+            # face for a name that's already enrolled must ADD a reference,
+            # never overwrite the existing one -- see sqlite_store.py.
+            self._store.add_person_face(name=name, embedding=emb_bytes, source="webcam")
             try:
                 self._store.resolve_pending_person_confirmation_by_person_id(
                     target["person_id"], status="confirmed", confirmed_name=name
@@ -1382,6 +1404,7 @@ class CoreAgent:
                     # answer "what's on my screen" type questions.
                     if "image" in result:
                         summary = result.get("result", "Screenshot captured.")
+                        self._publish_tool_screenshot(result["image"], block.name)
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": block.id,
@@ -1458,6 +1481,7 @@ class CoreAgent:
             if visual_image_b64:
                 user_message["images"] = [visual_image_b64]
             messages.append(user_message)
+            history_count = len(self._conversation_history)
 
         # Hard proof of what's actually going out the door (2026-09-19):
         # the model has twice now denied receiving any image on turns where
@@ -1479,7 +1503,6 @@ class CoreAgent:
                 f"Sending image to {self.primary_model} -- payload confirmed "
                 f"to include it ({b64_len * 3 // 4 // 1024}KB)."
             )
-            history_count = len(self._conversation_history)
 
         logger.info(
             f"CoreAgent turn history memory: {history_count} total prior messages in history "
@@ -1494,6 +1517,15 @@ class CoreAgent:
         buffer = ""
         first_chunk = True
         max_tool_rounds = 4
+        # Tracks what actually happened this turn so a silent/empty model
+        # response (see the fallback block after this loop, 2026-09-19) can
+        # still tell the user SOMETHING true rather than dead air -- found
+        # live: after open_url + browser_screenshot both succeeded, qwen3-
+        # vl:8b's follow-up round sometimes streams zero tokens and no
+        # tool_calls, so full_response ends up "" even though real work
+        # happened. Same empty-response failure mode also hit plain visual
+        # (webcam) turns with no tools involved at all.
+        executed_tools_summary: list[str] = []
 
         for _round in range(max_tool_rounds):
             # gemma4:e4b (Gemma 3n) 400s on Ollama's /api/chat whenever a
@@ -1603,11 +1635,17 @@ class CoreAgent:
                     summary = result.get("result", "Screenshot captured.")
                     messages.append({"role": "tool", "tool_name": name, "content": str(summary)})
                     pending_image_b64 = result["image"]
+                    self._publish_tool_screenshot(pending_image_b64, name)
                     logger.info(f"CoreAgent (local) tool executed ({name}): image result")
+                    executed_tools_summary.append(f"used {name} ({summary})")
                 else:
                     content_text = json.dumps(result.get("result", result))
                     messages.append({"role": "tool", "tool_name": name, "content": content_text})
                     logger.info(f"CoreAgent (local) tool executed ({name}): {content_text[:120]}")
+                    if "error" in result:
+                        executed_tools_summary.append(f"tried {name} but it failed ({content_text[:80]})")
+                    else:
+                        executed_tools_summary.append(f"used {name} ({content_text[:80]})")
 
             if pending_image_b64:
                 messages.append({
@@ -1620,6 +1658,31 @@ class CoreAgent:
         remaining = buffer.strip()
         if remaining:
             yield remaining
+
+        # Fallback for a genuinely empty model response (2026-09-19, see
+        # executed_tools_summary above): without this, a turn where the
+        # model streamed zero tokens went completely silent -- no TTS, and
+        # (since the history-save below is gated on full_response being
+        # non-empty) no record of the turn ever having happened, which is
+        # exactly what caused a later "why didn't you follow through?"
+        # question to get "I have no memory of that" instead of an honest
+        # answer. This still gets spoken AND saved to history like a normal
+        # response, it just says what's actually true.
+        if not full_response.strip():
+            if executed_tools_summary:
+                full_response = (
+                    "I went ahead and did that: " + "; ".join(executed_tools_summary)
+                    + ". I don't have anything further to add on it right now."
+                )
+            else:
+                full_response = "Sorry, I didn't have anything back for that one -- could you try asking again?"
+            logger.warning(
+                f"CoreAgent (local): model returned a completely empty response "
+                f"for this turn (user_input={user_input!r}, tools_this_turn="
+                f"{executed_tools_summary!r}) -- using a fallback response instead "
+                f"of silently dropping the turn."
+            )
+            yield full_response
 
         # Update history & SQLite store
         if full_response.strip():

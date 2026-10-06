@@ -65,6 +65,9 @@ class SceneAnalyzer:
         self._latest_description: str = ""
         self._model = self._config.observer_model
         self._ollama_url = f"{self._config.observer_ollama_url}/api/generate"
+        # Failure visibility (2026-10-06) -- see analyze()'s except block.
+        self._failing = False
+        self._first_success_logged = False
 
     def analyze(self, frame: np.ndarray, camera_source: str = "webcam", room: str = "main_office") -> list[DetectionResult]:
         """
@@ -88,13 +91,19 @@ class SceneAnalyzer:
             if not b64_frame:
                 return []
 
+            # Plain-language prompt (2026-10-06). The previous prompt asked
+            # moondream -- a 1.4B captioning model -- for strict JSON with an
+            # open-ended "objects" list. It almost never stopped (see the
+            # num_predict note below), and the few answers that did finish
+            # echoed the template back ("confidence 0.9, location desk") or
+            # invented people's names. Nothing downstream reads "objects" --
+            # Blindspot and the staleness reasoner work from the description
+            # text -- so ask for exactly that. The JSON-parsing fallback below
+            # still copes if the model volunteers JSON anyway.
             prompt = (
-                "Analyze this frame. Focus on person behavior and actions (e.g. sitting at desk, cooking, on phone, pacing, working) "
-                "as well as notable objects. Respond with valid JSON strictly matching this structure:\n"
-                "{\n"
-                '  "description": "2-3 concise sentences of what the person is doing and the scene context",\n'
-                '  "objects": [{"object_type": "item_name", "confidence": 0.9, "location": "desk"}]\n'
-                "}"
+                "Describe this scene in two or three short sentences: what the "
+                "person is doing, if anyone is present, and the notable objects "
+                "around them. Refer to people only as 'a person'."
             )
 
             # 60s, not 30s — a cold vision-model load (CUDA kernel
@@ -113,6 +122,27 @@ class SceneAnalyzer:
                     "prompt": prompt,
                     "images": [b64_frame],
                     "stream": False,
+                    # num_gpu: 0 (2026-09-24 finding) -- CUDA_VISIBLE_DEVICES=-1
+                    # on the spawned observer ollama process (see
+                    # ollama_bootstrap.py's _spawn_ollama_serve) was not
+                    # reliably keeping moondream off the GPU; Col observed it
+                    # resident in VRAM live. This per-request override pins
+                    # it to CPU directly through Ollama's own API instead of
+                    # depending on the env var alone.
+                    "options": {
+                        "num_gpu": 0,
+                        # Hard cap on answer length (2026-10-06). 2-3
+                        # sentences is roughly 60-80 tokens; at ~16 tok/s on
+                        # CPU plus ~6s to encode the frame, 120 tokens lands
+                        # well inside the 60s timeout even if the model
+                        # rambles. Without a cap, 98 of 104 requests on
+                        # 2026-10-03 were still generating (640-956 tokens)
+                        # when the timeout killed them.
+                        "num_predict": 120,
+                        # Light penalty against the repetition loops that
+                        # caused the runaway answers above.
+                        "repeat_penalty": 1.15,
+                    },
                 },
                 timeout=60.0,
             )
@@ -121,6 +151,9 @@ class SceneAnalyzer:
 
             raw_resp = data.get("response", "").strip()
             self._last_analysis = now
+            if self._failing:
+                logger.info("Scene analysis recovered -- moondream is answering again.")
+                self._failing = False
             
             # Parse structured output or fallback to raw text
             description = raw_resp
@@ -140,6 +173,9 @@ class SceneAnalyzer:
                 pass
 
             self._latest_description = description
+            if description and not self._first_success_logged:
+                logger.info(f"First scene description this run: {description[:200]}")
+                self._first_success_logged = True
 
             if description:
                 return [DetectionResult(
@@ -157,7 +193,17 @@ class SceneAnalyzer:
             return []
 
         except Exception as e:
-            logger.debug(f"Local scene analysis (Ollama CPU) failed: {e}")
+            # WARNING once per outage, DEBUG for repeats (2026-10-06): at
+            # DEBUG only, a full day of failed analyses never showed in the
+            # console or the service's stderr log.
+            if not self._failing:
+                logger.warning(
+                    f"Scene analysis failed ({type(e).__name__}: {e}) -- moondream at "
+                    f"{self._ollama_url}. Will keep retrying; repeats are logged at DEBUG."
+                )
+                self._failing = True
+            else:
+                logger.debug(f"Local scene analysis (Ollama CPU) failed: {type(e).__name__}: {e}")
             self._available = False
             self._last_check = time.monotonic()
             self._last_analysis = now

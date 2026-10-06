@@ -774,10 +774,34 @@ class VoicePipeline:
             # Contextual text is unique every time -- nothing to cache --
             # so it needs a live synth call, unlike the pre-cached generic
             # bank (see precache_fillers).
+            #
+            # reset_cancel() here (2026-09-19): this turn's own
+            # self._tts.cancel() call, a few dozen lines up in
+            # _process_utterance, unconditionally sets TTS's cancellation
+            # flag to stop a PREVIOUS turn's straggling audio -- but that
+            # flag is only ever cleared lazily, by whichever synthesize()
+            # call happens to run next (see reset_cancel's own docstring for
+            # the 2026-09-17 incident this same pattern already fixed once,
+            # for _speak_response_streaming's first sentence). A CONTEXTUAL
+            # filler's synthesize() call right below is EARLIER than that
+            # fix's reset point, so it was the one silently eating the stale
+            # flag and returning None instead -- confirmed live: the filler
+            # text logged and published normally, but no audio ever played,
+            # because a cached GENERIC filler skips synthesize() entirely
+            # (see _get_cached_filler) and so never hit this, while a
+            # contextual one always does.
+            if is_contextual:
+                self._tts.reset_cancel()
             filler_audio = self._tts.synthesize(filler_text) if is_contextual else self._get_cached_filler(filler_text)
             if filler_audio:
                 audio_bytes, sample_rate = filler_audio
                 self._audio.play_audio_bytes(audio_bytes, sample_rate)
+            elif is_contextual:
+                logger.warning(
+                    f"Contextual filler synthesis returned no audio for "
+                    f"'{filler_text[:60]}' -- filler text was logged/published "
+                    f"but nothing was actually spoken."
+                )
 
             # Now wait for the actual first sentence
             first = sentence_queue.get()
@@ -1101,7 +1125,27 @@ class VoicePipeline:
             if resp.status_code != 200:
                 return None
             content = resp.json().get("message", {}).get("content", "").strip()
-            return content or None
+            if not content:
+                return None
+
+            # Sanity-check against the model ignoring "5-10 words, don't
+            # answer the question" and just starting its real answer instead
+            # -- confirmed live 2026-09-19: num_predict=24 then truncates
+            # that mid-clause, producing something like "Let me check that
+            # for you.\n\nI am an AI and do not have memory of..." which is
+            # both a bad filler (reads as a real, if garbled, answer) and
+            # bad TTS input (embedded blank line). Collapse whitespace and
+            # bail out to the generic bank if it's clearly not a short
+            # acknowledgment -- better to say nothing contextual than to
+            # speak a truncated fragment of the actual response.
+            content = " ".join(content.split())
+            if len(content.split()) > 14 or len(content) > 90:
+                logger.debug(
+                    f"Contextual filler ignored length/format instructions "
+                    f"('{content[:60]}...') -- falling back to generic bank."
+                )
+                return None
+            return content
         except Exception as e:
             logger.debug(f"Contextual filler generation failed (non-fatal): {e}")
             return None

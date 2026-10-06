@@ -82,6 +82,15 @@ function Invoke-ObserverServiceCheck {
     else {
         Show-Warn ('Installed but not running (status: ' + $svc.Status.ToString() + '). Start it with: nssm start ArcherObserver')
     }
+    # Its CPU-only Ollama (moondream, port 11435) -- a separate boot-time
+    # service since 2026-10-06; see scripts\install_observer_service.ps1.
+    $ollamaSvc = Get-Service -Name 'ArcherObserverOllama' -ErrorAction SilentlyContinue
+    if (-not $ollamaSvc) {
+        Show-Warn 'Observer Ollama service (CPU, port 11435) not installed -- re-run scripts\install_observer_service.ps1 (elevated) to add it.'
+    }
+    elseif ($ollamaSvc.Status -ne 'Running') {
+        Show-Warn ('Observer Ollama service installed but not running (status: ' + $ollamaSvc.Status.ToString() + '). Start it with: nssm start ArcherObserverOllama')
+    }
 }
 
 # Step 2 – Docker Desktop

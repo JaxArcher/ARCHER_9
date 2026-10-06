@@ -52,10 +52,6 @@ class ToggleService:
                 INSERT OR IGNORE INTO toggle_state (key, value, updated_at)
                 VALUES ('mode', ?, CURRENT_TIMESTAMP)
             """, (self._config.default_mode,))
-            conn.execute("""
-                INSERT OR IGNORE INTO toggle_state (key, value, updated_at)
-                VALUES ('tts_mode', ?, CURRENT_TIMESTAMP)
-            """, (self._config.default_tts_mode,))
             conn.commit()
         finally:
             conn.close()
@@ -121,63 +117,6 @@ class ToggleService:
         self.mode = new_mode
         return new_mode
 
-    # --- TTS mode: independent of the LLM/STT mode above (2026-09-16) ---
-    # Col's setup runs conversation on the local gemma4:e4b model by
-    # default while voice OUTPUT still defaults to ElevenLabs (cloud) —
-    # a combination the single `mode` toggle above can't express, since it
-    # ties LLM+STT+TTS together. Same SQLite-backed, event-notified pattern,
-    # just a separate key so the two can differ.
-    @property
-    def tts_mode(self) -> ModeType:
-        """Get the current TTS engine mode (cloud=ElevenLabs, local=Kokoro)."""
-        with self._lock:
-            conn = sqlite3.connect(self._db_path)
-            try:
-                cursor = conn.execute(
-                    "SELECT value FROM toggle_state WHERE key = 'tts_mode'"
-                )
-                row = cursor.fetchone()
-                return row[0] if row else self._config.default_tts_mode
-            finally:
-                conn.close()
-
-    @tts_mode.setter
-    def tts_mode(self, new_mode: ModeType) -> None:
-        if new_mode not in ("cloud", "local"):
-            raise ValueError(f"Invalid TTS mode: {new_mode}. Must be 'cloud' or 'local'.")
-
-        old_mode = self.tts_mode
-
-        with self._lock:
-            conn = sqlite3.connect(self._db_path)
-            try:
-                conn.execute("""
-                    INSERT OR REPLACE INTO toggle_state (key, value, updated_at)
-                    VALUES ('tts_mode', ?, CURRENT_TIMESTAMP)
-                """, (new_mode,))
-                conn.commit()
-            finally:
-                conn.close()
-
-        if old_mode != new_mode:
-            logger.info(f"TTS mode changed: {old_mode} → {new_mode}")
-            get_event_bus().publish(Event(
-                type=EventType.TTS_MODE_CHANGED,
-                source="toggle_service",
-                data={"old_mode": old_mode, "new_mode": new_mode},
-            ))
-
-    @property
-    def is_cloud_tts(self) -> bool:
-        """Check if TTS is currently set to cloud (ElevenLabs)."""
-        return self.tts_mode == "cloud"
-
-    def toggle_tts(self) -> ModeType:
-        """Toggle TTS mode between cloud and local. Returns the new mode."""
-        new_mode: ModeType = "local" if self.is_cloud_tts else "cloud"
-        self.tts_mode = new_mode
-        return new_mode
-
     def fallback_to_local(self, reason: str = "cloud_failure") -> None:
         """
         Auto-fallback to local mode when cloud fails.
@@ -194,26 +133,6 @@ class ToggleService:
                     "error": "cloud_fallback",
                     "reason": reason,
                     "message": "Cloud service unavailable. Switched to local mode.",
-                },
-            ))
-
-    def fallback_tts_to_local(self, reason: str = "tts_failure") -> None:
-        """
-        Auto-fallback to local TTS (Kokoro) when cloud TTS (ElevenLabs) fails.
-        Separate from fallback_to_local() above -- flipping the TTS engine
-        on a synthesis error must not also flip conversation/STT mode, now
-        that TTS mode is its own independent setting (2026-09-16).
-        """
-        if self.is_cloud_tts:
-            logger.warning(f"TTS cloud fallback triggered: {reason}. Switching TTS to local.")
-            self.tts_mode = "local"
-            get_event_bus().publish(Event(
-                type=EventType.SYSTEM_ERROR,
-                source="toggle_service",
-                data={
-                    "error": "tts_cloud_fallback",
-                    "reason": reason,
-                    "message": "Cloud TTS unavailable. Switched voice output to local.",
                 },
             ))
 

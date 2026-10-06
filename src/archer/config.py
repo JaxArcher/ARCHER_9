@@ -26,10 +26,6 @@ class ArcherConfig(BaseSettings):
 
     # --- API Keys ---
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
-    elevenlabs_api_key: str = Field(default="", alias="ELEVENLABS_API_KEY")
-    elevenlabs_voice_id: str = Field(
-        default="21m00Tcm4TlvDq8ikWAM", alias="ELEVENLABS_VOICE_ID"
-    )
 
     # --- Mode ---
     # Personal single-user assistant: default to local models. Cloud is
@@ -40,26 +36,8 @@ class ArcherConfig(BaseSettings):
         default="local", alias="ARCHER_DEFAULT_MODE"
     )
 
-    # TTS engine is its OWN toggle, independent of default_mode above
-    # (2026-09-16, Col's call). default_mode governs conversation (LLM) +
-    # STT only.
-    #
-    # Flipped to "local" 2026-09-16 (Col's call): originally defaulted to
-    # "cloud" (ElevenLabs) on the assumption the monthly subscription
-    # covered usage — turned out ElevenLabs bills per-credit on top of the
-    # subscription and Col's .env key was actually a key ID, not a usable
-    # secret (repeated 400 invalid_api_key on both TTS and STT). The
-    # existing cloud-failure auto-fallback (ToggleService, see
-    # trigger_cloud_fallback below) already caught this live and flipped
-    # the persisted toggle_state row to local, but that's a reactive patch
-    # per-install; this changes what a FRESH install (or a cleared
-    # toggle_state table) starts with, so a broken/unset ElevenLabs key
-    # doesn't cost a failed round-trip on every single turn before falling
-    # back. Flip back to "cloud" here (or via the browser TTS toggle) once
-    # the ElevenLabs key is fixed, if cloud voice is still wanted.
-    default_tts_mode: Literal["cloud", "local"] = Field(
-        default="local", alias="ARCHER_DEFAULT_TTS_MODE"
-    )
+    # Voice in/out is local only (2026-10-06: ElevenLabs removed -- Col has no cloud TTS/STT subscription): Faster-Whisper STT, Kokoro TTS.
+    # default_mode above governs the conversation LLM only.
 
     # --- Audio ---
     mic_device_index: int | None = Field(default=None, alias="ARCHER_MIC_DEVICE_INDEX")

@@ -15,7 +15,6 @@ const statusDotEl = document.getElementById("archer-status");
 const modeBtnEl = document.getElementById("archer-mode-btn");
 const micBtnEl = document.getElementById("archer-mic-btn");
 const ttsBtnEl = document.getElementById("archer-tts-btn");
-const voiceEngineBtnEl = document.getElementById("archer-voice-engine-btn");
 const cameraBtnEl = document.getElementById("archer-camera-btn");
 const enrollBtnEl = document.getElementById("archer-enroll-btn");
 const haltBtnEl = document.getElementById("archer-halt-btn");
@@ -40,6 +39,23 @@ ArcherClient.on("sttFinal", (text) => {
 
 ArcherClient.on("assistantLine", ({ text }) => {
   addTranscriptLine("assistant", text);
+});
+
+ArcherClient.on("artifactPush", ({ imageB64, title }) => {
+  if (!imageB64) return;
+  const wrap = document.createElement("div");
+  wrap.className = "line line-assistant line-artifact";
+  const label = document.createElement("p");
+  label.className = "artifact-label";
+  label.textContent = title ? `📸 ${title}` : "📸 Screenshot";
+  const img = document.createElement("img");
+  img.className = "artifact-image";
+  img.src = `data:image/png;base64,${imageB64}`;
+  img.alt = title || "Screenshot";
+  wrap.appendChild(label);
+  wrap.appendChild(img);
+  transcriptEl.appendChild(wrap);
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
 });
 
 ArcherClient.on("halt", () => {
@@ -75,15 +91,6 @@ function setTtsButton(muted) {
   ttsBtnEl.classList.toggle("is-muted", muted);
 }
 
-// Separate from SPEAKER above (which just mutes/unmutes): this picks WHICH
-// voice engine speaks. Independent of the MODE button too — conversation
-// can run on the local model while voice output still defaults to
-// ElevenLabs (cloud). See ToggleService.tts_mode / CONTRACT.md.
-function setVoiceEngineButton(ttsMode) {
-  voiceEngineBtnEl.textContent = ttsMode === "cloud" ? "☁ VOICE: ELEVENLABS" : "🖥 VOICE: KOKORO";
-  voiceEngineBtnEl.classList.toggle("is-cloud", ttsMode === "cloud");
-}
-
 // Releasing frees the physical webcam device so another app (barehands,
 // specifically — see CONTRACT.md) can open it; only one process can hold
 // a webcam at a time on Windows. Analysis just goes stale while released,
@@ -93,16 +100,14 @@ function setCameraButton(released) {
   cameraBtnEl.classList.toggle("is-muted", released);
 }
 
-ArcherClient.on("hello", ({ mode, ttsMode, micMuted, ttsMuted, cameraReleased, cameraAvailable }) => {
+ArcherClient.on("hello", ({ mode, micMuted, ttsMuted, cameraReleased, cameraAvailable }) => {
   if (mode) setModeButton(mode);
-  if (ttsMode) setVoiceEngineButton(ttsMode);
   setMicButton(!!micMuted);
   setTtsButton(!!ttsMuted);
   cameraBtnEl.style.display = cameraAvailable ? "" : "none";
   setCameraButton(!!cameraReleased);
 });
 ArcherClient.on("mode", setModeButton);
-ArcherClient.on("ttsMode", setVoiceEngineButton);
 ArcherClient.on("micMute", setMicButton);
 ArcherClient.on("ttsMute", setTtsButton);
 ArcherClient.on("observerCamera", setCameraButton);
@@ -131,7 +136,6 @@ ArcherClient.on("enrollResult", ({ success, name, error }) => {
 modeBtnEl.addEventListener("click", () => ArcherClient.sendModeToggle());
 micBtnEl.addEventListener("click", () => ArcherClient.sendMicMuteToggle());
 ttsBtnEl.addEventListener("click", () => ArcherClient.sendTtsMuteToggle());
-voiceEngineBtnEl.addEventListener("click", () => ArcherClient.sendTtsModeToggle());
 cameraBtnEl.addEventListener("click", () => ArcherClient.sendCameraReleaseToggle());
 enrollBtnEl.addEventListener("click", () => ArcherClient.sendEnrollFace("Col"));
 haltBtnEl.addEventListener("click", () => ArcherClient.sendHalt());

@@ -17,6 +17,7 @@ CRITICAL SAFETY RULES:
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import io
 import time
 import threading
@@ -46,10 +47,37 @@ class PCController:
         self._playwright = None
         self._browser_context = None
 
+        # Playwright's sync API pins every browser/context/page object to
+        # the exact OS thread (specifically the greenlet) that created it --
+        # calling into it from any other thread raises "Cannot switch to a
+        # different thread" (or, once that original thread has been
+        # recycled/destroyed, "...which happens to have exited"). Found
+        # 2026-09-19: _ensure_browser() used to run on whatever thread
+        # happened to call open_url() first (a per-turn CoreAgent thread),
+        # while browser_screenshot() was called both from that same kind of
+        # per-turn thread AND from server.py's periodic GUI browser-mirror
+        # poll (`asyncio.to_thread`, which pulls from Python's shared,
+        # multi-threaded default pool) -- neither of those is guaranteed to
+        # land on the thread that created the browser, so screenshots failed
+        # essentially every time except by chance. Fix: every Playwright
+        # call, including the lazy browser launch itself, now runs on this
+        # one dedicated single-worker thread, so they're always on the same
+        # thread/greenlet regardless of which caller's thread invoked them.
+        self._pw_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="archer-playwright"
+        )
+
     def _on_halt(self, event: Event) -> None:
         """HALT handler — stop all active automation."""
         self._halted.set()
-        self._close_browser()
+        # Fire-and-forget onto the Playwright thread (see _pw_executor's
+        # docstring) rather than calling _close_browser() directly here --
+        # halt can be triggered from any thread, and close() needs the same
+        # thread-affinity as every other Playwright call.
+        try:
+            self._pw_executor.submit(self._close_browser)
+        except RuntimeError:
+            pass  # executor already shut down
         logger.warning("PC Control: HALT — all automation stopped.")
 
     def _check_halt(self) -> bool:
@@ -285,6 +313,22 @@ class PCController:
             self._browser_context = None
             self._playwright = None
 
+    def _run_on_pw_thread(self, fn, *args, timeout: float = 30.0, **kwargs):
+        """Submit fn to the dedicated Playwright thread and block for the
+        result (see _pw_executor's docstring in __init__ for why this
+        exists). fn is expected to already catch its own exceptions and
+        return a safe fallback value -- this only guards against the
+        submission itself failing or genuinely hanging."""
+        try:
+            future = self._pw_executor.submit(fn, *args, **kwargs)
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            logger.error(f"Playwright call '{fn.__name__}' timed out after {timeout}s.")
+            return None
+        except RuntimeError as e:
+            logger.error(f"Playwright thread unavailable for '{fn.__name__}': {e}")
+            return None
+
     def open_url(self, url: str) -> dict[str, Any]:
         """
         Open a URL in the browser.
@@ -295,7 +339,10 @@ class PCController:
         """
         if self._check_halt():
             return {"success": False, "reason": "HALT"}
+        result = self._run_on_pw_thread(self._open_url_impl, url)
+        return result if result is not None else {"success": False, "reason": "Playwright call failed/timed out"}
 
+    def _open_url_impl(self, url: str) -> dict[str, Any]:
         if not self._ensure_browser():
             return {"success": False, "reason": "Browser not available"}
 
@@ -321,6 +368,9 @@ class PCController:
 
         Read-only — no confirmation needed.
         """
+        return self._run_on_pw_thread(self._browser_screenshot_impl)
+
+    def _browser_screenshot_impl(self) -> str | None:
         if not self._browser_context:
             return None
 
@@ -330,7 +380,13 @@ class PCController:
                 return None
 
             page = pages[-1]  # Most recent page
-            screenshot_bytes = page.screenshot()
+            # Explicit shorter timeout (2026-09-19 finding): Playwright's
+            # screenshot default timeout is 30s, and a live/animated page
+            # (autoplaying YouTube, in particular) can genuinely stall on
+            # "waiting for fonts to load" for the full 30s before failing --
+            # that's 30s of dead air in the middle of a conversation turn.
+            # Fail fast instead; the caller already handles a None result.
+            screenshot_bytes = page.screenshot(timeout=8000)
             return base64.b64encode(screenshot_bytes).decode("utf-8")
 
         except Exception as e:
@@ -345,7 +401,9 @@ class PCController:
         """
         if self._check_halt():
             return False
+        return bool(self._run_on_pw_thread(self._browser_click_impl, selector))
 
+    def _browser_click_impl(self, selector: str) -> bool:
         if not self._browser_context:
             return False
 
@@ -371,7 +429,9 @@ class PCController:
         """
         if self._check_halt():
             return False
+        return bool(self._run_on_pw_thread(self._browser_type_impl, selector, text))
 
+    def _browser_type_impl(self, selector: str, text: str) -> bool:
         if not self._browser_context:
             return False
 
@@ -395,6 +455,10 @@ class PCController:
 
         Read-only — no confirmation needed.
         """
+        result = self._run_on_pw_thread(self._browser_get_text_impl, selector)
+        return result if result is not None else ""
+
+    def _browser_get_text_impl(self, selector: str = "body") -> str:
         if not self._browser_context:
             return ""
 
@@ -414,5 +478,5 @@ class PCController:
         """Close the browser. REQUIRES user confirmation."""
         if self._check_halt():
             return
-        self._close_browser()
+        self._run_on_pw_thread(self._close_browser)
         logger.info("Browser closed by user request.")

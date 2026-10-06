@@ -97,7 +97,25 @@ class WebcamCapture:
                             self._camera_source = idx
                             break
             else:
-                # RTSP/HTTP URL — no backend selection needed
+                # RTSP/HTTP URL — no backend selection needed.
+                #
+                # Force TCP transport (2026-09-21 finding): OpenCV's FFmpeg
+                # backend defaults RTSP to UDP, which has no retransmission
+                # -- any WiFi packet loss between the camera and this PC
+                # shows up as out-of-order/missing RTP packets, which is
+                # exactly what was seen live: repeated "RTP: bad cseq X
+                # expected=Y" and "cabac decode of qscale diff failed"
+                # warnings, followed by the FFmpeg backend's read call
+                # stalling until its own ~30s interrupt-callback timeout
+                # ("Stream timeout triggered after 30067ms") before
+                # recovering -- happening roughly every 30-60s in a live
+                # log. TCP transport adds retransmission/ordering at the
+                # transport layer, which is the standard fix for this exact
+                # symptom pattern. Must be set via this env var (an FFmpeg
+                # private option, not a cv2.CAP_PROP) BEFORE the
+                # VideoCapture is constructed -- it's read at open time.
+                import os
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
                 self._cap = cv2.VideoCapture(self._camera_source)
 
             if self._cap is None or not self._cap.isOpened():
@@ -287,6 +305,28 @@ class WebcamCapture:
 
     def _capture_loop(self) -> None:
         """Main capture loop — runs in dedicated thread."""
+        # Consecutive-failure counter, separate from self._errors (2026-09-24
+        # finding). self._errors is a lifetime total exposed via the
+        # frames_captured/errors stats log line on stop() -- it was also
+        # being used as the ONLY trigger for giving up on the camera
+        # entirely, which meant it never reset on a successful read. A
+        # long-running always-on service (this runs as a Windows Service
+        # now, potentially for days) that hits even occasional, fully-
+        # recovered transient errors would eventually cross the threshold
+        # purely on lifetime count and permanently stop capturing -- with
+        # no reconnect attempt, just silence until the next service
+        # restart. Confirmed live: an RTSP link degrading (WiFi conditions)
+        # produced ~50 consecutive ~30s read stalls in a row (~25 minutes)
+        # and the capture thread gave up for good, going dark for the rest
+        # of that run. consecutive_errors tracks only unbroken failure
+        # streaks and resets to 0 on any successful read; hitting the
+        # threshold now triggers a reconnect attempt (release + reopen the
+        # same source) instead of a permanent stop, so a real network blip
+        # can recover on its own instead of requiring a manual service
+        # restart.
+        consecutive_errors = 0
+        RECONNECT_THRESHOLD = 20
+
         while self._running.is_set():
             try:
                 if self._cap is None or not self._cap.isOpened():
@@ -297,13 +337,44 @@ class WebcamCapture:
                 ret, frame = self._cap.read()
                 if not ret or frame is None:
                     self._errors += 1
-                    if self._errors > 50:
-                        logger.error("Too many camera errors. Stopping capture.")
-                        self._running.clear()
-                        break
+                    consecutive_errors += 1
+
+                    if consecutive_errors >= RECONNECT_THRESHOLD:
+                        logger.warning(
+                            f"{consecutive_errors} consecutive camera read "
+                            "failures -- attempting to reconnect instead of "
+                            "giving up."
+                        )
+                        try:
+                            self._cap.release()
+                        except Exception:
+                            pass
+                        time.sleep(3.0)  # brief backoff before reopening
+                        try:
+                            import cv2
+                            if isinstance(self._camera_source, str):
+                                self._cap = cv2.VideoCapture(self._camera_source)
+                            else:
+                                self._cap = self._open_local_device(cv2, self._camera_source)
+                        except Exception as e:
+                            logger.error(f"Reconnect attempt failed: {e}")
+                            self._cap = None
+
+                        if self._cap is None or not self._cap.isOpened():
+                            logger.error(
+                                "Reconnect attempt failed to open the camera. "
+                                "Stopping capture."
+                            )
+                            self._running.clear()
+                            break
+
+                        logger.info("Camera reconnected successfully.")
+                        consecutive_errors = 0
+
                     time.sleep(self._capture_interval)
                     continue
 
+                consecutive_errors = 0
                 with self._frame_lock:
                     self._latest_frame = frame
                     self._frame_timestamp = time.monotonic()
@@ -312,6 +383,7 @@ class WebcamCapture:
             except Exception as e:
                 logger.error(f"Webcam capture error: {e}")
                 self._errors += 1
+                consecutive_errors += 1
 
             # Sleep between captures — we don't need 30fps for ambient observation
             time.sleep(self._capture_interval)

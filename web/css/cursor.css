@@ -1,0 +1,28 @@
+/* Shared with barehands/assets/cursor.css. No remote assets or fonts. */
+#archer-cursor, #archer-cursor *, .archer-cursor-trail { pointer-events: none !important; }
+#archer-cursor {
+  position: fixed; width: 46px; height: 46px; z-index: 2147483647;
+  transform: translate(-50%, -50%); opacity: 0; visibility: hidden;
+  color: #53e8ff; contain: layout style; transition: opacity 100ms;
+}
+#archer-cursor.ac-visible { opacity: 1; visibility: visible; }
+#archer-cursor .ac-ring {
+  position: absolute; border: 1px solid currentColor; border-radius: 50%;
+  box-sizing: border-box; box-shadow: 0 0 5px #22cfff66;
+  animation: ac-spin 3s linear infinite; animation-play-state: paused;
+}
+#archer-cursor.ac-visible .ac-ring { animation-play-state: running; }
+#archer-cursor .ac-one { inset: 10px; border-top-color: transparent; border-bottom-color: transparent; }
+#archer-cursor .ac-two { inset: 5px; opacity: .75; border-left-color: transparent; animation-duration: 4s; animation-direction: reverse; }
+#archer-cursor .ac-three { inset: 0; opacity: .45; border-right-color: transparent; border-top-color: transparent; animation-duration: 6s; }
+#archer-cursor .ac-core { position: absolute; inset: 21px; border-radius: 50%; background: #d5fcff; box-shadow: 0 0 7px 2px #27dfff; }
+#archer-cursor.ac-hover { color: #bdacff; }
+#archer-cursor.ac-click .ac-core { background: #fff; box-shadow: 0 0 12px 5px #ad93ff; }
+.archer-cursor-trail { position: fixed; width: 7px; height: 7px; border-radius: 50%; background: #4bdfff; opacity: 0; z-index: 2147483646; }
+html.archer-cursor-active, html.archer-cursor-active * { cursor: none !important; }
+#archer-cursor-toggle { margin-left: auto; background: transparent; color: #91d7e6; border: 1px solid #285064; border-radius: 5px; padding: 6px 10px; font: inherit; font-size: 11px; }
+#archer-cursor-toggle:focus-visible { outline: 2px solid #bcaaff; outline-offset: 2px; }
+@keyframes ac-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  #archer-cursor, .archer-cursor-trail { display: none; }
+}

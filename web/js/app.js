@@ -22,7 +22,6 @@ const ArcherClient = (() => {
     halt: [],
     micMute: [],
     ttsMute: [],
-    ttsMode: [],
     observerCamera: [],
     enrollProgress: [],
     enrollResult: [],
@@ -99,9 +98,6 @@ const ArcherClient = (() => {
       case "tts_mute":
         emit("ttsMute", msg.muted);
         break;
-      case "tts_mode":
-        emit("ttsMode", msg.mode);
-        break;
       case "observer_camera":
         emit("observerCamera", msg.released);
         break;
@@ -116,6 +112,13 @@ const ArcherClient = (() => {
         break;
       case "log_line":
         emit("logLine", msg.text);
+        break;
+      case "artifact_push":
+        // A tool result that included an image (currently just
+        // take_screenshot) -- 2026-09-19, Col's ask: the screenshot was
+        // only ever reaching the model, never shown to him. See
+        // core_agent.py's _publish_tool_screenshot.
+        emit("artifactPush", { imageB64: msg.image_b64 || "", kind: msg.kind || "", title: msg.title || "" });
         break;
       case "memory_snapshot":
         // Relationship/social tracking + pattern-recognition output for
@@ -160,7 +163,6 @@ const ArcherClient = (() => {
       case "hello":
         emit("hello", {
           mode: msg.mode,
-          ttsMode: msg.tts_mode,
           micMuted: msg.mic_muted,
           ttsMuted: msg.tts_muted,
           cameraReleased: msg.camera_released,
@@ -226,11 +228,16 @@ const ArcherClient = (() => {
     sendTtsMuteToggle() {
       send({ type: "tts_mute_toggle" });
     },
-    sendTtsModeToggle() {
-      send({ type: "tts_mode_toggle" });
-    },
     sendCameraReleaseToggle() {
       send({ type: "camera_release_toggle" });
+    },
+    // Explicit (non-toggle) versions used by the Gesture tab's automatic
+    // camera handoff (2026-10-06) -- see barehands.js.
+    sendCameraRelease() {
+      send({ type: "camera_release" });
+    },
+    sendCameraReacquire() {
+      send({ type: "camera_reacquire" });
     },
     sendEnrollFace(name) {
       send({ type: "enroll_face", name: name || "Col" });

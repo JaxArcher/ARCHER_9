@@ -52,7 +52,6 @@ class EventType(str, Enum):
 
     # Toggle events
     MODE_CHANGED = "system.mode_changed"
-    TTS_MODE_CHANGED = "system.tts_mode_changed"
 
     # Auth events
     AUTH_SUCCESS = "auth.success"

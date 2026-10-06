@@ -50,3 +50,9 @@ nul
 
 # Scratch debug audio recordings (grows unbounded, not meant to be tracked)
 scratch/
+
+# Local rollback copies made before edits (2026-10-06)
+backups/
+
+# Log files anywhere (they can contain camera URLs and personal content)
+*.log

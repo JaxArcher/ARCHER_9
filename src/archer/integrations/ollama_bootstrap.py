@@ -33,11 +33,21 @@ docker-compose auto-start for the observer containers: if `ollama` isn't
 on PATH, or a port is already in use for some unrelated reason, this logs
 a warning and ARCHER keeps starting -- it just won't have working local-
 model features until Ollama is reachable by whatever means.
+
+The standalone observer service (observer_service.py) does NOT call
+start_ollama_instances() as of 2026-10-06. Its Ollama is a Windows service
+of its own (ArcherObserverOllama, see scripts/install_observer_service.ps1)
+that starts at boot before the observer; the observer calls
+wait_for_observer_ollama() instead, which never spawns anything. The
+front-end apps keep calling start_ollama_instances(): with that service
+running, port 11435 is already reachable and nothing is spawned; without
+it, they still start their own observer instance as before.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -46,6 +56,47 @@ from pathlib import Path
 
 import httpx
 from loguru import logger
+
+
+def _find_ollama_exe() -> str | None:
+    """Locate the ollama executable, falling back to well-known Windows
+    install locations when bare PATH lookup fails.
+
+    2026-09-22 finding: `subprocess.Popen(["ollama", "serve"], ...)` relies
+    on Windows resolving "ollama" against the CURRENT PROCESS's PATH. That
+    works fine for ARCHER's desktop GUI, launched interactively under Col's
+    own user session -- but the Observer runs as a Windows Service under
+    NSSM, which gets a minimal machine-level PATH, not Col's interactive
+    user PATH. The Ollama Windows installer adds itself to the per-user
+    PATH at install time (installing to %LOCALAPPDATA%\\Programs\\Ollama by
+    default), so a service never sees it -- confirmed live via
+    observer_service_stderr.log repeating "`ollama` not found on PATH"
+    indefinitely even though the main ARCHER process's own Ollama instance
+    was reachable the whole time. shutil.which() still checks the current
+    (possibly-restricted) PATH first, so this only changes behavior when
+    that lookup would otherwise fail."""
+    found = shutil.which("ollama")
+    if found:
+        return found
+
+    if sys.platform != "win32":
+        return None
+
+    candidates = []
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        candidates.append(Path(local_appdata) / "Programs" / "Ollama" / "ollama.exe")
+    for env_var in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        base = os.environ.get(env_var)
+        if base:
+            candidates.append(Path(base) / "Ollama" / "ollama.exe")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            logger.info(f"Found ollama at {candidate} (not on this process's PATH).")
+            return str(candidate)
+
+    return None
 
 
 def _ollama_reachable(base_url: str, timeout: float = 1.5) -> bool:
@@ -72,13 +123,22 @@ def _spawn_ollama_serve(host: str, log_path: Path, force_cpu: bool = False) -> b
     force_cpu (2026-09-19): moondream moved back to CPU-only -- see
     start_ollama_instances' call site and RedisBuffer.mark_gui_active's
     docstring for why this is safe again now that the observer can pause
-    itself while ARCHER's GUI/browser session is active. Explicitly SETS
-    CUDA_VISIBLE_DEVICES="" (rather than leaving it unset) so a
-    persistently-set system value can't accidentally hand it a GPU."""
+    itself while ARCHER's GUI/browser session is active.
+
+    Uses CUDA_VISIBLE_DEVICES="-1" rather than "" -- confirmed live
+    2026-09-19 that an empty string was NOT reliably hiding the GPU
+    (ollama_observer.log still showed a real CUDA0 compute buffer being
+    reserved after a clean restart). Likely cause: Windows can drop an
+    empty-valued env var from a child process's environment block
+    entirely rather than passing it through as empty, which leaves
+    CUDA_VISIBLE_DEVICES effectively unset -- and unset means "no
+    restriction," the opposite of what force_cpu wants. "-1" is an
+    unambiguous, always-invalid device index that can't collapse into
+    "unset" the same way."""
     env = os.environ.copy()
     env["OLLAMA_HOST"] = host
     if force_cpu:
-        env["CUDA_VISIBLE_DEVICES"] = ""
+        env["CUDA_VISIBLE_DEVICES"] = "-1"
     else:
         env.pop("CUDA_VISIBLE_DEVICES", None)  # see module docstring
 
@@ -95,9 +155,19 @@ def _spawn_ollama_serve(host: str, log_path: Path, force_cpu: bool = False) -> b
         # PowerShell window Col kept open for the whole session.
         popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
+    ollama_exe = _find_ollama_exe()
+    if ollama_exe is None:
+        logger.warning(
+            "`ollama` not found on PATH (or any well-known install location) "
+            "-- can't auto-start it. Install Ollama (https://ollama.com) or "
+            "start it manually; ARCHER's local model features won't work "
+            "until it's reachable."
+        )
+        return False
+
     try:
         subprocess.Popen(
-            ["ollama", "serve"],
+            [ollama_exe, "serve"],
             env=env,
             stdout=log_file,
             stderr=subprocess.STDOUT,
@@ -106,8 +176,8 @@ def _spawn_ollama_serve(host: str, log_path: Path, force_cpu: bool = False) -> b
         return True
     except FileNotFoundError:
         logger.warning(
-            "`ollama` not found on PATH -- can't auto-start it. Install "
-            "Ollama (https://ollama.com) or start it manually; ARCHER's "
+            f"ollama executable resolved to {ollama_exe} but launching it "
+            "failed (FileNotFoundError) -- can't auto-start it. ARCHER's "
             "local model features won't work until it's reachable."
         )
         return False
@@ -141,9 +211,46 @@ def _ensure_instance(
     )
 
 
-def _warm_up_model(label: str, base_url: str, model: str) -> None:
-    """Force `model` into VRAM now, in the background, instead of letting
-    the user's first real question eat the cold-load cost.
+def _same_model(a: str, b: str) -> bool:
+    """'moondream' and 'moondream:latest' are the same model to Ollama."""
+    def norm(name: str) -> str:
+        return name if ":" in name else f"{name}:latest"
+    return norm(a) == norm(b)
+
+
+def _model_placement(base_url: str, model: str) -> str | None:
+    """Ask Ollama where `model` actually landed, from /api/ps's size vs
+    size_vram (2026-10-06). The warm-up message used to say "resident in
+    VRAM" unconditionally on any 200 -- including for moondream, which is
+    deliberately CPU-only -- which read as proof it was on the GPU when it
+    wasn't."""
+    try:
+        resp = httpx.get(f"{base_url}/api/ps", timeout=5.0)
+        resp.raise_for_status()
+        for m in resp.json().get("models", []) or []:
+            name = m.get("name") or m.get("model") or ""
+            if not _same_model(name, model):
+                continue
+            size = m.get("size") or 0
+            vram = m.get("size_vram") or 0
+
+            def gb(n: int) -> str:
+                return f"{n / 1024 ** 3:.1f} GB"
+
+            if vram <= 0:
+                return f"loaded on CPU/RAM ({gb(size)}, no VRAM)"
+            if vram >= size:
+                return f"loaded fully in VRAM ({gb(vram)})"
+            return f"loaded split: {gb(vram)} in VRAM, {gb(size - vram)} on CPU"
+    except Exception:
+        return None
+    return None
+
+
+def _warm_up_model(label: str, base_url: str, model: str, force_cpu: bool = False) -> None:
+    """Force `model` into VRAM (or RAM, if force_cpu) now, in the
+    background, instead of letting the user's first real question eat the
+    cold-load cost.
 
     Added 2026-09-17 after Col's log showed his very first question after
     launch ("What are your capabilities and functions?" -- plain text, no
@@ -157,11 +264,27 @@ def _warm_up_model(label: str, base_url: str, model: str) -> None:
     non-fatal, same as the rest of this module: if it fails, the user just
     eats the cold-start cost on their first real question instead, exactly
     as before this change.
+
+    force_cpu (2026-09-24 finding): CUDA_VISIBLE_DEVICES=-1 on the spawned
+    `ollama serve` process (see _spawn_ollama_serve) turned out to NOT be
+    reliably keeping moondream off the GPU either -- Col observed it
+    resident in VRAM live, the same category of failure as the empty-
+    string version of this same env var that got fixed on 2026-09-19.
+    Ollama's own /api/generate request body accepts an options.num_gpu
+    override that controls GPU layer offload directly, independent of
+    however the server process itself detects hardware -- passing 0 here
+    is a second, more direct way of pinning this model to CPU that doesn't
+    depend on the env var actually working.
     """
+    options = {"num_gpu": 0} if force_cpu else None
+    payload = {"model": model}
+    if options:
+        payload["options"] = options
     try:
-        resp = httpx.post(f"{base_url}/api/generate", json={"model": model}, timeout=120.0)
+        resp = httpx.post(f"{base_url}/api/generate", json=payload, timeout=120.0)
         if resp.status_code == 200:
-            logger.info(f"Ollama ({label}) model '{model}' warmed up and resident in VRAM.")
+            where = _model_placement(base_url, model) or "placement unknown (/api/ps didn't list it)"
+            logger.info(f"Ollama ({label}) model '{model}' warmed up -- {where}.")
         else:
             logger.warning(f"Ollama ({label}) warm-up for '{model}' returned {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
@@ -189,6 +312,52 @@ def start_ollama_instances() -> None:
         # _warm_up_model. Sequential on this same background thread is
         # fine; nothing else is waiting on it.
         _warm_up_model("main / gemma4:e4b", config.ollama_base_url, config.core_primary_model)
-        _warm_up_model("observer / moondream", config.observer_ollama_url, config.observer_model)
+        _warm_up_model(
+            "observer / moondream", config.observer_ollama_url, config.observer_model,
+            force_cpu=True,
+        )
 
     threading.Thread(target=_run, daemon=True, name="archer-ollama-bootstrap").start()
+
+
+def wait_for_observer_ollama(timeout_s: float = 600.0) -> None:
+    """Observer-service counterpart to start_ollama_instances() (2026-10-06).
+
+    Never spawns anything -- see the module docstring and observer_service.py
+    for why. On a background thread: waits for the observer instance (the
+    ArcherObserverOllama Windows service) to answer, warms moondream on CPU
+    and logs where it actually loaded, then reports once whether the main
+    instance is up yet (normally not until Col logs in and the Ollama tray
+    app starts it). Scene analysis doesn't wait on this -- SceneAnalyzer
+    retries on its own every minute -- so this exists for the warm-up and
+    for a clear log line either way."""
+    from archer.config import get_config
+    config = get_config()
+
+    def _run():
+        deadline = time.monotonic() + timeout_s
+        while not _ollama_reachable(config.observer_ollama_url):
+            if time.monotonic() > deadline:
+                logger.warning(
+                    f"Observer Ollama still not reachable at {config.observer_ollama_url} after "
+                    f"{int(timeout_s)}s. Check the ArcherObserverOllama service "
+                    r"(nssm status ArcherObserverOllama) and logs\ollama_observer.log. "
+                    "Scene analysis keeps retrying on its own."
+                )
+                return
+            time.sleep(2.0)
+
+        logger.info(f"Observer Ollama is up at {config.observer_ollama_url}.")
+        _warm_up_model(
+            "observer / moondream", config.observer_ollama_url, config.observer_model,
+            force_cpu=True,
+        )
+        if _ollama_reachable(config.ollama_base_url):
+            logger.info(f"Main Ollama is up at {config.ollama_base_url}.")
+        else:
+            logger.info(
+                f"Main Ollama not running yet at {config.ollama_base_url} -- normal before login "
+                "(the Ollama tray app starts it). The staleness pass retries on its own schedule."
+            )
+
+    threading.Thread(target=_run, daemon=True, name="archer-observer-ollama-wait").start()

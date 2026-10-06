@@ -49,9 +49,30 @@ app.add_middleware(
 # Voice capture stays on this machine's own mic via the existing
 # AudioManager for the local case; only the later remote/LiveKit phase
 # needs audio to cross the network, since a remote device has its own mic.
+class _NoCacheStaticFiles(StaticFiles):
+    """Plain StaticFiles lets browsers cache JS/CSS aggressively with no
+    freshness check at all, since script/link tags reference plain,
+    unversioned URLs (/static/js/memory.js, etc.) with no cache-busting
+    query string or hash. That bit Col directly (2026-09-19): a real,
+    verified-correct fix to memory.js kept showing the OLD removed
+    "Unrecognized People" pane, because the browser never even asked the
+    server if the file had changed. Forcing Cache-Control: no-cache (not
+    no-store) doesn't disable caching -- it makes the browser always
+    revalidate via a conditional GET (If-Modified-Since/ETag, which
+    Starlette already sends), so an unchanged file is still served from
+    cache on a 304 and nothing gets slower, but a changed file is always
+    picked up on the next normal reload instead of requiring a hard
+    refresh."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 if _WEB_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(_WEB_DIR)), name="static")
+    app.mount("/static", _NoCacheStaticFiles(directory=str(_WEB_DIR)), name="static")
 
     @app.get("/app")
     async def serve_web_client():
@@ -118,6 +139,26 @@ def set_observer(observer: Any):
     """Inject the running ObserverPipeline instance, if any."""
     global _observer
     _observer = observer
+
+
+def _reacquire_camera_with_retry(attempts: int = 4, delay_s: float = 1.0) -> bool:
+    """Take the webcam back after the Gesture tab hands it to barehands
+    (2026-10-06). The browser frees the device asynchronously as barehands'
+    iframe unloads, so the first open attempt can land while it's still
+    busy -- retry briefly rather than failing on the first try. Blocking;
+    call via asyncio.to_thread."""
+    for attempt in range(1, attempts + 1):
+        if _observer is None or not _observer.is_camera_released:
+            return True
+        if _observer.reacquire_camera():
+            return True
+        if attempt < attempts:
+            _time.sleep(delay_s)
+    logger.warning(
+        f"Couldn't reopen the webcam after {attempts} attempts -- something else may "
+        "still be holding it. Click CAMERA to try again."
+    )
+    return False
 
 
 @app.get("/camera_stream")
@@ -362,12 +403,13 @@ def _register_event_bridge() -> None:
         "amplitude", value=e.data.get("amplitude", 0.0)))
     bus.subscribe(EventType.MODE_CHANGED, lambda e: _on_bus_event(
         "mode", mode=e.data.get("new_mode", "unknown")))
-    bus.subscribe(EventType.TTS_MODE_CHANGED, lambda e: _on_bus_event(
-        "tts_mode", mode=e.data.get("new_mode", "unknown")))
     bus.subscribe(EventType.SYSTEM_START, lambda e: _on_bus_event("system_start"))
     bus.subscribe(EventType.UI_SWITCH_TAB, lambda e: _on_bus_event(
         "switch_tab", tab=e.data.get("tab", "")))
     bus.subscribe(EventType.TASKS_CHANGED, lambda e: _broadcast_tasks_snapshot())
+    bus.subscribe(EventType.ARTIFACT_PUSH, lambda e: _on_bus_event(
+        "artifact_push", image_b64=e.data.get("image_b64", ""),
+        kind=e.data.get("kind", ""), title=e.data.get("title", "")))
     bus.subscribe_halt(lambda e: _on_bus_event("halt"))
 
 
@@ -485,7 +527,6 @@ async def ws_voice(websocket: WebSocket):
         await _ws_send_safe(websocket, json.dumps({
             "type": "hello",
             "mode": get_toggle_service().mode,
-            "tts_mode": get_toggle_service().tts_mode,
             "mic_muted": am.is_mic_muted(),
             "tts_muted": am.is_tts_muted,
             "camera_released": bool(_observer and _observer.is_camera_released),
@@ -530,15 +571,6 @@ async def ws_voice(websocket: WebSocket):
                 # connected client (including this one) as {"type": "mode"}.
                 new_mode = get_toggle_service().toggle()
                 logger.info(f"Mode toggled to {new_mode} (via web client)")
-            elif msg_type == "tts_mode_toggle":
-                # Independent of mode_toggle above (2026-09-16) -- switches
-                # which voice ENGINE speaks (ElevenLabs vs Kokoro) without
-                # touching which LLM/STT the conversation itself uses.
-                # ToggleService.tts_mode setter publishes TTS_MODE_CHANGED
-                # itself, which the bridge above broadcasts as {"type":
-                # "tts_mode"} to every connected client.
-                new_tts_mode = get_toggle_service().toggle_tts()
-                logger.info(f"TTS mode toggled to {new_tts_mode} (via web client)")
             elif msg_type == "mic_mute_toggle":
                 from archer.voice import get_audio_manager
                 am = get_audio_manager()
@@ -573,11 +605,29 @@ async def ws_voice(websocket: WebSocket):
                 if _observer is None:
                     logger.warning("camera_release_toggle received but no observer is running.")
                 elif _observer.is_camera_released:
-                    _observer.reacquire_camera()
-                    _broadcast_ws({"type": "observer_camera", "released": False})
+                    await asyncio.to_thread(_reacquire_camera_with_retry)
+                    _broadcast_ws({"type": "observer_camera", "released": bool(_observer.is_camera_released)})
                 else:
-                    _observer.release_camera()
+                    await asyncio.to_thread(_observer.release_camera)
                     _broadcast_ws({"type": "observer_camera", "released": True})
+            elif msg_type == "camera_release":
+                # Explicit, idempotent release (2026-10-06) -- the Gesture
+                # tab sends this on entry so barehands can open the webcam
+                # without a "device in use" error. Unlike the toggle above,
+                # sending it twice can't accidentally flip the camera back.
+                if _observer is None:
+                    logger.warning("camera_release received but no observer is running.")
+                else:
+                    await asyncio.to_thread(_observer.release_camera)
+                    _broadcast_ws({"type": "observer_camera", "released": True})
+            elif msg_type == "camera_reacquire":
+                # Counterpart to camera_release, sent when leaving the
+                # Gesture tab -- only if that tab did the releasing.
+                if _observer is None:
+                    logger.warning("camera_reacquire received but no observer is running.")
+                else:
+                    await asyncio.to_thread(_reacquire_camera_with_retry)
+                    _broadcast_ws({"type": "observer_camera", "released": bool(_observer.is_camera_released)})
             elif msg_type == "memory_get_all":
                 # MEMORY tab initial load / manual refresh -- one bulk
                 # payload rather than four round trips (2026-09-16).
@@ -637,8 +687,10 @@ async def ws_voice(websocket: WebSocket):
                         int(confirmation_id), status="confirmed", confirmed_name=name
                     )
                     if row and row.get("embedding"):
-                        store.add_known_person(name=name, embedding=row["embedding"])
-                        logger.info(f"Enrolled '{name}' from browser MEMORY tab confirmation.")
+                        # add_person_face (2026-10-06): adds a reference if the
+                        # name is already enrolled instead of overwriting it.
+                        how = store.add_person_face(name=name, embedding=row["embedding"], source="confirmation")
+                        logger.info(f"Named '{name}' from browser confirmation ({how}).")
                     _broadcast_ws(_build_memory_snapshot())
             elif msg_type == "memory_dismiss_person":
                 # A one-off stranger (delivery driver, etc.) Col doesn't

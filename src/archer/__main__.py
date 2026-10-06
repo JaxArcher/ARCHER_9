@@ -83,8 +83,14 @@ class _FlushingFileSink:
             pass
 
 
-def setup_logging() -> None:
-    """Configure loguru for ARCHER."""
+def setup_logging(log_basename: str = "archer") -> None:
+    """Configure loguru for ARCHER.
+
+    log_basename (2026-10-06): the standalone observer service passes
+    "observer" so its dated file (logs/observer_YYYY-MM-DD.log) stays
+    separate from the desktop/browser app's logs/archer_YYYY-MM-DD.log, now
+    that both processes run from the project root and share logs/.
+    """
     config = get_config()
 
     # Remove default handler
@@ -114,7 +120,7 @@ def setup_logging() -> None:
     # flushing to disk in practice, which broke both `tail`-ing the log
     # and the GUI's live Console tab).
     import datetime as _datetime
-    log_file_path = config.log_dir / f"archer_{_datetime.date.today():%Y-%m-%d}.log"
+    log_file_path = config.log_dir / f"{log_basename}_{_datetime.date.today():%Y-%m-%d}.log"
     logger.add(
         _FlushingFileSink(log_file_path),
         level="DEBUG",
@@ -179,11 +185,6 @@ def main() -> None:
         logger.warning(
             "No ANTHROPIC_API_KEY set. Cloud mode won't work without it. "
             "Set it in .env or switch to local mode."
-        )
-
-    if not config.elevenlabs_api_key and config.default_mode == "cloud":
-        logger.warning(
-            "No ELEVENLABS_API_KEY set. Cloud TTS/STT won't work without it."
         )
 
     # Auto-start both Ollama instances (main + observer/moondream) if

@@ -112,7 +112,12 @@ class UniversalToolExecutor:
             result = self._pc_controller.browser_screenshot()
             if result:
                 return {'result': 'Browser screenshot captured', 'image': result}
-            return {'error': 'No active browser page'}
+            # Was hard-coded to "No active browser page" even when a page
+            # genuinely was open (2026-09-19 finding: the real cause was a
+            # Playwright thread-affinity crash inside browser_screenshot()
+            # itself, now fixed -- see pc_control.py's _pw_executor). Keeping
+            # this message honest about there being two real possibilities.
+            return {'error': 'No active browser page, or the screenshot capture failed -- see ARCHER logs'}
         
         elif tool_name == 'close_browser':
             self._pc_controller.close_browser()

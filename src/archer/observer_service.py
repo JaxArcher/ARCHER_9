@@ -58,7 +58,19 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 from dotenv import load_dotenv
 from loguru import logger
 
-_env_path = Path(__file__).resolve().parents[2] / ".env"
+# Run from the project root (D:\ARCHER_9), same as the desktop/browser app
+# (Launch-ARCHER.ps1 does Set-Location to it). Every relative path in
+# ARCHER's config -- data/archer.db, logs/, data/snapshots/ -- resolves
+# against the current working directory. 2026-10-06 finding: the service
+# had been registered with AppDirectory = src\, which silently gave it its
+# own separate database (src\data\archer.db): nothing it observed reached
+# ARCHER, and it never saw Col's face enrollment, so every sighting was an
+# "unknown" person. chdir here as well as in the NSSM registration so a
+# stale service registration can't reintroduce the split.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+os.chdir(_PROJECT_ROOT)
+
+_env_path = _PROJECT_ROOT / ".env"
 load_dotenv(_env_path, override=True)
 
 from archer.__main__ import setup_logging  # reuses the exact same logging setup
@@ -66,19 +78,25 @@ from archer.config import get_config
 
 
 def main() -> None:
-    setup_logging()
+    setup_logging(log_basename="observer")
     logger.info("=" * 60)
     logger.info("  ARCHER Observer Service — standalone, always-on")
     logger.info("=" * 60)
 
     config = get_config()
 
-    # Auto-start both Ollama instances if not already running -- this
-    # service specifically needs the observer instance (moondream) for
-    # scene analysis and staleness reasoning; starting the main instance
-    # too is harmless (helps whichever front-end process connects later).
-    from archer.integrations.ollama_bootstrap import start_ollama_instances
-    start_ollama_instances()
+    # The observer's own Ollama (moondream, CPU-only, port 11435) is a
+    # separate Windows service, ArcherObserverOllama, that this service
+    # depends on -- Windows starts it first (scripts/
+    # install_observer_service.ps1). As of 2026-10-06 this process no longer
+    # tries to launch Ollama itself: running as the SYSTEM account it can't
+    # find Col's per-user Ollama install or his models folder, and a main
+    # (GPU) instance spawned from here would fight the Ollama tray app for
+    # port 11434 at login. It just waits for the observer instance and
+    # reports on the main one, which only the staleness pass uses (and that
+    # pass retries on its own schedule).
+    from archer.integrations.ollama_bootstrap import wait_for_observer_ollama
+    wait_for_observer_ollama()
 
     logger.info("Initializing memory store...")
     from archer.memory.sqlite_store import get_sqlite_store
@@ -130,12 +148,19 @@ def main() -> None:
     # wire-up.
     from archer.observer.reolink_listener import ReolinkSmartDetector
     reolink = ReolinkSmartDetector(on_person_detected=pipeline.notify_motion)
+    # Wired in (2026-09-19) so pipeline._analysis_loop can tell "URL
+    # configured" apart from "ONVIF listener actually connected" and fall
+    # back to flat-interval polling if it never does, instead of staying
+    # motion-gated on a signal that will never arrive -- see
+    # _has_working_motion_source's docstring for the incident this fixes
+    # (zero ambient observations logged since 2026-09-16).
+    pipeline.set_reolink_detector(reolink)
     reolink_started = reolink.start()
     if not reolink_started:
         logger.warning(
-            "Reolink ONVIF listener did not start (no network_camera_url, "
-            "or the camera/library is unavailable) — the observer will "
-            "fall back to flat-interval analysis with no motion gating."
+            "Reolink ONVIF listener did not start (no network_camera_url) "
+            "— the observer will fall back to flat-interval analysis with "
+            "no motion gating."
         )
 
     # Staleness/neglect reasoning — separate cadence, independent of

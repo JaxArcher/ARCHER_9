@@ -1,9 +1,9 @@
 """
 ARCHER Text-to-Speech (TTS).
 
-Supports two backends:
-- Cloud: ElevenLabs streaming TTS (low latency)
-- Local: Chatterbox via Docker container (GPU-accelerated)
+Local only (2026-10-06: ElevenLabs removed -- Col has no cloud TTS/STT subscription):
+- Kokoro-82M neural TTS (GPU), with Chatterbox (Docker, port 5500) as its
+  HTTP fallback.
 
 Sentence-level streaming: pipe first sentence to TTS before the full
 LLM response is complete. Do not wait for the full response.
@@ -27,7 +27,6 @@ from loguru import logger
 
 from archer.config import get_config
 from archer.core.event_bus import Event, EventType, get_event_bus
-from archer.core.toggle import get_toggle_service
 
 
 class TTSBackend(ABC):
@@ -80,52 +79,6 @@ def sanitize_text_for_tts(text: str) -> str:
         t = t.replace(smart, plain)
     t = re.sub(r'\s+', ' ', t).strip()
     return t
-
-
-class CloudTTS(TTSBackend):
-    """ElevenLabs cloud TTS backend with streaming support."""
-
-    def __init__(self) -> None:
-        self._config = get_config()
-        self._client = None
-
-    def _get_client(self):
-        if self._client is None:
-            from elevenlabs import ElevenLabs
-            self._client = ElevenLabs(api_key=self._config.elevenlabs_api_key)
-        return self._client
-
-    def synthesize(self, text: str) -> tuple[bytes, int]:
-        """Synthesize text using ElevenLabs streaming TTS."""
-        text = sanitize_text_for_tts(text)
-        if not text:
-            return b"", 24000
-        try:
-            client = self._get_client()
-
-            # Use streaming for low latency
-            audio_generator = client.text_to_speech.convert(
-                voice_id=self._config.elevenlabs_voice_id,
-                text=text,
-                model_id="eleven_turbo_v2_5",
-                output_format="pcm_24000",
-            )
-
-            # Collect all audio chunks
-            audio_chunks = []
-            for chunk in audio_generator:
-                if isinstance(chunk, bytes):
-                    audio_chunks.append(chunk)
-
-            audio_bytes = b"".join(audio_chunks)
-            return audio_bytes, 24000
-
-        except Exception as e:
-            logger.error(f"Cloud TTS error: {e}")
-            raise
-
-    def is_available(self) -> bool:
-        return bool(self._config.elevenlabs_api_key)
 
 
 class LocalTTS(TTSBackend):
@@ -262,17 +215,15 @@ WAKE_ACK_PHRASES = [
 
 class TTSService:
     """
-    Text-to-speech service with cloud/local toggle, auto-fallback,
-    and conversational filler support.
+    Text-to-speech service (local Kokoro, HTTP fallback) with
+    conversational filler support.
 
     Supports sentence-level streaming: each sentence is synthesized
     as soon as it's available from the LLM, not waiting for the full response.
     """
 
     def __init__(self) -> None:
-        self._cloud = CloudTTS()
         self._local = LocalTTS()
-        self._toggle = get_toggle_service()
         self._bus = get_event_bus()
         self._config = get_config()
         self._cancelled = threading.Event()
@@ -300,24 +251,7 @@ class TTSService:
             data={"text": text},
         ))
 
-        if self._toggle.is_cloud_tts and self._cloud.is_available():
-            try:
-                audio_bytes, sample_rate = self._cloud.synthesize(text)
-                elapsed = (time.monotonic() - start_time) * 1000
-                logger.info(f"TTS (cloud) completed in {elapsed:.0f}ms")
-
-                self._bus.publish(Event(
-                    type=EventType.TTS_END,
-                    source="tts",
-                    data={"backend": "cloud", "latency_ms": elapsed},
-                ))
-                return audio_bytes, sample_rate
-
-            except Exception as e:
-                logger.warning(f"Cloud TTS failed, falling back to local: {e}")
-                self._toggle.fallback_tts_to_local(reason=f"tts_error: {e}")
-
-        # Local fallback
+        # Local only (2026-10-06: ElevenLabs removed -- Col has no cloud TTS/STT subscription)
         try:
             audio_bytes, sample_rate = self._local.synthesize(text)
             elapsed = (time.monotonic() - start_time) * 1000

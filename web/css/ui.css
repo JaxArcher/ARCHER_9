@@ -703,6 +703,15 @@ html, body {
 #archer-transcript .line-user { color: #c9f6ff; }
 #archer-transcript .line-assistant { color: #86f7df; }
 
+#archer-transcript .line-artifact { margin: 4px 0 10px; }
+#archer-transcript .artifact-label { margin: 0 0 4px; font-size: 13px; opacity: 0.8; }
+#archer-transcript .artifact-image {
+  max-width: 100%;
+  border-radius: 6px;
+  border: 1px solid rgba(151, 229, 244, 0.25);
+  display: block;
+}
+
 #archer-text-form {
   width: 100%;
   display: flex;

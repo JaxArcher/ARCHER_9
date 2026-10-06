@@ -140,7 +140,6 @@ doesn't require starting it by hand in a separate window.
 | `halt`                | —                                | HALT triggered                                                           |
 | `mic_mute`            | `muted`                         | Mic mute state changed                                                   |
 | `tts_mute`            | `muted`                         | TTS output mute state changed                                            |
-| `tts_mode`            | `mode`                          | Voice engine: `"cloud"` (ElevenLabs) \| `"local"` (Kokoro)               |
 | `observer_camera`     | `released`                      | Webcam released/reacquired (e.g. for another app to use it)              |
 | `enroll_progress`     | `name`                          | Face enrollment in progress                                              |
 | `enroll_result`       | `success`, `name`, `error`      | Face enrollment finished                                                 |
@@ -150,7 +149,7 @@ doesn't require starting it by hand in a separate window.
 | `tasks_snapshot`      | `tasks`, `habits`               | Bulk tasks/habits payload                                                |
 | `system_snapshot`     | `gpu`, `cpu`, `tokens_per_sec`, `ollama_loaded`, `available_models`, `current_model`, `mic_devices`, `speaker_devices`, `current_mic_index`, `current_speaker_index` | GPU/VRAM/temp, CPU%, tokens/sec, ollama-ps-equivalent, and device lists for the controls bar + System card |
 | `browser_screenshot`  | `image_b64`, `active`           | Mirror of ARCHER's own Playwright browser, when a session is open        |
-| `hello`               | `mode`, `tts_mode`, `mic_muted`, `tts_muted`, `camera_released`, `camera_available` | Sent on connect — initial toolbar state                    |
+| `hello`               | `mode`, `mic_muted`, `tts_muted`, `camera_released`, `camera_available` | Sent on connect — initial toolbar state                    |
 | `system_start`        | —                                | Session (re)started                                                      |
 
 ## Messages (browser → server)
@@ -161,8 +160,9 @@ doesn't require starting it by hand in a separate window.
 {"type": "mode_toggle"}
 {"type": "mic_mute_toggle"}
 {"type": "tts_mute_toggle"}
-{"type": "tts_mode_toggle"}
 {"type": "camera_release_toggle"}
+{"type": "camera_release"}
+{"type": "camera_reacquire"}
 {"type": "enroll_face", "name": "Col"}
 {"type": "memory_get_all"}
 {"type": "memory_confirm_person", "id": 1, "name": "Sarah"}

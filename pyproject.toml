@@ -31,7 +31,6 @@ dependencies = [
     "openwakeword==0.6.0",
     "webrtcvad==2.0.10",
     "faster-whisper==1.1.0",
-    "elevenlabs==2.35.0",
     "sounddevice==0.5.1",
     "soundfile==0.13.1",
     "numpy==1.26.4",

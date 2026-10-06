@@ -153,6 +153,12 @@ class PersonIdentifier:
                 return []
 
             known_persons = store.get_known_persons()
+            # Plus every extra per-view reference (2026-10-06) -- one person
+            # can have several, e.g. Col from the webcam and from the Reolink.
+            try:
+                known_persons = known_persons + store.get_known_person_references()
+            except Exception as e:
+                logger.debug(f"Known-person references unavailable (non-fatal): {e}")
             known_embeddings: List[Tuple[str, np.ndarray]] = []
             for kp in known_persons:
                 if kp.get("embedding"):
