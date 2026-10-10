@@ -118,19 +118,6 @@ def main() -> None:
     from archer.agents.blindspot_agent import BlindspotAgent
     blindspot = BlindspotAgent(handle_utterances=False)
 
-    camera_ok = pipeline.start()
-    if not camera_ok:
-        logger.warning(
-            "Observer camera unavailable at startup — the pipeline stays "
-            "running and will pick up frames once one becomes available."
-        )
-
-    # This service's whole point is running independent of any UI session,
-    # so there's no "GUI visible/hidden" signal to switch cameras on the
-    # way __main__.py's desktop instance does. Go straight to the network
-    # (Reolink) camera if one's configured -- that's the always-reachable
-    # source this service is built around; fall back to the local device
-    # only if no network camera is configured at all.
     if config.network_camera_url:
         pipeline.switch_to_network_cam()
         logger.info("Using network (Reolink) camera as the primary source.")
@@ -139,6 +126,13 @@ def main() -> None:
             "No network_camera_url configured — staying on the local "
             "webcam. Motion-gating needs a Reolink camera; without one, "
             "this falls back to flat-interval polling (see pipeline.py)."
+        )
+
+    camera_ok = pipeline.start()
+    if not camera_ok:
+        logger.warning(
+            "Observer camera unavailable at startup — the pipeline stays "
+            "running and will pick up frames once one becomes available."
         )
 
     # Reolink ONVIF motion/person-detection listener — this is the actual

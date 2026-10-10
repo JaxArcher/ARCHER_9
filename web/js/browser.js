@@ -31,10 +31,6 @@
   const panel = document.getElementById("tab-browser");
   if (!panel) return;
 
-  const placeholder = document.createComment("browser-mirror-slot");
-  panel.parentNode.insertBefore(placeholder, panel);
-  const archerRoot = document.getElementById("archer-root");
-
   panel.innerHTML = `
     <h3>Browser (mirror)</h3>
     <p class="archer-memory-hint">Live view of the browser ARCHER's own tools are driving. Read-only for now -- click/type in the actual Chrome window, not here.</p>
@@ -47,7 +43,6 @@
   const img = document.getElementById("archer-browser-mirror-img");
   const emptyMsg = document.getElementById("archer-browser-mirror-empty");
 
-  let isPrimary = false;
   function render({ imageB64, active }) {
     if (active && imageB64) {
       img.src = "data:image/png;base64," + imageB64;
@@ -56,20 +51,6 @@
     } else {
       img.style.display = "none";
       emptyMsg.style.display = "block";
-    }
-
-    if (active && !isPrimary) {
-      isPrimary = true;
-      panel.classList.add("archer-browser-primary");
-      if (archerRoot) {
-        archerRoot.appendChild(panel);
-        archerRoot.classList.add("archer-browser-active");
-      }
-    } else if (!active && isPrimary) {
-      isPrimary = false;
-      panel.classList.remove("archer-browser-primary");
-      if (archerRoot) archerRoot.classList.remove("archer-browser-active");
-      placeholder.parentNode.insertBefore(panel, placeholder);
     }
   }
 
@@ -97,15 +78,20 @@
     }
   }
 
-  const dashboardBtn = document.querySelector('#archer-tabs .tab-btn[data-tab="dashboard"]');
-  const gestureBtn = document.querySelector('#archer-tabs .tab-btn[data-tab="gesture"]');
-  if (dashboardBtn) dashboardBtn.addEventListener("click", startPolling);
-  if (gestureBtn) gestureBtn.addEventListener("click", stopPolling);
+  // Phase 1 Redesign (2026-10-06): Poll browser screenshots strictly while ARTIFACTS tab is active.
+  window.addEventListener("archer-tab-changed", (evt) => {
+    const active = evt.detail && evt.detail.activeTab;
+    if (active === "artifacts") startPolling();
+    else stopPolling();
+  });
+
   if (window.ArcherClient) {
-    window.ArcherClient.on("switchTab", (tabName) => {
-      if (LIVE_TAB_NAMES.has(tabName)) startPolling();
-      else stopPolling();
+    window.ArcherClient.on("connected", () => {
+      if (window.ArcherTabs && window.ArcherTabs.getActiveTab() === "artifacts") {
+        startPolling();
+      }
     });
-    window.ArcherClient.on("connected", startPolling);
   }
 })();
+
+

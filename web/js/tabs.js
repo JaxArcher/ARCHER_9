@@ -13,28 +13,40 @@
   const buttons = document.querySelectorAll("#archer-tabs .tab-btn");
   const panels = document.querySelectorAll("#archer-tab-content .tab-panel");
 
-  // Consolidated 2026-09-16: voice/logs/memory/tasks/system all merged
-  // into one Dashboard tab (see index.html's comment). Old names still
-  // resolve here rather than failing silently -- covers a stale
-  // switch_tab tool call, a saved voice-command habit ("switch to the
-  // memory tab"), or anything else still using a pre-merge name.
+  // Phase 1 Redesign (2026-10-06): 6 workspace tabs (FILES, ARTIFACTS, TOOLS,
+  // AWAY & TASKS, SYSTEM, LOGS). Legacy names resolve to their new home:
+  // gesture -> files; dashboard/voice -> artifacts; memory/tasks -> away_tasks;
+  // logs -> logs; system -> system; tools -> tools.
   const ALIASES = {
-    voice: "dashboard",
-    logs: "dashboard",
-    memory: "dashboard",
-    tasks: "dashboard",
-    system: "dashboard",
+    gesture: "files",
+    dashboard: "artifacts",
+    voice: "artifacts",
+    memory: "away_tasks",
+    tasks: "away_tasks",
+    "away & tasks": "away_tasks",
+    "away_tasks": "away_tasks",
+    logs: "logs",
+    system: "system",
+    tools: "tools",
+    files: "files",
+    artifacts: "artifacts",
   };
 
+  let activeTabName = "";
+
   function activate(name) {
+    name = (name || "").toLowerCase().trim();
     name = ALIASES[name] || name;
     const known = Array.from(buttons).some((b) => b.dataset.tab === name);
     if (!known) {
       console.warn(`[archer] switch_tab: unknown tab "${name}" — ignoring.`);
       return;
     }
+    activeTabName = name;
     buttons.forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
     panels.forEach((p) => p.classList.toggle("active", p.id === `tab-${name}`));
+
+    window.dispatchEvent(new CustomEvent("archer-tab-changed", { detail: { activeTab: name } }));
   }
 
   buttons.forEach((b) => b.addEventListener("click", () => activate(b.dataset.tab)));
@@ -43,8 +55,14 @@
   // the same tab-switching logic as a manual click: the switch_tab agent
   // tool -> UI_SWITCH_TAB event -> server.py's "switch_tab" WS message ->
   // app.js's "switchTab" event -> here. See CONTRACT.md.
-  window.ArcherTabs = { activate };
+  window.ArcherTabs = { activate, getActiveTab: () => activeTabName };
   if (window.ArcherClient) {
     window.ArcherClient.on("switchTab", (tabName) => activate(tabName));
   }
+
+  // Trigger initial tab activation on page load (default: artifacts per Q-07)
+  const initialActive = Array.from(buttons).find((b) => b.classList.contains("active"));
+  const initialTabName = initialActive ? initialActive.dataset.tab : "artifacts";
+  setTimeout(() => activate(initialTabName), 50);
 })();
+

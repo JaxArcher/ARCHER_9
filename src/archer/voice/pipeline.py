@@ -653,7 +653,10 @@ class VoicePipeline:
                 # empty STT result — resume listening within the window
                 # rather than acting on it.
                 if self._is_self_echo(text, include_recent_response=False):
-                    logger.debug(f"STT result looks like self-echo, ignoring: '{text}'")
+                    # INFO, not DEBUG (2026-10-09): a discarded turn means
+                    # the user gets no reply at all, so it must be visible
+                    # in the console when it happens.
+                    logger.info(f"Ignoring STT result as possible self-echo (ARCHER hearing itself): '{text}'")
                     stt_was_empty.set()
                     worker_aborted.set()
                     return
@@ -870,8 +873,17 @@ class VoicePipeline:
         """
         from archer.voice.tts import FILLER_PHRASES, WAKE_ACK_PHRASES
 
+        def _seq(s: str) -> list[str]:
+            return re.findall(r"[a-z0-9']+", s.lower())
+
         def _words(s: str) -> set[str]:
-            return set(re.findall(r"[a-z0-9']+", s.lower()))
+            return set(_seq(s))
+
+        def _is_contiguous_run(needle: list[str], haystack: list[str]) -> bool:
+            n = len(needle)
+            if n == 0 or n > len(haystack):
+                return False
+            return any(haystack[i:i + n] == needle for i in range(len(haystack) - n + 1))
 
         snippet_words = _words(text)
         if not snippet_words:
@@ -880,14 +892,30 @@ class VoicePipeline:
         candidates = list(FILLER_PHRASES) + list(WAKE_ACK_PHRASES)
         if include_recent_response:
             candidates = [self._current_speaking_text, self._last_spoken_text] + candidates
+
+        # 2026-10-09: the old rule (60% of the transcribed words appear
+        # anywhere in a known phrase) threw away real questions. Confirmed
+        # live: "What do you see?" shares "what", "do", "you" with the
+        # wake-ack "Yes sir, what can I do for you?" (3 of 4 words), so it
+        # was silently discarded as ARCHER hearing itself and Col got no
+        # reply at all. Now it only counts as an echo if EITHER the words
+        # appear in the same order as a run inside a known phrase (how a
+        # trailing echo like "do for you" actually sounds), OR the overlap
+        # is high in both directions (most of the known phrase came back,
+        # e.g. a slightly garbled full echo). Both are strictly narrower
+        # than the old rule, so nothing new is discarded.
+        snippet_seq = _seq(text)
         for candidate in candidates:
             if not candidate:
                 continue
             candidate_words = _words(candidate)
             if not candidate_words:
                 continue
+            if _is_contiguous_run(snippet_seq, _seq(candidate)):
+                return True
             overlap = len(snippet_words & candidate_words)
-            if overlap / len(snippet_words) >= 0.6:
+            if (overlap / len(snippet_words) >= 0.6
+                    and overlap / len(candidate_words) >= 0.6):
                 return True
 
         return False

@@ -23,8 +23,6 @@ const ArcherClient = (() => {
     micMute: [],
     ttsMute: [],
     observerCamera: [],
-    enrollProgress: [],
-    enrollResult: [],
     switchTab: [],
     logLine: [],
     memorySnapshot: [],
@@ -32,6 +30,7 @@ const ArcherClient = (() => {
     systemSnapshot: [],
     browserScreenshot: [],
     hello: [],
+    cameraFrameRequest: [],
     connected: [],
     disconnected: [],
   };
@@ -101,11 +100,8 @@ const ArcherClient = (() => {
       case "observer_camera":
         emit("observerCamera", msg.released);
         break;
-      case "enroll_progress":
-        emit("enrollProgress", { name: msg.name });
-        break;
-      case "enroll_result":
-        emit("enrollResult", { success: msg.success, name: msg.name, error: msg.error });
+      case "camera_frame_request":
+        emit("cameraFrameRequest", { requestId: msg.request_id });
         break;
       case "switch_tab":
         emit("switchTab", msg.tab);
@@ -177,6 +173,9 @@ const ArcherClient = (() => {
   }
 
   function connect() {
+    if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
+      return;
+    }
     const url = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws/voice`;
     socket = new WebSocket(url);
 
@@ -195,8 +194,8 @@ const ArcherClient = (() => {
       reconnectDelayMs = Math.min(reconnectDelayMs * 1.5, MAX_RECONNECT_DELAY_MS);
     });
 
-    socket.addEventListener("error", () => {
-      socket.close();
+    socket.addEventListener("error", (err) => {
+      console.warn("[ArcherClient] WebSocket error:", err);
     });
   }
 
@@ -207,11 +206,21 @@ const ArcherClient = (() => {
   }
 
   return {
+    get readyState() {
+      return socket ? socket.readyState : -1;
+    },
     on(eventName, handler) {
       if (!listeners[eventName]) {
         throw new Error(`[ArcherClient] unknown event "${eventName}"`);
       }
       listeners[eventName].push(handler);
+      if (eventName === "connected" && socket && socket.readyState === WebSocket.OPEN) {
+        try {
+          handler();
+        } catch (err) {
+          console.error(`[ArcherClient] listener for "${eventName}" threw:`, err);
+        }
+      }
     },
     sendText(text) {
       send({ type: "text_input", text });
@@ -228,19 +237,11 @@ const ArcherClient = (() => {
     sendTtsMuteToggle() {
       send({ type: "tts_mute_toggle" });
     },
-    sendCameraReleaseToggle() {
-      send({ type: "camera_release_toggle" });
+    sendCameraFrameResponse(requestId, imageB64) {
+      send({ type: "camera_frame_response", request_id: requestId, image_b64: imageB64 });
     },
-    // Explicit (non-toggle) versions used by the Gesture tab's automatic
-    // camera handoff (2026-10-06) -- see barehands.js.
-    sendCameraRelease() {
-      send({ type: "camera_release" });
-    },
-    sendCameraReacquire() {
-      send({ type: "camera_reacquire" });
-    },
-    sendEnrollFace(name) {
-      send({ type: "enroll_face", name: name || "Col" });
+    sendRequestCameraFrame() {
+      send({ type: "request_camera_frame" });
     },
     sendMemoryGetAll() {
       send({ type: "memory_get_all" });

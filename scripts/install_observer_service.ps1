@@ -10,6 +10,13 @@
 #      per-user Ollama install or his models folder -- so it never came up
 #      at boot, and scene analysis only worked after ARCHER was opened by
 #      hand.
+#      It runs its OWN copy of Ollama in D:\archer_swarm\ollama_observer
+#      (2026-10-08), refreshed from the main install each time this script
+#      runs. It used to run the same ollama.exe as the Ollama tray app; on
+#      2026-10-07 the tray app's auto-update couldn't replace that file
+#      while this service had it open, rolled back, and left the main
+#      install without its GPU files, so gemma4 fell back to CPU. With its
+#      own copy, Ollama updates can't collide with this service again.
 #   2. ArcherObserver -- `python -m archer.observer_service`, run from the
 #      project root (D:\ARCHER_9) so it shares ARCHER's database, logs and
 #      face snapshots. Set to depend on ArcherObserverOllama, so Windows
@@ -41,6 +48,7 @@ $OllamaServiceName  = "ArcherObserverOllama"
 $ObserverOllamaHost = "127.0.0.1:11435"
 $ObserverPort       = 11435
 $ObserverModel      = "moondream"
+$ObserverOllamaDir  = "D:\archer_swarm\ollama_observer"
 
 function Stop-WithError([string]$Message) {
     Write-Host ""
@@ -74,6 +82,24 @@ function Invoke-NssmChecked {
     if ($code -ne 0) {
         throw "nssm $($args -join ' ') failed (exit code $code)."
     }
+}
+
+# Starts a service and waits for Windows to report it running. "nssm start"
+# gives up (exit code 1) if the service is still starting when it checks --
+# seen 2026-10-08 with the observer's Ollama, which was actually up seconds
+# later -- so its exit code alone isn't trusted here.
+function Start-ServiceAndWait([string]$Name, [int]$TimeoutSec = 60) {
+    $null = Invoke-Nssm start $Name
+    for ($i = 0; $i -lt $TimeoutSec; $i++) {
+        $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -eq "Running") {
+            Write-Host "  '$Name' is running."
+            return
+        }
+        Start-Sleep -Seconds 1
+    }
+    $state = if ($svc) { $svc.Status } else { "missing" }
+    throw "'$Name' didn't reach Running within $TimeoutSec seconds (state: $state). Check the logs in $LogDir."
 }
 
 function Remove-ServiceIfPresent([string]$Name) {
@@ -151,15 +177,42 @@ if ($listener) {
     }
 }
 
+# ------------------------------ give the observer its own copy of Ollama
+# See the header: the service must not run the tray app's ollama.exe, or
+# the tray app's auto-update fails and can break the main install. GPU
+# folders are left out of the copy -- this server is CPU-only by design.
+$SourceDir = Split-Path $OllamaExe -Parent
+Write-Host ""
+Write-Host "Copying Ollama (CPU files only) for the observer..."
+Write-Host "  From: $SourceDir"
+Write-Host "  To:   $ObserverOllamaDir"
+$prev = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    & robocopy $SourceDir $ObserverOllamaDir /MIR /XD "cuda*" "rocm*" "vulkan*" /XF "ollama app.exe" "unins000.*" /R:2 /W:2 /NFL /NDL /NJH /NJS /NP | Out-Null
+    $rc = $LASTEXITCODE
+}
+finally {
+    $ErrorActionPreference = $prev
+}
+# robocopy: 0-7 mean success (with or without changes), 8 and up mean failure.
+if ($rc -ge 8) {
+    Stop-WithError "Copying Ollama to $ObserverOllamaDir failed (robocopy exit code $rc)."
+}
+$ObserverOllamaExe = Join-Path $ObserverOllamaDir "ollama.exe"
+if (-not (Test-Path $ObserverOllamaExe)) {
+    Stop-WithError "The copy finished but $ObserverOllamaExe is missing."
+}
+
 # ------------------------------------------- 1. CPU-only observer Ollama
 Write-Host ""
 Write-Host "Installing '$OllamaServiceName' (CPU-only Ollama for the observer)..."
-Write-Host "  Ollama:  $OllamaExe"
+Write-Host "  Ollama:  $ObserverOllamaExe (copy of $OllamaExe)"
 Write-Host "  Models:  $ModelsDir"
 Write-Host "  Address: $ObserverOllamaHost"
 
-Invoke-NssmChecked install $OllamaServiceName $OllamaExe serve
-Invoke-NssmChecked set $OllamaServiceName AppDirectory (Split-Path $OllamaExe -Parent)
+Invoke-NssmChecked install $OllamaServiceName $ObserverOllamaExe serve
+Invoke-NssmChecked set $OllamaServiceName AppDirectory $ObserverOllamaDir
 # CPU only, by construction: hide both CUDA and Vulkan devices from this
 # server (with CUDA hidden alone, Ollama still discovered the RTX 5080
 # through Vulkan). The per-request num_gpu: 0 in analyzers.py stays as a
@@ -176,7 +229,7 @@ Invoke-NssmChecked set $OllamaServiceName DisplayName "ARCHER Observer Ollama (C
 Invoke-NssmChecked set $OllamaServiceName Description "CPU-only Ollama on 127.0.0.1:11435 serving the ARCHER observer's vision model (moondream). Starts at boot, before ArcherObserver."
 
 Write-Host "Starting '$OllamaServiceName'..."
-Invoke-NssmChecked start $OllamaServiceName
+Start-ServiceAndWait $OllamaServiceName
 
 $ollamaUp = $false
 for ($i = 0; $i -lt 30; $i++) {
@@ -248,7 +301,7 @@ Invoke-NssmChecked set $ServiceName Description "Always-on ambient observation f
 Invoke-NssmChecked set $ServiceName AppEnvironmentExtra "FOR_DISABLE_CONSOLE_CTRL_HANDLER=1"
 
 Write-Host "Starting '$ServiceName'..."
-Invoke-NssmChecked start $ServiceName
+Start-ServiceAndWait $ServiceName
 
 Write-Host ""
 Write-Host "Done. Both services now start automatically at boot, Ollama first."

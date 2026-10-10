@@ -133,10 +133,11 @@ def main() -> None:
         observer = ObserverPipeline(
             analysis_interval=config.observer_analysis_frequency,
             run_analysis=False,
+            open_camera=False,
         )
         observer.start()
         InterventionEngine(speak_callback=lambda agent, text: pipeline._call_agent_with_filler(text))
-        logger.info("Observer camera + intervention engine initialized (analysis runs in the separate observer service).")
+        logger.info("Observer intervention engine initialized in web mode (browser owns webcam).")
     except ImportError as e:
         logger.info(f"Observer dependencies not available ({e}). Camera pane + proactive interventions disabled.")
     except Exception as e:

@@ -9,21 +9,9 @@
  * server isn't running on its configured port, the Gesture tab just
  * shows a short explanation instead of an iframe.
  *
- * Camera handoff (2026-10-06, Col: "Clicking the tab should automatically
- * switch camera utility so the error doesn't appear"). Windows only lets
- * one process hold a webcam at a time, and ARCHER's own server keeps it
- * open for the Dashboard's live camera pane — so barehands' getUserMedia
- * failed with "device in use" unless the CAMERA button was clicked first.
- * Now:
- *   - entering Gesture releases ARCHER's webcam (camera_release), waits
- *     for the server to confirm, then mounts barehands;
- *   - leaving Gesture unmounts barehands (unloading the iframe is what
- *     makes the browser let go of the device) and hands the webcam back
- *     (camera_reacquire — the server retries briefly while the browser
- *     finishes closing it).
- * If you released the camera yourself with the CAMERA button, leaving
- * Gesture leaves it released: only an automatic release is automatically
- * undone.
+ * Camera ownership (Phase 2): Chrome shares the camera stream via
+ * getUserMedia between the main ARCHER page and barehands' iframe. No
+ * server camera release or reacquire handoff is needed or performed.
  *
  * barehands is mounted fresh each time the tab opens, never while hidden.
  * That also keeps the 2026-09-16 sizing fix: stage.html sizes its ring
@@ -39,7 +27,7 @@
   // ARCHER's own navy.
   const stageUrl = `${location.protocol}//${location.hostname}:${BAREHANDS_PORT}/stage.html?camhide=1&bg=%2303121d`;
   const probeUrl = `${location.protocol}//${location.hostname}:${BAREHANDS_PORT}/config`;
-  const gestureTab = document.getElementById("tab-gesture");
+  const gestureTab = document.getElementById("tab-files") || document.getElementById("tab-gesture");
   const client = window.ArcherClient;
 
   // ARCHER's own webcam, as last reported by the server (hello on connect,
@@ -48,7 +36,7 @@
   let cameraReleased = false;
   let cameraWaiters = [];
 
-  let gestureActive = false; // the Gesture tab is the visible tab
+  let gestureActive = false; // the FILES/Gesture tab is the visible tab
   let autoReleased = false;  // this file released the webcam, so it gives it back
   let entrySeq = 0;          // bumped on every enter/leave so a slow entry can't finish after you've left
 
@@ -77,9 +65,6 @@
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 1500);
-      // no-cors: barehands' own server sets no CORS headers, and we only
-      // need to know a connection + response happened at all, never the
-      // body -- an opaque response still resolves the fetch promise.
       await fetch(probeUrl, { mode: "no-cors", signal: ctrl.signal });
       clearTimeout(timer);
       return true;
@@ -89,6 +74,7 @@
   }
 
   function showMessage(text) {
+    if (!gestureTab) return;
     gestureTab.innerHTML = "";
     const p = document.createElement("p");
     p.id = "archer-gesture-placeholder";
@@ -97,6 +83,7 @@
   }
 
   function mountBarehands() {
+    if (!gestureTab) return;
     gestureTab.innerHTML = "";
     const frame = document.createElement("iframe");
     frame.id = "archer-barehands-frame";
@@ -104,7 +91,7 @@
     frame.title = "barehands";
     frame.allow = "camera"; // required to delegate camera access into a cross-origin iframe
     gestureTab.appendChild(frame);
-    console.log("[archer] barehands mounted in the Gesture tab (:" + BAREHANDS_PORT + ").");
+    console.log("[archer] barehands mounted in the FILES tab (:" + BAREHANDS_PORT + ").");
   }
 
   function unmountBarehands() {
@@ -133,16 +120,6 @@
     }
     if (seq !== entrySeq) return; // left the tab while checking
 
-    if (client && cameraAvailable && !cameraReleased) {
-      showMessage("Handing the webcam over to barehands…");
-      autoReleased = true;
-      client.sendCameraRelease();
-      const confirmed = await waitForCamera(true, 8000);
-      if (seq !== entrySeq) return; // left the tab while waiting
-      if (!confirmed) {
-        console.warn("[archer] ARCHER didn't confirm releasing the webcam in time -- mounting barehands anyway.");
-      }
-    }
     mountBarehands();
   }
 
@@ -151,17 +128,11 @@
     gestureActive = false;
     entrySeq++;
     unmountBarehands();
-    if (client && autoReleased) {
-      autoReleased = false;
-      // A short head start for the browser to close the device after the
-      // iframe unloads; the server also retries if it's still busy.
-      setTimeout(() => client.sendCameraReacquire(), 600);
-    }
   }
 
-  const gestureBtn = document.querySelector('#archer-tabs .tab-btn[data-tab="gesture"]');
-  const otherTabBtns = document.querySelectorAll('#archer-tabs .tab-btn:not([data-tab="gesture"])');
-  if (gestureBtn) gestureBtn.addEventListener("click", enterGesture);
+  const filesBtn = document.querySelector('#archer-tabs .tab-btn[data-tab="files"]') || document.querySelector('#archer-tabs .tab-btn[data-tab="gesture"]');
+  const otherTabBtns = document.querySelectorAll('#archer-tabs .tab-btn:not([data-tab="files"]):not([data-tab="gesture"])');
+  if (filesBtn) filesBtn.addEventListener("click", enterGesture);
   otherTabBtns.forEach((b) => b.addEventListener("click", leaveGesture));
 
   if (client) {
@@ -170,12 +141,11 @@
       setCameraState(released);
     });
     client.on("observerCamera", setCameraState);
-    // Switching by voice/text command ("switch to the gesture tab" -> the
-    // switch_tab tool -> this event -- see CONTRACT.md) gets the same
-    // handoff as a click. Legacy tab names all alias to the Dashboard.
     client.on("switchTab", (tabName) => {
-      if (tabName === "gesture") enterGesture();
+      const normalized = (tabName || "").toLowerCase();
+      if (normalized === "files" || normalized === "gesture") enterGesture();
       else leaveGesture();
     });
   }
 })();
+

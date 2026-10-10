@@ -20,94 +20,100 @@
       <button id="archer-mode-btn" type="button" title="Toggle whether ARCHER's brain runs LOCAL (Ollama, private, no API cost) or CLOUD (Claude/NVIDIA, smarter, needs internet)">MODE</button>
       <button id="archer-mic-btn" type="button" title="Mute/unmute your microphone -- ARCHER stops listening for the wake word or any speech while muted">MIC</button>
       <button id="archer-tts-btn" type="button" title="Mute/unmute ARCHER's spoken replies -- text replies still work while muted">SPEAKER</button>
-      <button id="archer-camera-btn" type="button" title="Release the webcam so another app (e.g. barehands) can use it">CAMERA</button>
-      <button id="archer-enroll-btn" type="button" title="Look at the camera and enroll your face so ARCHER recognizes you">ENROLL FACE</button>
       <button id="archer-halt-btn" type="button" title="Emergency stop -- interrupts whatever ARCHER is currently doing/saying">HALT</button>
     </div>
 
-    <div id="archer-tabs">
-      <button class="tab-btn active" data-tab="dashboard" type="button">DASHBOARD</button>
-      <button class="tab-btn" data-tab="gesture" type="button">GESTURE</button>
-      <button id="archer-cursor-toggle" type="button" aria-pressed="true">CURSOR FX: ON</button>
-    </div>
-
-    <!-- Always-visible control strip (2026-09-16, Col's ask: "these boxes
-         should be at the top of the screen" -- the brain-model and mic/
-         speaker dropdowns used to live inside the scrollable System card,
-         which meant scrolling within a small sidebar to reach them. Built
-         by system.js, same as the rest of the System card, just a
-         different mount point that isn't inside the scrolling dashboard
-         grid. -->
+    <!-- Always-visible control strip for model/mic/speaker dropdowns -->
     <div id="archer-controls-bar"></div>
 
-    <div id="archer-tab-content">
-      <!-- Consolidated 2026-09-16 (Col's call): everything except Gesture
-           (which stays separate since barehands is a self-contained,
-           full-bleed pane) lives on one Dashboard now -- orb/chat, live
-           camera + GPU/model/device controls, system logs, memory, and
-           tasks, all at a glance instead of spread across five tabs.
-           Each section below keeps its ORIGINAL id and is built by its
-           ORIGINAL js file unchanged (logs.js/memory.js/tasks.js/
-           system.js each just fill in their own container) -- only the
-           lazy-load trigger inside each of those files changed, from
-           "my own tab was clicked" to "the Dashboard tab is active". -->
-      <div id="tab-dashboard" class="tab-panel active">
-        <div id="archer-dashboard-grid">
-          <!-- Primary row (2026-09-16 redesign, per Col's mockup): orb,
-               chat, and the live camera + GPU/model/mic/speaker controls
-               all together at the top, in one glance, no scrolling needed
-               to reach the controls. tab-system keeps its original id and
-               is still built entirely by system.js unchanged -- only its
-               position in the DOM (and its width, via .archer-system-sidebar)
-               moved. -->
-          <div id="archer-dashboard-primary">
-            <div id="archer-root">
-              <div id="archer-orb-column">
-                <div data-archer-orb></div>
-              </div>
-              <div id="archer-chat-column">
-                <div id="archer-live"></div>
-                <div id="archer-transcript"></div>
-                <form id="archer-text-form">
-                  <input id="archer-text-input" type="text" placeholder="Type a message..." autocomplete="off" />
-                  <button type="submit">Send</button>
-                </form>
-              </div>
-              <div id="tab-system" class="archer-dashboard-card archer-system-sidebar">
-                <!-- js/system.js builds this: live camera, GPU/VRAM, performance charts, brain model + mic/speaker dropdowns -->
-              </div>
+    <div id="archer-main-layout">
+      <!-- Fixed Left Column: Chat box, Orb, Live Webcam Feed (never scrolls) -->
+      <aside id="archer-left-column">
+        <div id="archer-chat-column" class="archer-left-card">
+          <div id="archer-live"></div>
+          <div id="archer-transcript"></div>
+          <form id="archer-text-form">
+            <input id="archer-text-input" type="text" placeholder="Type a message..." autocomplete="off" />
+            <button type="submit">Send</button>
+          </form>
+        </div>
+
+        <div id="archer-orb-column" class="archer-left-card">
+          <div data-archer-orb></div>
+        </div>
+
+        <div id="archer-camera-column" class="archer-left-card">
+          <div class="archer-left-card-header">LIVE CAMERA</div>
+          <div id="archer-left-camera-pane">
+            <video id="archer-system-camera-feed" autoplay playsinline muted></video>
+            <div id="archer-camera-unavailable" style="display:none;" class="archer-memory-empty">Camera unavailable</div>
+            <canvas id="archer-camera-canvas" style="display:none;"></canvas>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Right Tabbed Workspace: FILES, ARTIFACTS, TOOLS, AWAY & TASKS, SYSTEM, LOGS -->
+      <main id="archer-right-column">
+        <div id="archer-tabs">
+          <button class="tab-btn" data-tab="files" type="button">FILES</button>
+          <button class="tab-btn active" data-tab="artifacts" type="button">ARTIFACTS</button>
+          <button class="tab-btn" data-tab="tools" type="button">TOOLS</button>
+          <button class="tab-btn" data-tab="away_tasks" type="button">AWAY &amp; TASKS</button>
+          <button class="tab-btn" data-tab="system" type="button">SYSTEM</button>
+          <button class="tab-btn" data-tab="logs" type="button">LOGS</button>
+          <button id="archer-cursor-toggle" type="button" aria-pressed="true">CURSOR FX: ON</button>
+        </div>
+
+        <div id="archer-tab-content">
+          <!-- FILES Tab: barehands gesture file access board -->
+          <div id="tab-files" class="tab-panel">
+            <p id="archer-gesture-placeholder">
+              barehands will connect when you open this tab (needs its own server.py running separately — see CONTRACT.md)
+            </p>
+          </div>
+
+          <!-- ARTIFACTS Tab: viewer placeholder + browser mirror card -->
+          <div id="tab-artifacts" class="tab-panel active">
+            <div class="archer-dashboard-card archer-artifacts-placeholder">
+              <h3>Artifacts &amp; Viewer</h3>
+              <p class="archer-memory-hint">Objects ARCHER creates, documents, embedded browser, and interactive previews.</p>
+            </div>
+            <div id="tab-browser" class="archer-dashboard-card">
+              <!-- js/browser.js builds live mirror of ARCHER's Playwright browser -->
             </div>
           </div>
 
-          <div id="archer-dashboard-secondary">
-            <div id="tab-logs" class="archer-dashboard-card">
-              <!-- js/logs.js builds this: raw application log tail -->
-            </div>
+          <!-- TOOLS Tab: list of installed skills & tools -->
+          <div id="tab-tools" class="tab-panel">
+            <!-- js/tools.js renders the tools & skills list -->
+          </div>
+
+          <!-- AWAY & TASKS Tab: While You Were Away interventions + Tasks & Habits -->
+          <div id="tab-away_tasks" class="tab-panel">
             <div id="tab-memory" class="archer-dashboard-card">
               <!-- js/memory.js builds this: while-you-were-away -->
             </div>
             <div id="tab-tasks" class="archer-dashboard-card">
-              <!-- js/tasks.js builds this: open tasks, read-only -->
-            </div>
-            <div id="tab-browser" class="archer-dashboard-card">
-              <!-- js/browser.js builds this: live mirror of ARCHER's own Playwright browser -->
+              <!-- js/tasks.js builds this: open tasks & habits -->
             </div>
           </div>
-        </div>
-      </div>
 
-      <div id="tab-gesture" class="tab-panel">
-        <!-- js/barehands.js mounts barehands' stage.html here, full-bleed
-             within this tab only -- it does not affect the Dashboard tab or
-             the toolbar above. See CONTRACT.md. -->
-        <p id="archer-gesture-placeholder">
-          barehands will connect when you open this tab (needs its own server.py running separately — see CONTRACT.md)
-        </p>
-      </div>
+          <!-- SYSTEM Tab: GPU, VRAM, Ollama models, performance sparklines -->
+          <div id="tab-system" class="tab-panel">
+            <!-- js/system.js builds GPU/VRAM, Ollama loaded models, and SVG ring gauges -->
+          </div>
+
+          <!-- LOGS Tab: raw application log tail -->
+          <div id="tab-logs" class="tab-panel">
+            <!-- js/logs.js builds application log tail -->
+          </div>
+        </div>
+      </main>
     </div>
   </div>
 
   <script src="/static/js/app.js"></script>
+  <script src="/static/js/camera.js"></script>
   <script src="/static/js/orb.js"></script>
   <script src="/static/js/ui.js"></script>
   <script src="/static/js/tabs.js"></script>
@@ -116,7 +122,8 @@
   <script src="/static/js/tasks.js"></script>
   <script src="/static/js/system.js"></script>
   <script src="/static/js/browser.js"></script>
+  <script src="/static/js/tools.js"></script>
   <script src="/static/js/barehands.js"></script>
-  <script src="/static/js/cursor.js"></script>
+  <script type="module" src="/static/js/cursor.js"></script>
 </body>
 </html>

@@ -118,126 +118,8 @@ html, body {
 #archer-tab-content {
   position: relative;
   flex: 1;
-  min-height: 0; /* let children scroll/fill instead of stretching the flex parent */
+  min-height: 0;
   overflow: hidden;
-}
-
-.tab-panel {
-  display: none;
-  width: 100%;
-  height: 100%;
-}
-.tab-panel.active {
-  display: block;
-}
-
-/* Dashboard tab (consolidated 2026-09-16 -- see index.html's comment):
-   orb/chat up top, then a responsive grid of cards (System/Logs/Memory/
-   Tasks) below, all on one scrollable tab instead of five separate ones. */
-#tab-dashboard.active {
-  display: block;
-  overflow-y: auto;
-}
-
-#archer-dashboard-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 8px 12px;
-  min-height: 100%;
-  box-sizing: border-box;
-}
-
-#archer-dashboard-primary {
-  display: flex;
-  justify-content: center;
-}
-
-#archer-dashboard-secondary {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-  gap: 16px;
-  align-items: start;
-}
-
-.archer-dashboard-card {
-  background: rgba(3, 18, 29, 0.5);
-  border: 1px solid rgba(151, 229, 244, 0.15);
-  border-radius: 6px;
-  max-height: 560px;
-  overflow-y: auto;
-}
-
-/* Memory/Tasks build multiple side-by-side panes internally, sized for a
-   full-width standalone tab (see #archer-memory-root / #archer-tasks-root
-   below) -- inside a narrower dashboard card, stack them vertically
-   instead so nothing gets squeezed unreadably thin. */
-.archer-dashboard-card #archer-memory-root,
-.archer-dashboard-card #archer-tasks-root {
-  display: block;
-  height: auto;
-  overflow: visible;
-}
-.archer-dashboard-card .archer-memory-pane {
-  flex: none;
-}
-.archer-dashboard-card .archer-memory-pane + .archer-memory-pane {
-  border-left: none;
-  border-top: 1px solid rgba(151, 229, 244, 0.15);
-}
-
-/* Orb + chat + live controls side by side, not stacked (2026-09-16
-   redesign -- the orb alone used to run up to ~820px wide/tall per
-   orb.css's own max-width, stacked ABOVE the transcript, which is what
-   produced "a ton of blank space" and forced scrolling to reach the cards
-   below on a normal monitor). Orb column is a fixed, modest size; chat
-   takes the middle; the SYSTEM card (camera/GPU/model/mic/speaker -- Col's
-   ask for these to be "at the top of the screen") is a fixed sidebar on
-   the right, all three visible together with no scrolling. */
-#archer-root {
-  display: flex;
-  flex-direction: row;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 16px;
-  width: 100%;
-  max-width: 1400px;
-  padding: 4px 0;
-  box-sizing: border-box;
-}
-
-#archer-orb-column {
-  flex: 0 0 auto;
-  width: 140px;
-}
-#archer-orb-column [data-archer-orb] {
-  max-width: 140px !important;
-  width: 100%;
-}
-
-#archer-chat-column {
-  flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
-  min-width: 0;
-  max-width: 560px;
-}
-
-/* SYSTEM card as the third column in the primary row instead of a
-   secondary-grid card -- same element (#tab-system), same system.js, just
-   repositioned + given a fixed sidebar width instead of the
-   auto-fit-minmax(340px) sizing the other secondary cards use. */
-.archer-system-sidebar {
-  flex: 0 0 320px;
-  /* Close to the orb/chat columns' natural height (2026-09-16) -- these
-     three columns don't stretch to match each other (align-items:
-     flex-start, so a short orb/chat column doesn't grow to fill a much
-     taller sidebar), so a big height mismatch here reads as dead
-     whitespace beside the shorter columns. Internal scroll still covers
-     the rest of this card's content. */
-  max-height: 340px;
 }
 
 /* Gesture tab: barehands' iframe (or the "not reachable" message) fills it */
@@ -246,25 +128,6 @@ html, body {
   width: 100%;
   height: 100%;
   border: none;
-}
-
-#archer-gesture-placeholder {
-  max-width: 480px;
-  margin: 48px auto;
-  padding: 0 16px;
-  font-size: 16px;
-  color: rgba(201, 246, 255, 0.6);
-  text-align: center;
-}
-
-/* Logs card: a plain scrolling tail view, matching the desktop Console tab.
-   (No longer gated on .active -- #tab-logs is a dashboard card now, not
-   its own top-level tab-panel, so it's always laid out, just possibly
-   scrolled out of view.) */
-#tab-logs {
-  display: flex;
-  flex-direction: column;
-  height: 320px;
 }
 
 #archer-logs-toolbar {
@@ -325,18 +188,32 @@ html, body {
   color: #97e5c9;
 }
 
-/* Memory tab: two plain-list panes -- relationships/social components on
+/* Memory components: two plain-list panes -- relationships/social components on
    the left, pattern-recognition/recursive-learning output on the right.
    Deliberately not a graph view for v1 (Col's call, 2026-09-16). */
-#tab-memory.active {
-  display: flex;
-}
 
 #archer-memory-root {
   display: flex;
   width: 100%;
   height: 100%;
   overflow: hidden;
+}
+
+.archer-dashboard-card {
+  background: rgba(3, 18, 29, 0.5);
+  border: 1px solid rgba(151, 229, 244, 0.15);
+  border-radius: 6px;
+  padding: 12px 16px;
+  color: rgba(201, 246, 255, 0.85);
+}
+
+#archer-gesture-placeholder {
+  padding: 24px;
+  text-align: center;
+  color: rgba(201, 246, 255, 0.5);
+  font-style: italic;
+  font-size: 15px;
+  line-height: 1.6;
 }
 
 .archer-memory-pane {
@@ -346,7 +223,8 @@ html, body {
   padding: 16px 20px;
   color: rgba(201, 246, 255, 0.85);
 }
-.archer-memory-pane + .archer-memory-pane {
+#archer-memory-root .archer-memory-pane + .archer-memory-pane,
+#archer-tasks-root .archer-memory-pane + .archer-memory-pane {
   border-left: 1px solid rgba(151, 229, 244, 0.15);
 }
 
@@ -500,35 +378,7 @@ html, body {
   display: none;
 }
 
-/* Browser mirror "active" mode (2026-09-16, Col's ask: it "should be
-   large enough for me to see it when active", with the camera/chat
-   getting out of the way) -- browser.js physically moves #tab-browser
-   into #archer-root (the primary row) when a real Playwright session is
-   open, adding this class, and moves it back to the secondary grid
-   (removing the class) when the session closes. */
-#tab-browser.archer-browser-primary {
-  flex: 1 1 480px;
-  max-height: none;
-}
-#tab-browser.archer-browser-primary #archer-browser-mirror-wrap img {
-  width: 100%;
-  max-height: 70vh;
-  object-fit: contain;
-}
-/* While the mirror is in the primary row, the other two columns make
-   room for it instead of each keeping their full standalone width. */
-#archer-root.archer-browser-active #archer-orb-column {
-  width: 90px;
-}
-#archer-root.archer-browser-active #archer-orb-column [data-archer-orb] {
-  max-width: 90px !important;
-}
-#archer-root.archer-browser-active #archer-chat-column {
-  max-width: 320px;
-}
-#archer-root.archer-browser-active .archer-system-sidebar {
-  flex: 0 0 220px;
-}
+
 
 #archer-system-camera-feed {
   width: 100%;
@@ -643,11 +493,7 @@ html, body {
   border-color: rgba(151, 229, 244, 0.6);
 }
 
-/* TASKS tab reuses the memory-pane/row/tag/form styling above -- just two
-   panes side by side again, tasks and habits together in v1. */
-#tab-tasks.active {
-  display: flex;
-}
+/* TASKS components reuse the memory-pane/row/tag/form styling -- tasks and habits together in v1. */
 #archer-tasks-root {
   display: flex;
   width: 100%;
@@ -688,6 +534,7 @@ html, body {
 }
 
 #archer-transcript {
+  box-sizing: border-box;
   width: 100%;
   height: 150px;
   overflow-y: auto;
@@ -739,3 +586,169 @@ html, body {
   font-size: 15px;
   cursor: pointer;
 }
+
+/* --- Phase 1: Fixed Left Column + 6 Right Workspace Tabs --- */
+
+#archer-main-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  height: calc(100vh - 100px);
+  overflow: hidden;
+}
+
+#archer-left-column {
+  flex: 0 0 360px;
+  width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  box-sizing: border-box;
+  border-right: 1px solid rgba(151, 229, 244, 0.15);
+  background: rgba(2, 10, 20, 0.4);
+  overflow: hidden; /* Left column itself NEVER scrolls */
+}
+
+.archer-left-card {
+  background: rgba(3, 18, 29, 0.5);
+  border: 1px solid rgba(151, 229, 244, 0.15);
+  border-radius: 6px;
+  padding: 8px 10px;
+  box-sizing: border-box;
+}
+
+#archer-chat-column {
+  flex: 1 1 auto;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#archer-transcript {
+  flex: 1;
+  height: auto;
+  min-height: 100px;
+  overflow-y: auto;
+}
+
+#archer-orb-column {
+  flex: 0 0 auto;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 8px 10px;
+  box-sizing: border-box;
+}
+
+#archer-orb-column [data-archer-orb] {
+  max-width: 140px !important;
+  width: 140px;
+  margin: 0 auto;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+#archer-camera-column {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.archer-left-card-header {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: #86f7df;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+
+#archer-left-camera-pane img {
+  width: 100%;
+  height: 170px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid rgba(151, 229, 244, 0.25);
+  background: #03121d;
+  display: block;
+}
+
+#archer-right-column {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+#archer-tab-content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tab-panel {
+  display: none !important;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.tab-panel.active {
+  display: flex !important;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+#tab-away_tasks.active {
+  gap: 16px;
+}
+
+.archer-tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.archer-tool-item {
+  background: rgba(15, 40, 55, 0.5);
+  border: 1px solid rgba(151, 229, 244, 0.2);
+  border-radius: 6px;
+  padding: 10px 14px;
+}
+
+.archer-tool-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.archer-tool-name {
+  font-size: 15px;
+  font-weight: bold;
+  color: #86f7df;
+}
+
+.archer-tool-file {
+  font-size: 12px;
+  color: rgba(201, 246, 255, 0.5);
+  margin: 2px 0 6px;
+}
+
+.archer-tool-desc {
+  font-size: 14px;
+  color: rgba(201, 246, 255, 0.85);
+}
+
+.archer-artifacts-placeholder {
+  padding: 16px;
+}
+

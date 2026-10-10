@@ -72,6 +72,7 @@ class ObserverPipeline:
         self,
         analysis_interval: float | None = None,
         run_analysis: bool = True,
+        open_camera: bool = True,
     ) -> None:
         self._config = get_config()
         self._bus = get_event_bus()
@@ -80,6 +81,7 @@ class ObserverPipeline:
         self._analysis_interval = analysis_interval or self._config.observer_analysis_frequency
         self._active_interval = self._config.observer_motion_active_interval
         self._motion_tail_s = self._config.observer_motion_tail_seconds
+        self._open_camera = open_camera
 
         # run_analysis=False: camera capture + person-detection overlay +
         # enroll_current_person still work (the desktop GUI's live preview
@@ -112,12 +114,17 @@ class ObserverPipeline:
         with _observer_pipeline_lock:
             _observer_pipeline_instance = self
 
-        # Camera — start with local webcam (GUI mode default)
-        self._camera = WebcamCapture(
-            camera_source=self._config.webcam_device,
-            capture_interval=0.5,
-        )
-        self._active_source: int | str = self._config.webcam_device
+        # Camera — start with network camera if configured, else local webcam (if open_camera is True)
+        if self._open_camera:
+            initial_source = self._config.network_camera_url if self._config.network_camera_url else self._config.webcam_device
+            self._camera = WebcamCapture(
+                camera_source=initial_source,
+                capture_interval=0.5,
+            )
+            self._active_source: int | str = initial_source
+        else:
+            self._camera = None
+            self._active_source = self._config.webcam_device
 
         # Analyzers
         self._scene_analyzer = SceneAnalyzer(cooldown_seconds=30.0)
@@ -175,13 +182,17 @@ class ObserverPipeline:
             logger.warning("ObserverPipeline already running.")
             return True
 
-        # Start camera
-        camera_ok = self._camera.start()
-        if not camera_ok:
-            logger.info(
-                "Observer running without camera. "
-                "Only system-level observations will be available."
-            )
+        # Start camera if available
+        if self._camera:
+            camera_ok = self._camera.start()
+            if not camera_ok:
+                logger.info(
+                    "Observer running without camera. "
+                    "Only system-level observations will be available."
+                )
+        else:
+            camera_ok = False
+            logger.info("Observer running with camera disabled by configuration (browser camera mode).")
 
         self._running.set()
         self._pipeline_started_at = time.monotonic()
@@ -198,19 +209,20 @@ class ObserverPipeline:
                 f"Observer pipeline started "
                 f"(motion-gated: active interval {self._active_interval}s, "
                 f"tail {self._motion_tail_s}s; "
-                f"camera: {'active' if camera_ok else 'unavailable'})"
+                f"camera: {'active' if camera_ok else 'disabled/unavailable'})"
             )
         else:
             logger.info(
                 f"Observer pipeline started in camera-only mode (no analysis "
-                f"thread — camera: {'active' if camera_ok else 'unavailable'})"
+                f"thread — camera: {'active' if camera_ok else 'disabled/unavailable'})"
             )
         return camera_ok
 
     def stop(self) -> None:
         """Stop the observer pipeline."""
         self._running.clear()
-        self._camera.stop()
+        if self._camera:
+            self._camera.stop()
 
         if self._analysis_thread is not None:
             self._analysis_thread.join(timeout=5.0)
@@ -304,60 +316,6 @@ class ObserverPipeline:
     def person_identifier(self) -> PersonIdentifier:
         """Expose person identifier."""
         return self._person_identifier
-
-    def enroll_current_person(self, name: str = "Col", num_frames: int = 5) -> bool:
-        """
-        Enroll whoever is currently in front of the camera as a known
-        person (default name "Col"), using the SAME already-open camera
-        this pipeline is already running — unlike the standalone
-        observer/enroll_person.py script, which opens its OWN separate
-        WebcamCapture and would hit exactly the same "device in use"
-        conflict barehands did if run while ARCHER is already running.
-
-        This is why PersonIdentifier never actually recognized Col: the
-        recognition/matching logic was correct and running the whole
-        time, but `known_persons` was simply always empty — nothing
-        anywhere ever called the one function (`store.add_known_person`)
-        that populates it. This is that missing wire-up, exposed so it
-        can be triggered live (see server.py's "enroll_face" WS message)
-        instead of only via a manual script run.
-        """
-        if not self._person_identifier.is_available:
-            logger.error("Cannot enroll — InsightFace is unavailable.")
-            return False
-
-        if self._camera_released.is_set():
-            # e.g. the CAMERA toggle handed the device to barehands —
-            # take it back for enrollment rather than failing silently
-            # against a camera that's been intentionally shut off.
-            logger.info("Camera was released — reacquiring it for enrollment.")
-            self.reacquire_camera()
-
-        embeddings = []
-        for _ in range(50):
-            frame, _ = self._camera.get_latest_frame()
-            if frame is not None:
-                emb = self._person_identifier.get_embedding(frame)
-                if emb is not None:
-                    embeddings.append(emb)
-                    logger.info(f"Enrollment: captured face sample {len(embeddings)}/{num_frames}")
-                    if len(embeddings) >= num_frames:
-                        break
-            time.sleep(0.3)
-
-        if not embeddings:
-            logger.error("Enrollment failed — no face detected. Make sure you're in frame and well lit.")
-            return False
-
-        import numpy as np
-        avg_embedding = np.mean(embeddings, axis=0, dtype=np.float32)
-        norm = np.linalg.norm(avg_embedding)
-        if norm > 0:
-            avg_embedding = avg_embedding / norm
-
-        self._store.add_known_person(name=name, embedding=avg_embedding.tobytes())
-        logger.info(f"Enrolled '{name}' with {len(embeddings)} face samples.")
-        return True
 
     def get_latest_detections(self) -> list[dict]:
         """Get the latest detection results for GUI overlay drawing."""

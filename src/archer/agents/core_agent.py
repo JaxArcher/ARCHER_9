@@ -495,37 +495,41 @@ class CoreAgent:
         except Exception:
             pass
 
+    def _get_camera_frame(self) -> tuple[Optional[Any], Optional[float]]:
+        """
+        Acquire a camera frame for Visual Q&A or Person Introduction.
+        In browser mode, requests a live frame from a connected browser client via WS.
+        Falls back to server-side webcam via ObserverPipeline if active/available.
+        Returns (frame, timestamp) or (None, None).
+        """
+        try:
+            import asyncio
+            from archer.server import _ws_clients, _ws_loop, _request_browser_camera_frame
+            if _ws_clients and _ws_loop and _ws_loop.is_running():
+                ws = next(iter(_ws_clients))
+                fut = asyncio.run_coroutine_threadsafe(_request_browser_camera_frame(ws, timeout=4.0), _ws_loop)
+                frame = fut.result(timeout=4.5)
+                if frame is not None:
+                    return frame, time.monotonic()
+        except Exception as e:
+            logger.debug(f"Browser camera frame acquisition via WS failed: {e}")
+
+        try:
+            from archer.observer.pipeline import ObserverPipeline
+            pipeline = ObserverPipeline.get_instance()
+            if pipeline and pipeline.camera and hasattr(pipeline.camera, "get_latest_frame"):
+                frame, ts = pipeline.camera.get_latest_frame()
+                if frame is not None:
+                    return frame, ts
+        except Exception as e:
+            logger.debug(f"Pipeline camera frame acquisition failed: {e}")
+
+        return None, None
+
     def _check_visual_query(self, text: str) -> Optional[Dict[str, Any]]:
         """
         If text asks a visual question ("what do you see", "look at this", "how many fingers am I holding up"),
-        capture a frame from the camera pipeline for the model to see DIRECTLY.
-
-        Rewritten 2026-09-16 (Col's call): previously ran the frame through
-        moondream (a tiny 1.42B captioning model) to get a text description,
-        then handed THAT text to gemma4:e4b -- a lossy detour now that
-        gemma4:e4b is natively multimodal and can just look at the picture
-        itself. Moondream stays doing its OTHER job (observer/analyzers.py's
-        SceneAnalyzer, feeding BlindspotAgent/staleness_reasoner's ambient
-        passes) -- this change only touches the GUI's on-demand "look at
-        this" path.
-
-        WHO is in frame is deliberately NOT asked of any vision-language
-        model, moondream or gemma4:e4b -- general VLMs aren't fine-tuned on
-        Col's face and will happily hallucinate a confident-sounding wrong
-        name from pixels alone, which is worse than admitting uncertainty.
-        Identity comes from InsightFace face-embedding matching instead
-        (ObserverPipeline.person_identifier, the same engine
-        observer_service.py's analysis loop uses), run on this exact frame
-        so it can't go stale relative to what the model is actually shown.
-
-        Returns:
-            None -- not a visual question.
-            self.VISION_UNAVAILABLE -- visual question, but no camera frame
-                reachable.
-            {"image_b64": ..., "identity_note": ...} -- success. image_b64
-                is attached directly to the model's message (see
-                _stream_local/_stream_cloud); identity_note is folded into
-                the text system prompt by build_context_system_prompt.
+        capture a frame from the browser webcam (or camera pipeline) for the model to see DIRECTLY.
         """
         lower = text.lower()
         visual_phrases = [
@@ -557,128 +561,80 @@ class CoreAgent:
             return None
 
         try:
-            from archer.observer.pipeline import ObserverPipeline
-            pipeline = ObserverPipeline.get_instance()
-            # Explicit released-camera check (2026-09-18): the browser's
-            # "Camera" button frees the physical device so barehands'
-            # gesture control can grab exclusive access (Windows only
-            # allows one owner). Before this, get_latest_frame() would
-            # still happily hand back whatever frame was captured right
-            # before release -- camera.py's stop() now clears it, but
-            # checking is_camera_released here too gives an honest,
-            # specific reason instead of a generic "no frame" one.
-            if pipeline and pipeline.is_camera_released:
-                logger.warning(
-                    "Visual Q&A: camera is currently released (freed for another "
-                    "app, e.g. barehands gesture control) -- no live frame available."
-                )
-                self._publish_visual_status(
-                    "Camera is released (freed for another app) -- can't look right now."
-                )
-                return self.VISION_UNAVAILABLE
-            if pipeline and pipeline.camera:
-                frame, timestamp = pipeline.camera.get_latest_frame()
-                # Staleness check: get_latest_frame() previously only ever
-                # checked "is it None", never how OLD it is. A frame more
-                # than a few capture-intervals old (this camera runs at
-                # ~2 FPS / 0.5s intervals) means something's wrong with
-                # the capture loop even though the object itself looks
-                # fine -- treat it the same as no frame rather than let
-                # the model confidently describe a stale scene.
-                frame_age = (time.monotonic() - timestamp) if frame is not None else None
-                if frame is not None and frame_age is not None and frame_age > 3.0:
-                    logger.warning(
-                        f"Visual Q&A: latest frame is {frame_age:.1f}s old (stale) -- "
-                        "treating as unavailable rather than attaching it."
-                    )
-                    self._publish_visual_status(
-                        f"Latest camera frame is {frame_age:.1f}s old (stale) -- skipping it."
-                    )
-                    frame = None
-                if frame is not None:
-                    import cv2
-                    import base64
-                    _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                    img_bytes = buffer.tobytes()
-                    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-
-                    # Debug dump (2026-09-18, Col's request): the audio
-                    # pipeline has saved every played clip to scratch/ for
-                    # a while now specifically so a "did it actually hear
-                    # right" question can be answered by listening to the
-                    # file instead of guessing from logs alone. Nothing
-                    # equivalent existed for vision, so a "did it actually
-                    # SEE right" question -- like this one -- had no way to
-                    # be settled except debating the model's own words.
-                    # Mirrors that same pattern for the exact JPEG bytes
-                    # actually sent to gemma4:e4b.
-                    debug_frame_path = None
-                    try:
-                        import os
-                        os.makedirs("scratch", exist_ok=True)
-                        ts = int(time.time() * 1000)
-                        debug_frame_path = f"scratch/visual_qna_frame_{ts}.jpg"
-                        with open(debug_frame_path, "wb") as f:
-                            f.write(img_bytes)
-                    except Exception as e:
-                        logger.debug(f"Visual Q&A frame debug dump failed (non-fatal): {e}")
-
-                    # Identity, from InsightFace face-embedding matching on
-                    # THIS exact frame -- not from moondream or gemma4:e4b
-                    # guessing (see method docstring for why). Best-effort:
-                    # a face-recognition hiccup shouldn't block the visual
-                    # answer itself, just mean identity is reported as
-                    # unavailable this once.
-                    identity_note = "Face recognition unavailable for this frame."
-                    try:
-                        identified = pipeline.person_identifier.identify_persons(
-                            frame, camera_source="webcam"
-                        )
-                        if identified:
-                            parts = []
-                            for p in identified:
-                                if p.get("is_known"):
-                                    parts.append(
-                                        f"{p['person_id']} (recognized, "
-                                        f"{p.get('confidence', 0.0) * 100:.0f}% confidence)"
-                                    )
-                                else:
-                                    parts.append(f"an unrecognized person ({p['person_id']})")
-                            identity_note = (
-                                "Face recognition identified: " + "; ".join(parts) + "."
-                            )
-                        else:
-                            identity_note = (
-                                "Face recognition found no face in this frame (the person may "
-                                "not be facing the camera, or may be out of frame)."
-                            )
-                    except Exception as e:
-                        logger.debug(f"Visual Q&A: face identification failed (non-fatal): {e}")
-
-                    logger.info(
-                        f"Visual Q&A: attaching frame directly to {self.primary_model} "
-                        f"(age={frame_age:.2f}s, saved to {debug_frame_path or 'N/A'}) "
-                        f"({identity_note})"
-                    )
-                    self._publish_visual_status(f"Looking at the camera -- {identity_note}")
-                    return {"image_b64": img_b64, "identity_note": identity_note}
-                else:
-                    logger.warning("Visual Q&A: no camera frame available yet (frame is None).")
-                    self._publish_visual_status("No camera frame available yet.")
-                    return self.VISION_UNAVAILABLE
-            else:
-                logger.warning("Visual Q&A: ObserverPipeline or camera not available.")
+            frame, timestamp = self._get_camera_frame()
+            if frame is None:
+                logger.warning("Visual Q&A: no camera frame available (no browser page connected or frame request failed).")
                 self._publish_visual_status("Camera isn't available right now.")
                 return self.VISION_UNAVAILABLE
+
+            frame_age = (time.monotonic() - timestamp) if timestamp is not None else 0.0
+            if frame_age > 3.0:
+                logger.warning(
+                    f"Visual Q&A: latest frame is {frame_age:.1f}s old (stale) -- "
+                    "treating as unavailable rather than attaching it."
+                )
+                self._publish_visual_status(
+                    f"Latest camera frame is {frame_age:.1f}s old (stale) -- skipping it."
+                )
+                return self.VISION_UNAVAILABLE
+
+            import cv2
+            import base64
+            _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            img_bytes = buffer.tobytes()
+            img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+
+            debug_frame_path = None
+            try:
+                import os
+                os.makedirs("scratch", exist_ok=True)
+                ts = int(time.time() * 1000)
+                debug_frame_path = f"scratch/visual_qna_frame_{ts}.jpg"
+                with open(debug_frame_path, "wb") as f:
+                    f.write(img_bytes)
+            except Exception as e:
+                logger.debug(f"Visual Q&A frame debug dump failed (non-fatal): {e}")
+
+            identity_note = "Face recognition unavailable for this frame."
+            try:
+                from archer.observer.pipeline import ObserverPipeline
+                from archer.observer.person_id import PersonIdentifier
+                pipeline = ObserverPipeline.get_instance()
+                person_identifier = pipeline.person_identifier if (pipeline and hasattr(pipeline, "person_identifier")) else PersonIdentifier()
+                identified = person_identifier.identify_persons(frame, camera_source="webcam")
+                if identified:
+                    parts = []
+                    for p in identified:
+                        if p.get("is_known"):
+                            parts.append(
+                                f"{p['person_id']} (recognized, "
+                                f"{p.get('confidence', 0.0) * 100:.0f}% confidence)"
+                            )
+                        else:
+                            parts.append(f"an unrecognized person ({p['person_id']})")
+                    identity_note = (
+                        "Face recognition identified: " + "; ".join(parts) + "."
+                    )
+                else:
+                    identity_note = (
+                        "Face recognition found no face in this frame (the person may "
+                        "not be facing the camera, or may be out of frame)."
+                    )
+            except Exception as e:
+                logger.debug(f"Visual Q&A: face identification failed (non-fatal): {e}")
+
+            logger.info(
+                f"Visual Q&A: attaching frame directly to {self.primary_model} "
+                f"(age={frame_age:.2f}s, saved to {debug_frame_path or 'N/A'}) "
+                f"({identity_note})"
+            )
+            self._publish_visual_status(f"Looking at the camera -- {identity_note}")
+            return {"image_b64": img_b64, "identity_note": identity_note}
         except Exception as e:
             logger.warning(f"Visual Q&A query failed: {e}")
             self._publish_visual_status(f"Camera check failed: {e}")
             return self.VISION_UNAVAILABLE
 
-    # Introduction phrasing that plausibly names a person who's currently
-    # in frame. Deliberately narrow (a handful of clear patterns) rather
-    # than anything that merely mentions a capitalized word -- a false
-    # positive here silently mis-names someone's face.
     _INTRODUCTION_PATTERNS = [
         re.compile(r"\bthis is\s+([A-Za-z][\w'-]*)", re.IGNORECASE),
         re.compile(r"\bmeet\s+([A-Za-z][\w'-]*)", re.IGNORECASE),
@@ -686,10 +642,6 @@ class CoreAgent:
         re.compile(r"\b(?:her|his) name(?:'s| is)\s+([A-Za-z][\w'-]*)", re.IGNORECASE),
         re.compile(r"\bsay hi to\s+([A-Za-z][\w'-]*)", re.IGNORECASE),
     ]
-    # Words that legitimately follow "this is"/"that's" without naming a
-    # person ("this is great", "that's fine") -- checked case-insensitively
-    # against whatever the pattern captured so those don't get treated as
-    # a name.
     _INTRODUCTION_STOPWORDS = {
         "is", "the", "a", "an", "not", "just", "actually", "really", "so", "what",
         "how", "great", "good", "bad", "fine", "important", "cool", "it", "my",
@@ -701,23 +653,11 @@ class CoreAgent:
 
     def _check_person_introduction(self, text: str) -> Optional[str]:
         """
-        Col's explicit ask (2026-09-16): no manual enrollment step for
-        anyone but himself -- ARCHER should either pick up a person's
-        identity from context, or ask Col later. This is the "pick up from
-        context" half. (The "ask later" half is pending_person_confirmations
-        / person_id.py's upsert on every unknown sighting, surfaced in the
-        browser MEMORY tab's "Unrecognized People" pane.)
-
         When Col introduces someone by name ("this is Sarah", "meet Dave")
         while exactly one unrecognized face is in the current webcam frame,
         silently bind that name to that face's InsightFace embedding via
-        add_known_person() -- no separate enrollment flow, no confirmation
-        round-trip. Deliberately conservative: zero or multiple unrecognized
-        faces in frame means do nothing rather than guess which one is
-        "Sarah".
-
-        Returns a short note for the system prompt on a successful bind
-        (so the model doesn't need to guess whether it worked), else None.
+        add_person_face() -- no separate enrollment flow, no confirmation
+        round-trip.
         """
         name: Optional[str] = None
         for pattern in self._INTRODUCTION_PATTERNS:
@@ -732,19 +672,18 @@ class CoreAgent:
             return None
 
         try:
-            from archer.observer.pipeline import ObserverPipeline
-            pipeline = ObserverPipeline.get_instance()
-            if not (pipeline and pipeline.camera):
-                return None
-            frame, _ts = pipeline.camera.get_latest_frame()
+            frame, _ts = self._get_camera_frame()
             if frame is None:
                 return None
 
-            identified = pipeline.person_identifier.identify_persons(frame, camera_source="webcam")
+            from archer.observer.pipeline import ObserverPipeline
+            from archer.observer.person_id import PersonIdentifier
+            pipeline = ObserverPipeline.get_instance()
+            person_identifier = pipeline.person_identifier if (pipeline and hasattr(pipeline, "person_identifier")) else PersonIdentifier()
+
+            identified = person_identifier.identify_persons(frame, camera_source="webcam")
             unknown = [p for p in identified if not p.get("is_known")]
             if len(unknown) != 1:
-                # Nobody unrecognized in frame, or more than one -- too
-                # ambiguous to guess which face "Sarah" refers to.
                 return None
 
             target = unknown[0]
@@ -752,9 +691,9 @@ class CoreAgent:
             if not emb_bytes:
                 return None
 
-            # add_person_face, not add_known_person (2026-10-06): naming a
-            # face for a name that's already enrolled must ADD a reference,
-            # never overwrite the existing one -- see sqlite_store.py.
+            # add_person_face (2026-10-06): naming a face for a name that's
+            # already enrolled must ADD a reference, never overwrite the
+            # existing one -- see sqlite_store.py.
             self._store.add_person_face(name=name, embedding=emb_bytes, source="webcam")
             try:
                 self._store.resolve_pending_person_confirmation_by_person_id(

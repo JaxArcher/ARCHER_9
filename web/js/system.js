@@ -34,11 +34,6 @@
   if (!panel || !controlsBar) return;
 
   panel.innerHTML = `
-    <section class="archer-memory-pane" id="archer-system-camera-pane">
-      <h3>Live Camera</h3>
-      <img id="archer-system-camera-feed" alt="Live camera feed" />
-    </section>
-
     <section class="archer-memory-pane" id="archer-system-gpu-pane">
       <h3>GPU / VRAM</h3>
       <div id="archer-system-gpu-info"></div>
@@ -69,7 +64,6 @@
     </div>
   `;
 
-  const cameraFeed = document.getElementById("archer-system-camera-feed");
   const gpuInfo = document.getElementById("archer-system-gpu-info");
   const ollamaLoadedList = document.getElementById("archer-system-ollama-loaded");
   const gaugeRow = document.getElementById("archer-gauge-row");
@@ -121,22 +115,45 @@
   }
 
   function renderModelSelect(available, current) {
-    const prevFocus = document.activeElement === modelSelect;
-    modelSelect.innerHTML = available.map((m) =>
+    if (document.activeElement === modelSelect) return;
+    if (!available || available.length === 0) {
+      if (current) {
+        modelSelect.innerHTML = `<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}</option>`;
+      } else {
+        modelSelect.innerHTML = '<option value="" disabled selected>None found</option>';
+      }
+      return;
+    }
+    let html = available.map((m) =>
       `<option value="${escapeHtml(m)}" ${m === current ? "selected" : ""}>${escapeHtml(m)}</option>`
     ).join("");
     if (current && !available.includes(current)) {
-      modelSelect.insertAdjacentHTML("afterbegin", `<option value="${escapeHtml(current)}" selected>${escapeHtml(current)} (active, not in local list)</option>`);
+      html = `<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}</option>` + html;
     }
-    if (prevFocus) modelSelect.focus();
+    modelSelect.innerHTML = html;
   }
 
   function renderDeviceSelect(select, devices, currentIndex) {
-    if (document.activeElement === select) return; // don't yank the dropdown out from under an in-progress pick
-    select.innerHTML = devices.map((d) =>
+    if (document.activeElement === select) return;
+    if (!devices || devices.length === 0) {
+      select.innerHTML = '<option value="" disabled selected>None found</option>';
+      return;
+    }
+    const hasMatch = currentIndex != null && devices.some(d => d.index === currentIndex);
+    let html = "";
+    if (!hasMatch) {
+      html += `<option value="" disabled ${currentIndex == null ? "selected" : ""}>Select device...</option>`;
+    }
+    html += devices.map((d) =>
       `<option value="${d.index}" ${d.index === currentIndex ? "selected" : ""}>${escapeHtml(d.name)}</option>`
     ).join("");
+    select.innerHTML = html;
   }
+
+  // Initial state before server snapshot arrives
+  modelSelect.innerHTML = '<option value="" disabled selected>Loading...</option>';
+  micSelect.innerHTML = '<option value="" disabled selected>Loading...</option>';
+  speakerSelect.innerHTML = '<option value="" disabled selected>Loading...</option>';
 
   // Self-contained SVG ring gauges (2026-09-16, replacing Chart.js -- no
   // CDN dependency, so nothing to silently fail to load). Each gauge is a
@@ -241,7 +258,6 @@
   // state.
   let pollTimer = null;
   function startLive() {
-    if (!cameraFeed.src) cameraFeed.src = "/camera_stream?t=" + Date.now();
     if (window.ArcherClient) window.ArcherClient.sendSystemGetAll();
     if (!pollTimer) {
       pollTimer = setInterval(() => {
@@ -250,34 +266,28 @@
     }
   }
   function stopLive() {
-    cameraFeed.removeAttribute("src");
     if (pollTimer) {
       clearInterval(pollTimer);
       pollTimer = null;
     }
   }
 
-  // Consolidated 2026-09-16: this pane lives on the always-visible
-  // Dashboard tab now, not its own System tab -- so "visible" means
-  // "Dashboard is the active tab, not Gesture" rather than "my own tab
-  // button was clicked". Legacy tab names (voice/logs/memory/tasks/
-  // system) all alias to "dashboard" in tabs.js, but the raw switchTab
-  // event here still carries whatever name was actually sent, so they're
-  // all treated as "start" too.
-  const LIVE_TAB_NAMES = new Set(["dashboard", "voice", "logs", "memory", "tasks", "system"]);
-  const dashboardBtn = document.querySelector('#archer-tabs .tab-btn[data-tab="dashboard"]');
-  const gestureBtn = document.querySelector('#archer-tabs .tab-btn[data-tab="gesture"]');
-  if (dashboardBtn) dashboardBtn.addEventListener("click", startLive);
-  if (gestureBtn) gestureBtn.addEventListener("click", stopLive);
+  // Phase 1 Redesign (2026-10-06): Poll GPU / VRAM / model stats strictly while SYSTEM tab is active.
+  window.addEventListener("archer-tab-changed", (evt) => {
+    const active = evt.detail && evt.detail.activeTab;
+    if (active === "system") startLive();
+    else stopLive();
+  });
+
   if (window.ArcherClient) {
-    window.ArcherClient.on("switchTab", (tabName) => {
-      if (LIVE_TAB_NAMES.has(tabName)) startLive();
-      else stopLive();
+    window.ArcherClient.on("connected", () => {
+      // Request initial snapshot on load so controls bar dropdowns (Brain Model, Mic, Speaker) populate immediately regardless of active tab
+      window.ArcherClient.sendSystemGetAll();
+      if (window.ArcherTabs && window.ArcherTabs.getActiveTab() === "system") {
+        startLive();
+      }
     });
-    // Dashboard is the default active tab at page load, before any click
-    // happens -- start once the socket is actually open (this file runs
-    // before ArcherClient.connect() fires, so starting any earlier would
-    // silently no-op against a socket that isn't OPEN yet).
-    window.ArcherClient.on("connected", startLive);
   }
 })();
+
+

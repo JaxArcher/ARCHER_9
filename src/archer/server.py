@@ -49,6 +49,11 @@ app.add_middleware(
 # Voice capture stays on this machine's own mic via the existing
 # AudioManager for the local case; only the later remote/LiveKit phase
 # needs audio to cross the network, since a remote device has its own mic.
+import mimetypes
+mimetypes.add_type("application/javascript", ".mjs")
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/wasm", ".wasm")
+
 class _NoCacheStaticFiles(StaticFiles):
     """Plain StaticFiles lets browsers cache JS/CSS aggressively with no
     freshness check at all, since script/link tags reference plain,
@@ -64,9 +69,14 @@ class _NoCacheStaticFiles(StaticFiles):
     picked up on the next normal reload instead of requiring a hard
     refresh."""
 
-    def file_response(self, *args, **kwargs):
-        response = super().file_response(*args, **kwargs)
+    def file_response(self, path, *args, **kwargs):
+        response = super().file_response(path, *args, **kwargs)
         response.headers["Cache-Control"] = "no-cache"
+        p_str = str(path).lower()
+        if p_str.endswith(".mjs") or p_str.endswith(".js"):
+            response.headers["Content-Type"] = "application/javascript"
+        elif p_str.endswith(".wasm"):
+            response.headers["Content-Type"] = "application/wasm"
         return response
 
 
@@ -141,71 +151,52 @@ def set_observer(observer: Any):
     _observer = observer
 
 
-def _reacquire_camera_with_retry(attempts: int = 4, delay_s: float = 1.0) -> bool:
-    """Take the webcam back after the Gesture tab hands it to barehands
-    (2026-10-06). The browser frees the device asynchronously as barehands'
-    iframe unloads, so the first open attempt can land while it's still
-    busy -- retry briefly rather than failing on the first try. Blocking;
-    call via asyncio.to_thread."""
-    for attempt in range(1, attempts + 1):
-        if _observer is None or not _observer.is_camera_released:
-            return True
-        if _observer.reacquire_camera():
-            return True
-        if attempt < attempts:
-            _time.sleep(delay_s)
-    logger.warning(
-        f"Couldn't reopen the webcam after {attempts} attempts -- something else may "
-        "still be holding it. Click CAMERA to try again."
-    )
-    return False
+
+_pending_frame_futures: dict[str, asyncio.Future[str]] = {}
 
 
-@app.get("/camera_stream")
-async def camera_stream():
-    """Live MJPEG feed of ARCHER's own webcam, for the browser SYSTEM tab
-    (2026-09-16, Col's call -- the first barehands build had a live camera
-    visible in-browser, and dropping the desktop app's WebcamWidget loses
-    that unless the browser gets its own). Deliberately NOT a browser-side
-    getUserMedia() capture of the same physical device: the observer
-    pipeline already holds the camera open exclusively via OpenCV/DSHOW
-    (see camera_release_toggle's docstring -- Windows generally only lets
-    one process own a webcam at a time), so this reuses that SAME
-    already-open capture (get_latest_frame(), the same non-blocking read
-    person_id.py/vision queries/the old WebcamWidget all already share)
-    rather than fighting it for a second exclusive handle.
+async def _request_browser_camera_frame(ws: WebSocket, timeout: float = 5.0):
+    """Request a camera frame (base64 JPEG) from the connected browser client."""
+    logger.debug("[ServerWS] Top of _request_browser_camera_frame")
+    import base64
+    import uuid
+    import cv2
+    import numpy as np
 
-    Standard multipart/x-mixed-replace MJPEG stream -- a plain <img
-    src="/camera_stream"> in the browser decodes this natively with no JS
-    or new client-side dependency, and no WebRTC signaling to build."""
-    async def generate():
-        import cv2
-        boundary = b"--frame"
-        while True:
-            if _observer is None or _observer.camera is None:
-                await asyncio.sleep(1.0)
-                continue
-            frame, _ts = _observer.camera.get_latest_frame()
-            if frame is None:
-                await asyncio.sleep(0.2)
-                continue
-            ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-            if not ok:
-                await asyncio.sleep(0.1)
-                continue
-            yield (
-                boundary + b"\r\n"
-                b"Content-Type: image/jpeg\r\n"
-                b"Content-Length: " + str(len(buffer)).encode() + b"\r\n\r\n"
-                + buffer.tobytes() + b"\r\n"
-            )
-            # ~10 fps -- matches the old desktop WebcamWidget's poll rate,
-            # plenty for a presence/status pane rather than a video call.
-            await asyncio.sleep(0.1)
+    req_id = str(uuid.uuid4())
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    _pending_frame_futures[req_id] = fut
+    try:
+        logger.debug(f"[ServerWS] Sending camera_frame_request req_id={req_id}")
+        await _ws_send_safe(ws, json.dumps({"type": "camera_frame_request", "request_id": req_id}))
+        b64_data = await asyncio.wait_for(fut, timeout=timeout)
+        if not b64_data:
+            return None
+        img_bytes = base64.b64decode(b64_data)
+        np_arr = np.frombuffer(img_bytes, np.uint8)
+        return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    except Exception as e:
+        logger.warning(f"Browser camera frame request failed or timed out: {e}")
+        return None
+    finally:
+        _pending_frame_futures.pop(req_id, None)
 
-    return StreamingResponse(
-        generate(), media_type="multipart/x-mixed-replace; boundary=frame"
-    )
+
+async def _handle_browser_screenshot(websocket: WebSocket) -> None:
+    agent = get_orchestrator()
+    image_b64 = None
+    try:
+        pc = agent.pc_controller
+        if pc is not None:
+            image_b64 = await asyncio.to_thread(pc.browser_screenshot)
+    except Exception as e:
+        logger.debug(f"Browser screenshot unavailable: {e}")
+    await _ws_send_safe(websocket, json.dumps({
+        "type": "browser_screenshot",
+        "image_b64": image_b64,
+        "active": image_b64 is not None,
+    }))
 
 
 # Endpoints
@@ -213,6 +204,28 @@ async def camera_stream():
 async def root():
     """Health check endpoint."""
     return {"status": "ok", "service": "ARCHER Mobile API"}
+
+
+@app.get("/api/skills")
+async def get_skills_list():
+    """Return all skills discovered by skills_registry.py for the TOOLS tab."""
+    from archer.skills.skills_registry import parse_skill_file
+    skills_dir = Path(__file__).parent / "skills"
+    skill_files = list(skills_dir.glob("*_SKILL.md"))
+    result = []
+    for sf in sorted(skill_files):
+        try:
+            data = parse_skill_file(sf)
+            result.append({
+                "file_name": sf.name,
+                "name": data.get("name", sf.name),
+                "category": data.get("category", "general"),
+                "description": data.get("description", ""),
+                "tool_count": len(data.get("tools", [])),
+            })
+        except Exception as e:
+            logger.warning(f"Could not parse skill file {sf}: {e}")
+    return {"skills": result}
 
 
 @app.get("/mobile/health")
@@ -355,7 +368,8 @@ _ws_loop: asyncio.AbstractEventLoop | None = None
 async def _ws_send_safe(ws: WebSocket, text: str) -> None:
     try:
         await ws.send_text(text)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[ServerWS] _ws_send_safe failed: {e}")
         _ws_clients.discard(ws)
 
 
@@ -555,6 +569,7 @@ async def ws_voice(websocket: WebSocket):
                 continue
             bus = get_event_bus()
             msg_type = msg.get("type")
+            logger.debug(f"[ServerWS] Received WS message: type='{msg_type}'")
             if msg_type == "text_input":
                 text = (msg.get("text") or "").strip()
                 if text:
@@ -583,51 +598,15 @@ async def ws_voice(websocket: WebSocket):
                 new_val = not am.is_tts_muted
                 am.set_tts_muted(new_val)
                 _broadcast_ws({"type": "tts_mute", "muted": new_val})
-            elif msg_type == "enroll_face":
-                # Blocks on camera frames for a few seconds (up to ~15s
-                # worst case) -- run off the event loop so it doesn't
-                # freeze every other connected client's WS traffic while
-                # it waits. See ObserverPipeline.enroll_current_person
-                # for why this is the actual fix for "doesn't recognize
-                # me": recognition logic was always running correctly,
-                # nothing had ever populated known_persons.
-                if _observer is None:
-                    _broadcast_ws({"type": "enroll_result", "success": False,
-                                   "error": "Observer isn't running."})
-                else:
-                    name = (msg.get("name") or "Col").strip() or "Col"
-                    _broadcast_ws({"type": "enroll_progress", "name": name})
-                    ok = await asyncio.to_thread(_observer.enroll_current_person, name)
-                    _broadcast_ws({"type": "enroll_result", "success": ok, "name": name})
-            elif msg_type == "camera_release_toggle":
-                # Frees/reacquires the physical webcam so another app (e.g.
-                # barehands) can open it — see ObserverPipeline.release_camera.
-                if _observer is None:
-                    logger.warning("camera_release_toggle received but no observer is running.")
-                elif _observer.is_camera_released:
-                    await asyncio.to_thread(_reacquire_camera_with_retry)
-                    _broadcast_ws({"type": "observer_camera", "released": bool(_observer.is_camera_released)})
-                else:
-                    await asyncio.to_thread(_observer.release_camera)
-                    _broadcast_ws({"type": "observer_camera", "released": True})
-            elif msg_type == "camera_release":
-                # Explicit, idempotent release (2026-10-06) -- the Gesture
-                # tab sends this on entry so barehands can open the webcam
-                # without a "device in use" error. Unlike the toggle above,
-                # sending it twice can't accidentally flip the camera back.
-                if _observer is None:
-                    logger.warning("camera_release received but no observer is running.")
-                else:
-                    await asyncio.to_thread(_observer.release_camera)
-                    _broadcast_ws({"type": "observer_camera", "released": True})
-            elif msg_type == "camera_reacquire":
-                # Counterpart to camera_release, sent when leaving the
-                # Gesture tab -- only if that tab did the releasing.
-                if _observer is None:
-                    logger.warning("camera_reacquire received but no observer is running.")
-                else:
-                    await asyncio.to_thread(_reacquire_camera_with_retry)
-                    _broadcast_ws({"type": "observer_camera", "released": bool(_observer.is_camera_released)})
+            elif msg_type == "camera_frame_response":
+                req_id = msg.get("request_id")
+                image_b64 = msg.get("image_b64")
+                if req_id and req_id in _pending_frame_futures:
+                    fut = _pending_frame_futures.get(req_id)
+                    if fut and not fut.done():
+                        fut.set_result(image_b64)
+            elif msg_type == "request_camera_frame":
+                asyncio.create_task(_request_browser_camera_frame(websocket, timeout=5.0))
             elif msg_type == "memory_get_all":
                 # MEMORY tab initial load / manual refresh -- one bulk
                 # payload rather than four round trips (2026-09-16).
@@ -844,7 +823,7 @@ def _build_memory_snapshot() -> dict:
     conversation patterns). See sqlite_store.py's 2026-09-16 additions and
     memory/pattern_learner.py."""
     store = get_sqlite_store()
-    pending_people = store.get_pending_person_confirmations(status="pending", limit=50)
+    pending_people = store.get_pending_person_confirmations(status="pending", limit=5)
     for p in pending_people:
         p["snapshot_data_uri"] = _person_snapshot_data_uri(p.get("snapshot_path"))
         p.pop("embedding", None)  # raw BLOB -- not JSON-serializable, not needed by the browser
@@ -866,7 +845,7 @@ def _build_memory_snapshot() -> dict:
         # folded into a CoreAgent conversation yet -- see blindspot_agent.py
         # and core_agent.py's startup catch-up. Independent of that
         # delivery mechanism; this is purely for visibility in the browser.
-        "interventions": store.get_recent_interventions(limit=50),
+        "interventions": store.get_recent_interventions(limit=20),
         # "Unrecognized People" (2026-09-16): recurring faces InsightFace
         # can't match to known_persons, waiting on a name. The OTHER half
         # of no-manual-enrollment (see CoreAgent._check_person_introduction
@@ -1026,9 +1005,16 @@ async def _build_system_snapshot() -> dict:
     for m in main_tags + observer_tags:
         seen[m.get("name") or m.get("model")] = m
     available_models = sorted(seen.keys())
-
     agent = get_orchestrator()
     devices = _list_audio_devices()
+
+    current_model = getattr(agent, "primary_model", None) or config.core_primary_model
+    if current_model and current_model not in available_models:
+        available_models.append(current_model)
+    available_models = sorted(list(set(available_models)))
+
+    mic_devices = [d for d in devices if d.get("max_input", 0) > 0]
+    speaker_devices = [d for d in devices if d.get("max_output", 0) > 0]
 
     return {
         "type": "system_snapshot",
@@ -1041,9 +1027,9 @@ async def _build_system_snapshot() -> dict:
             {**m, "instance": "observer (11435)"} for m in observer_ps
         ],
         "available_models": available_models,
-        "current_model": getattr(agent, "primary_model", None),
-        "mic_devices": [d for d in devices if d["max_input"] > 0],
-        "speaker_devices": [d for d in devices if d["max_output"] > 0],
+        "current_model": current_model,
+        "mic_devices": mic_devices,
+        "speaker_devices": speaker_devices,
         "current_mic_index": config.mic_device_index,
         "current_speaker_index": config.speaker_device_index,
     }

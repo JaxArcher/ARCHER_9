@@ -15,8 +15,6 @@ const statusDotEl = document.getElementById("archer-status");
 const modeBtnEl = document.getElementById("archer-mode-btn");
 const micBtnEl = document.getElementById("archer-mic-btn");
 const ttsBtnEl = document.getElementById("archer-tts-btn");
-const cameraBtnEl = document.getElementById("archer-camera-btn");
-const enrollBtnEl = document.getElementById("archer-enroll-btn");
 const haltBtnEl = document.getElementById("archer-halt-btn");
 
 function addTranscriptLine(role, text) {
@@ -91,53 +89,20 @@ function setTtsButton(muted) {
   ttsBtnEl.classList.toggle("is-muted", muted);
 }
 
-// Releasing frees the physical webcam device so another app (barehands,
-// specifically — see CONTRACT.md) can open it; only one process can hold
-// a webcam at a time on Windows. Analysis just goes stale while released,
-// nothing crashes; toggle it back to resume ARCHER's own observer.
-function setCameraButton(released) {
-  cameraBtnEl.textContent = released ? "📷 CAMERA RELEASED" : "📷 CAMERA (ARCHER)";
-  cameraBtnEl.classList.toggle("is-muted", released);
-}
-
-ArcherClient.on("hello", ({ mode, micMuted, ttsMuted, cameraReleased, cameraAvailable }) => {
+ArcherClient.on("hello", ({ mode, micMuted, ttsMuted }) => {
   if (mode) setModeButton(mode);
   setMicButton(!!micMuted);
   setTtsButton(!!ttsMuted);
-  cameraBtnEl.style.display = cameraAvailable ? "" : "none";
-  setCameraButton(!!cameraReleased);
 });
 ArcherClient.on("mode", setModeButton);
 ArcherClient.on("micMute", setMicButton);
 ArcherClient.on("ttsMute", setTtsButton);
-ArcherClient.on("observerCamera", setCameraButton);
 ArcherClient.on("connected", () => statusDotEl.classList.remove("is-offline"));
 ArcherClient.on("disconnected", () => statusDotEl.classList.add("is-offline"));
-
-// Face enrollment — see server.py's "enroll_face" handler and
-// ObserverPipeline.enroll_current_person. Reuses the transcript log for
-// status messages rather than adding new UI chrome.
-ArcherClient.on("enrollProgress", ({ name }) => {
-  enrollBtnEl.disabled = true;
-  enrollBtnEl.textContent = "LOOK AT CAMERA…";
-  addTranscriptLine("assistant", `Enrolling "${name}" — look at the camera for a few seconds...`);
-});
-ArcherClient.on("enrollResult", ({ success, name, error }) => {
-  enrollBtnEl.disabled = false;
-  enrollBtnEl.textContent = "ENROLL FACE";
-  addTranscriptLine(
-    "assistant",
-    success
-      ? `Enrolled "${name}" — ARCHER should recognize you now.`
-      : `Enrollment failed${error ? ": " + error : ""} — make sure you're in frame and well lit, and try again.`
-  );
-});
 
 modeBtnEl.addEventListener("click", () => ArcherClient.sendModeToggle());
 micBtnEl.addEventListener("click", () => ArcherClient.sendMicMuteToggle());
 ttsBtnEl.addEventListener("click", () => ArcherClient.sendTtsMuteToggle());
-cameraBtnEl.addEventListener("click", () => ArcherClient.sendCameraReleaseToggle());
-enrollBtnEl.addEventListener("click", () => ArcherClient.sendEnrollFace("Col"));
 haltBtnEl.addEventListener("click", () => ArcherClient.sendHalt());
 
 // Offline until the first "connected" event actually fires.

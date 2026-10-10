@@ -48,29 +48,31 @@ Chart.js CDN script was removed 2026-09-16 in favor of inline SVG gauges,
 specifically so a blocked/slow CDN can't silently break the dashboard
 again).
 
-## Layout
+## Layout (Phase 1 Redesign, 2026-10-06)
 
 ```
-+---------------------------------------------------------------+
-| toolbar: status dot, MODE, MIC, SPEAKER, VOICE, CAMERA,        |
-|          ENROLL FACE, HALT                                     |
-+---------------------------------------------------------------+
-| tabs: DASHBOARD | GESTURE                                      |
-+---------------------------------------------------------------+
-| controls bar: Brain Model / Microphone / Speaker dropdowns     |  <- always visible,
-+---------------------------------------------------------------+     not part of the
-| DASHBOARD (scrollable)                                         |     scrolling area
-|  primary row: [orb] [chat/transcript] [System sidebar: camera, |
-|                GPU/VRAM, performance gauges, ollama-loaded]    |
-|  secondary grid: Logs | Memory | Tasks | Browser (mirror)      |
-+---------------------------------------------------------------+
++---------------------------------------------------------------------------------+
+| toolbar: status dot, MODE, MIC, SPEAKER, HALT                                   |
++---------------------------------------------------------------------------------+
+| controls bar: Brain Model / Microphone / Speaker dropdowns                      |  <- always visible
++---------------------------------------------------------------------------------+
+| LEFT COLUMN (fixed, non-scrolling)       | RIGHT WORKSPACE (tabbed)             |
+| [Chat box (transcript + text input)]     | tabs: FILES | ARTIFACTS | TOOLS |        |
+| [Orb visualization]                      |       AWAY & TASKS | SYSTEM | LOGS       |
+| [Live Camera feed (<video> getUserMedia)]| active tab content (scrollable)      |
++---------------------------------------------------------------------------------+
 ```
 
-Toolbar buttons all carry `title` tooltips explaining what they do
-(mode = local vs cloud brain, mic/speaker mute, voice engine, camera
-release, face enrollment, emergency halt).
+Tabs in the Right Workspace:
+- **FILES**: barehands gesture file access board.
+- **ARTIFACTS**: Objects ARCHER creates, documents, embedded Playwright browser mirror.
+- **TOOLS**: List of installed skills (`skills_registry.py`) and tool pool additions.
+- **AWAY & TASKS**: "While You Were Away" Blindspot interventions + Tasks & Habits cards.
+- **SYSTEM**: GPU/VRAM headroom, SVG performance ring gauges, Ollama loaded models list.
+- **LOGS**: Raw application log tail.
 
-### Dashboard consolidation history (2026-09-16)
+### Layout History
+
 
 This started as five separate tabs (Voice, Logs, Memory, Tasks, System).
 Col's call was to fold everything except Gesture (barehands is a
@@ -141,8 +143,6 @@ doesn't require starting it by hand in a separate window.
 | `mic_mute`            | `muted`                         | Mic mute state changed                                                   |
 | `tts_mute`            | `muted`                         | TTS output mute state changed                                            |
 | `observer_camera`     | `released`                      | Webcam released/reacquired (e.g. for another app to use it)              |
-| `enroll_progress`     | `name`                          | Face enrollment in progress                                              |
-| `enroll_result`       | `success`, `name`, `error`      | Face enrollment finished                                                 |
 | `switch_tab`          | `tab`                           | Switch the active tab (`"dashboard"` or `"gesture"`) — fired by the `switch_tab` agent tool |
 | `log_line`            | `text`                          | One line of the application log, pushed unconditionally                  |
 | `memory_snapshot`     | `contacts`, `commitments`, `entities`, `patterns`, `interventions`, `pending_people` | Bulk memory payload (Memory card now only renders `interventions`/`pending_people`; the rest still ship for the notes_sync mirror and any future consumer) |
@@ -152,6 +152,9 @@ doesn't require starting it by hand in a separate window.
 | `hello`               | `mode`, `mic_muted`, `tts_muted`, `camera_released`, `camera_available` | Sent on connect — initial toolbar state                    |
 | `system_start`        | —                                | Session (re)started                                                      |
 
+| `camera_frame_request` | `request_id`                    | Server requests a JPEG frame from browser webcam stream for enrollment or vision query |
+| `camera_frame_response`| `request_id`, `image_b64`       | Browser returns base64 JPEG frame to server                             |
+
 ## Messages (browser → server)
 
 ```json
@@ -160,10 +163,7 @@ doesn't require starting it by hand in a separate window.
 {"type": "mode_toggle"}
 {"type": "mic_mute_toggle"}
 {"type": "tts_mute_toggle"}
-{"type": "camera_release_toggle"}
-{"type": "camera_release"}
-{"type": "camera_reacquire"}
-{"type": "enroll_face", "name": "Col"}
+{"type": "camera_frame_response", "request_id": "...", "image_b64": "..."}
 {"type": "memory_get_all"}
 {"type": "memory_confirm_person", "id": 1, "name": "Sarah"}
 {"type": "memory_dismiss_person", "id": 1}

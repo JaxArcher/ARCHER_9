@@ -75,9 +75,19 @@ Col reads it too. It has exactly two sections:
    - Why
    - Result, including any error text and how you verified it
 
+**The worklog is append-only.** Add new entries at the end. Never edit, reorder or
+remove an existing entry — yours, Col's or Claude's. To correct an earlier entry,
+add a new one that says what was wrong. Re-read the file right before every write,
+so you never save over a newer version.
+
+**Claude's reviews** are in `D:\ARCHER_9\ARCHER_Claude_Reviews.md` (added
+2026-10-08). Claude writes that file; Antigravity only reads it.
+
 **Procedure.**
 1. At the start of every work session, re-read this spec section for the
-   current phase and the whole worklog, including answers to earlier questions.
+   current phase, the whole worklog (including answers to earlier questions),
+   and `ARCHER_Claude_Reviews.md`. Do every open item in Claude's latest review
+   before continuing with new work.
 2. Work on one phase only. Do not start the next phase until Col has signed off
    the current one in the worklog.
 3. Before changing a file: back it up (Rule 8) and log it.
@@ -97,24 +107,22 @@ Col reads it too. It has exactly two sections:
 | Topic | Decision |
 |---|---|
 | Layout | A fixed left column — chat box, orb, webcam feed, stacked top to bottom in that order — that never scrolls. A tabbed workspace on the right. |
-| Tabs | **Files** (gesture file access — the barehands board), **Artifacts**, **Tools**, **System**. |
+| Tabs | **Files** (gesture file access — the barehands board), **Artifacts**, **Tools**, **Away & Tasks** ("While You Were Away" plus Tasks, together in one tab), **System** (performance monitoring), **Logs**. Decided by Col 2026-10-06 (Q-01). |
 | Gestures | Hand gestures work in every tab, not only on the barehands board. |
 | Camera | While ARCHER's page is open, the browser owns the webcam. The fixed webcam pane, the global hand tracker and the barehands board all share that one feed. |
 | Approvals | ARCHER asks before making changes. Col can approve everything for the current session instead of answering each prompt — this covers commands and the Python library installs ARCHER needs while working on code. Col does not want to approve every command or library install once session approval is on. Only tool installs from git repos still ask every time. |
+| ARCHER's own records | ARCHER's changes to its own records (tasks, habits, inventory, purchase/loan logs) do **not** need approval. Every such change is recorded in the **Change Log** — a table Col can open and review in the Logs tab, one row per change with a clear one- or two-sentence plain-language summary (not technical detail). Decided by Col 2026-10-06 (Q-02). |
 | Tools tab | Only a list of the tools and skills added for ARCHER to use. Clicking one opens that program's code in the Artifacts pane, where Col and ARCHER can review and edit it. Nothing else goes in this tab. |
 | Browser | Chromium (Playwright), embedded and interactive in the Artifacts tab. Not Opera. |
 | Artifacts tab | Objects ARCHER creates, plus: command line, Word, PowerPoint, PDF, the embedded browser, and (last) any desktop app. |
 | PDF ability | Create, manipulate and format PDFs — using established open-source libraries. |
 | Tool pool | ARCHER can add tools from git repos, only with Col's approval, and only after each repo is cleared by two independent cloud AI reviews: Claude (Anthropic) and OpenAI. |
 | Voice | Local only — Kokoro TTS, Faster-Whisper STT. ElevenLabs was removed 2026-10-06. |
-
-Open decision (do not place these until answered — log as a question if you
-reach it first): where "While You Were Away" and Tasks go. They are **not** in
-the Tools tab.
+| People and faces | **No manual face enrollment — for anyone, Col included.** No button, form, script or command for enrolling faces. ARCHER picks up who people are from context — mainly names that come up naturally while that person is in view; a direct introduction ("this is Sam") also works, though Col rarely does that — keeps a snapshot of every new face, and later asks Col about them in conversation: first whether now is a good time, then one person at a time with the snapshot — who it is and anything worth remembering. Decided by Col 2026-09-16, restated 2026-10-09. See Phase 2b. |
 
 Defaults chosen by Claude that Col may change (flag if you think one is wrong):
-- Logs and all GPU/CPU/model/mic/speaker monitoring move to the **System** tab;
-  the always-visible controls bar (model / mic / speaker dropdowns) stays at the
+- GPU/CPU/VRAM/performance monitoring goes in the **System** tab; the
+  always-visible controls bar (model / mic / speaker dropdowns) stays at the
   top of the page.
 - New files ARCHER creates inside its own artifacts folder do **not** need
   approval (creating a requested document is the task itself). Anything that
@@ -194,7 +202,8 @@ Defaults chosen by Claude that Col may change (flag if you think one is wrong):
   (`ArcherObserverOllama`, port 11435); moondream prompt/length cap fixed.
 - Face recognition: new `known_person_references` table and
   `add_person_face()` — naming a face for an existing name adds a reference
-  instead of overwriting; `scripts/name_person.py`.
+  instead of overwriting; `scripts/name_person.py` (to be removed — no manual
+  enrollment, Col 2026-10-09).
 - Gesture tab camera handoff (superseded by Phase 2).
 - ElevenLabs removed (TTS and STT, the VOICE toolbar button, config, the
   `tts_mode` toggle and its WS messages).
@@ -233,7 +242,8 @@ Requirements:
   top, the orb below it, the live webcam feed at the bottom. The chat
   transcript scrolls inside its own box; the column itself does not move.
   Sized so all three are visible at once on Col's desktop monitor.
-- **Right side:** tab bar with **Files**, **Artifacts**, **Tools**, **System**.
+- **Right side:** tab bar with, in this order: **FILES**, **ARTIFACTS**,
+  **TOOLS**, **AWAY & TASKS**, **SYSTEM**, **LOGS** (labels exactly as written).
   Only the active tab's content scrolls.
 - **Toolbar and controls bar** stay at the top, unchanged in behavior.
 - **Files tab:** the barehands board (what the Gesture tab shows today).
@@ -243,20 +253,22 @@ Requirements:
   `skills_registry.py`), showing name and one-line description. Nothing else
   goes in this tab. (Clicking an entry to open its code arrives in Phase 5;
   installed pool tools join the list in Phase 4.)
-- **"While You Were Away" and Tasks:** OPEN decision (Section 1). They are not
-  in the Tools tab. Log a question and leave them unplaced until answered.
-- **System tab:** GPU/VRAM, performance charts, loaded Ollama models, and the
-  logs tail.
+- **Away & Tasks tab:** the existing "While You Were Away" list and the
+  existing Tasks view, together in this one tab (Q-01, answered).
+- **System tab:** GPU/VRAM, performance charts, loaded Ollama models.
+- **Logs tab:** the existing raw application log tail for now. The Change Log
+  table is added here in Phase 3.
 - **Voice/text tab switching:** update `tabs.js` aliases and
   `ui_control_SKILL.md` so `switch_tab` accepts files / artifacts / tools /
-  system, and every old name still resolves (gesture → files; dashboard,
-  voice → artifacts; logs, system → system; memory, tasks → tools).
+  away_tasks / system / logs, and every old name still resolves
+  (gesture → files; dashboard, voice → artifacts; memory, tasks, away →
+  away_tasks; logs → logs; system → system).
 - Polling (GPU stats, browser mirror) runs only while its tab is visible, as
   today.
 - Visual style unchanged (cyan-on-navy HUD). The orb art (`web/assets`,
   `orb.css`, `orb.js`) is not modified — Col's design agent owns it.
 
-**Acceptance:** all four tabs reachable by click and by voice; the left column
+**Acceptance:** all six tabs reachable by click and by voice; the left column
 never moves while any tab scrolls; every existing card still works.
 
 ---
@@ -273,12 +285,16 @@ works across ARCHER's whole page.
   (`web_main.py`'s webcam `ObserverPipeline` goes away or never opens the
   device). The desktop app (`__main__.py`) is out of scope and keeps its
   current behavior.
-- **Server frame requests:** when the server needs a webcam frame (ENROLL FACE,
-  visual questions, "this is X" introductions), it asks the connected page over
+- **Server frame requests:** when the server needs a webcam frame (visual
+  questions, "this is X" introductions), it asks the connected page over
   the WebSocket and the page replies with a JPEG of the current frame. Define
   the request/response messages (with a request id and timeout) in
   `CONTRACT.md`. If no page is connected, those features reply that no camera
   is available instead of hanging.
+- **Remove manual face enrollment** (Col, 2026-10-09 — section 1): the ENROLL
+  FACE button and everything behind it — the `enroll_face` message, its server
+  handler, the observer pipeline's enroll methods, `observer/enroll_person.py`
+  and `scripts/name_person.py`. Keep `add_person_face`; Phase 2b uses it.
 - Remove the `camera_release` / `camera_reacquire` / toggle path and the
   CAMERA toolbar button once nothing needs them.
 - **Observer service:** when a network camera is configured, it must not open
@@ -297,6 +313,13 @@ works across ARCHER's whole page.
   hand and hold at any camera distance.
 - Dispatches real pointer/click/wheel events to the element under the cursor so
   every tab, button and pane works without per-pane code.
+- **Gestures must work in every tab** (Col's requirement): FILES, ARTIFACTS,
+  TOOLS, AWAY & TASKS, SYSTEM, LOGS — and inside the Artifacts panes added in
+  later phases (code editor, terminal, embedded browser, app view), where
+  gesture clicks, scrolls and drags must arrive exactly like mouse input. Each
+  of those later phases must re-test this.
+- Gestures point, click, scroll and drag; they do not type. Text entry stays
+  keyboard or voice.
 - **Files tab exception:** the barehands board is a cross-origin iframe, so
   ARCHER's page can't send events into it. While the Files tab is active,
   ARCHER's global tracker pauses and barehands' own tracker drives the board.
@@ -306,10 +329,95 @@ works across ARCHER's whole page.
 - A visible toggle to turn gestures off (e.g. when typing), remembered per
   browser.
 
-**Acceptance:** webcam pane always live; ENROLL FACE and "what do you see?"
-still work via frame requests; pinch-click works on buttons in all four tabs;
+**Acceptance:** webcam pane always live; "what do you see?" and "this is X"
+introductions work via frame requests; no ENROLL FACE button or enrollment code
+remains; pinch-click and pinch-scroll work in every tab;
 the Files tab board works with no "camera in use" error; restarting the
 observer service never touches the webcam.
+
+---
+
+## 5b. Phase 2b — People: learn faces from context, ask Col later
+
+**Goal:** ARCHER learns who people are without any manual enrollment, the way
+Col described it (2026-09-16, restated 2026-10-09). It identifies people from
+context, keeps a picture of every new face, and asks Col about them later, in
+conversation.
+
+**Start after Phase 2 is signed off.** First do a short audit (no code changes)
+of what already exists, and log it in the worklog:
+- `observer/person_id.py` gives unrecognized faces a `Person_N` label, saves a
+  snapshot and logs each sighting.
+- The `pending_person_confirmations` table holds one row per unrecognized face,
+  with a sighting count.
+- `CoreAgent._check_person_introduction` names a face when Col says "this is X"
+  while exactly one unrecognized face is in view.
+- `known_person_references` / `add_person_face` add a new face for a known name
+  alongside the old ones, never overwriting.
+- The "Unrecognized People" pane was removed on 2026-09-19 at Col's request.
+  The follow-up happens in conversation, not in a form.
+
+**New faces**
+- Every new face from either camera (the webcam, through frame requests, and the
+  Reolink camera, through the observer service) gets a snapshot and a waiting
+  entry. Most of this exists; confirm both cameras feed it.
+- Fix the two labelling problems found 2026-10-08 (project doc
+  `claude/ARCHER_Ideas_Backlog.md`, item 1):
+  - Unknown faces are compared only with the last 200 sightings, so the same
+    person can collect several labels.
+  - A new label can reuse a number already given to someone else.
+
+  One person should keep one label until they're named.
+
+**Learning from context (Col, 2026-10-09)**
+- ARCHER picks up names from context. Mostly that means a name coming up
+  naturally while the person is in view: Col greeting someone by name, or
+  someone saying their own name. Col rarely introduces anyone to the PC
+  directly, but when he does ("this is…", "meet…"), it still counts.
+- Only name a face when the link is clear: exactly one unrecognized face in
+  view, and the name said while it's there. When unsure, don't guess; save the
+  question for the conversational follow-up.
+- Naming adds the face as an extra reference, never replacing an existing one.
+- **Audit first:** find out what speech ARCHER actually hears outside wake-word
+  conversations. If it only hears what Col says to it after the wake word,
+  picking up names from Col's conversations with visitors would need ARCHER to
+  listen to the room. That is a new privacy decision: log it as a question for
+  Col, and don't build it until he answers.
+
+**Asking Col later, in conversation**
+- When Col next talks to ARCHER and people are waiting, ARCHER asks whether now
+  is a good time to go over people it has seen. It doesn't interrupt something
+  Col is in the middle of.
+- **If yes:** one person at a time. ARCHER shows the snapshot in the chat (or the
+  Artifacts pane), says when and where that person was seen, asks who it is, then
+  asks a few short questions worth remembering (how Col knows them, anything to
+  note).
+- **If not:** ARCHER asks again later, without nagging.
+- Col can answer in any of these ways:
+  - **A name:** the face is recognized from then on.
+  - **"That's me":** the face is added to Col's own references.
+  - **"Don't know" / "a stranger":** ARCHER stops asking about that face.
+  - **"Forget them":** ARCHER deletes that face's snapshots and records.
+- What Col says about a person is saved to ARCHER's memory of that person and
+  appears in the Change Log, because it's one of ARCHER's own records
+  (section 1).
+- Snapshots and faces never leave the machine.
+
+**Minimum time before asking (Col confirmed 2026-10-09):** ARCHER only asks
+about faces seen for 2 minutes or more in total, so one-off passers-by and
+delivery drivers don't come up. This matches Col's mobile-observer plan ("face
+storage after 2+ minutes of interaction").
+
+**Acceptance:**
+- No button, form, script or command for enrolling faces exists anywhere.
+- An unrecognized face seen by either camera gets a snapshot and a waiting entry,
+  and keeps the same label on later sightings.
+- In the next conversation, ARCHER asks whether now is a good time. Answering
+  with a name makes that face recognized from then on (it shows in the sightings
+  log under that name).
+- "That's me", "don't know" and "forget them" each work as described.
+- Tested with Col's real cameras (a manual checklist), plus automated checks that
+  can fail when the feature is broken.
 
 ---
 
@@ -325,8 +433,9 @@ observer service never touches the webcam.
   browser actions that submit, post, purchase or send; sending messages or
   email; installing anything.
 - **Does not need approval:** reading, searching, screenshots, navigating to a
-  page, and creating new files inside ARCHER's own artifacts folder (default
-  from Section 1).
+  page, creating new files inside ARCHER's own artifacts folder (default from
+  Section 1), and ARCHER's changes to its own records — tasks, habits,
+  inventory, purchase and loan logs (Col, Q-02).
 - **Approval prompt:** appears in the chat box (left column) and is spoken
   briefly. Shows exactly what will happen (the command, the file path, the
   app and action, the page and button). Buttons: **Approve**, **Deny**,
@@ -345,13 +454,23 @@ observer service never touches the webcam.
 - **Timeout:** an unanswered prompt is treated as denied after a reasonable
   wait; ARCHER says so.
 - **Log:** every gated action, the decision and the outcome go into
-  `action_audit` (or a new table if it doesn't fit), visible in the System tab.
+  `action_audit` (or a new table if it doesn't fit).
+- **Change Log (Logs tab):** a table Col can open and review, listing every
+  change ARCHER makes — its own record updates (which don't ask) and every
+  approved action. Columns: date/time; what changed, in one or two clear,
+  plain-language sentences (no technical detail — e.g. "Added a task to call
+  the bank tomorrow." / "Created a 3-page PDF summary of the meeting notes in
+  Artifacts."); what prompted it (your request, a Blindspot observation, etc.);
+  and whether it was approved individually, under session approval, or needed
+  no approval. Newest first, filterable by date. The summaries are written when
+  the change happens, not generated later.
 - HALT cancels a pending approval and any running action.
 
 **Acceptance:** each changing tool asks first; Deny prevents it; "approve all"
 skips prompts (including commands and library installs for code being worked
 on) until ended; git-repo tool installs and `.venv` installs still ask;
-everything is logged.
+ARCHER's own record updates never ask; every change appears in the Change Log
+with a readable one- or two-sentence summary.
 
 ---
 
@@ -556,6 +675,7 @@ through the Phase 4 pipeline).
 1. ~~`nssm restart ArcherObserver`~~ — done by Col 2026-10-06.
 2. Close and relaunch ARCHER (`ARCHER-Web.bat`) — loads the Gesture handoff,
    face fixes and ElevenLabs removal.
-3. `.venv\Scripts\python.exe scripts\name_person.py Person_2 Col` from
-   `D:\ARCHER_9` — gives ARCHER webcam and Reolink references for Col.
+3. ~~`scripts\name_person.py Person_2 Col`~~ — no longer needed: no manual
+   enrollment (Col, 2026-10-09). ARCHER will ask Col about unrecognized faces in
+   conversation (Phase 2b), and "that's me" covers Col's own face.
 4. Optional: delete the `ELEVENLABS_` lines from `.env`.
