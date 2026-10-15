@@ -658,6 +658,52 @@ Once the observer can hear the room, Col can start ARCHER by voice.
 - Ordinary conversation that doesn't contain the phrase never starts ARCHER
   (checked over a day of real room audio).
 
+**Decisions after the audit (Col and Claude, 2026-10-15)**
+- **Microphone (Col):** the room camera's built-in mic. Listening uses its own
+  audio-only connection to the camera's sub-stream; the video connection that
+  following people uses is left exactly as it is. The desk mic isn't used for
+  this.
+- **Speech-to-text:** Faster-Whisper `base.en` on the CPU, loaded from a copy
+  kept in ARCHER's own model folder (copied from the files already on the PC,
+  no download), with Hugging Face's offline mode on for the observer. It must
+  work under the service's own account, not only Col's. If a short read-aloud
+  test shows too many wrong words, a larger model is Col's decision (it's a
+  download).
+- **CPU (Claude's default; Col can change it):** while transcribing, listening
+  adds at most 2 cores, and that cap must hold when measured. Over a long call
+  it averages about 1 core. The graphics card is never used. Following people
+  keeps its own budget.
+- **ARCHER's own voice:** ARCHER records when it spoke and what it said. Lines
+  that overlap that speech (allowing for the camera's audio delay) or repeat
+  its words are marked as ARCHER's, never dropped. This, pause and "forget
+  that" all go through the database the observer and ARCHER already share.
+  No new link between the two processes, and nothing that needs Redis or
+  ARCHER's window to be open.
+- **Pause and "forget that":** by button, or by saying "ARCHER, stop
+  listening", "ARCHER, start listening" or "ARCHER, forget that" in the room.
+  Pausing lasts 15 minutes, 1 hour, or until resumed; it holds even when
+  ARCHER is closed or the observer restarts. "Forget that" deletes the last
+  2 minutes of transcript (Claude's default), including the request itself.
+- **Who was there:** Whisper can't tell who spoke, so each line stores who was
+  in view (from following people) and the stay it belongs to, not a "speaker".
+- **Asking about the past:** ARCHER's chat can search the transcripts to
+  answer questions like "what did I tell the contractor on Tuesday?". Search
+  is by words; meaning-based search waits until word search falls short.
+- **"All systems go" detection:** the observer looks for the phrase (and close
+  variants) in the transcript lines, with a short cooldown. No separate wake
+  word model.
+- **Launching (Col approved a scheduled task):** a scheduled task that runs as
+  Col in his own session. The service triggers it when it hears the phrase.
+  - If Col is logged in, even with the PC locked, the task runs at once and the
+    page is waiting when he unlocks.
+  - At login, it starts ARCHER only if the phrase was heard in the last 10
+    minutes.
+  - The service itself never starts ARCHER.
+  - Setup is one command Col runs once as Administrator, with a matching
+    uninstall.
+- **Known limit, for later:** a TV or video playing in the room is transcribed
+  too. Col decides how to treat it once he has seen real transcripts.
+
 ---
 
 ## 5d. Phase 2d — Things that get moved
