@@ -721,8 +721,22 @@ Once the observer can hear the room, Col can start ARCHER by voice.
   - The service itself never starts ARCHER.
   - Setup is one command Col runs once as Administrator, with a matching
     uninstall.
-- **Known limit, for later:** a TV or video playing in the room is transcribed
-  too. Col decides how to treat it once he has seen real transcripts.
+- **Whose speech is kept (Col, 2026-10-15): Col's voice always; other voices
+  only while the camera sees someone besides Col.**
+  - Each transcribed stretch is checked against Col's voice with ARCHER's
+    existing voice ID (SpeechBrain ECAPA, already installed), using a voice
+    profile enrolled through the camera mic: about a minute of Col reading
+    from the couch.
+  - Another voice is kept, with who was in view, only while the camera sees
+    another person. Otherwise it's taken to be a TV, a video or a
+    speakerphone, and nothing is saved. On a phone call, Col's side is kept.
+  - Spoken commands ("all systems go", stop listening, forget that) count only
+    from speech that is kept, so a TV can't trigger them.
+  - Test it before relying on it: Col's own lines kept, TV and video speech
+    dropped, with the TV on.
+  - If the voice check can't tell Col from the TV reliably at that distance,
+    the fallback is: keep every line, mark lines that aren't Col's voice, and
+    ARCHER ignores those lines when answering. Col is asked first.
 
 ---
 
