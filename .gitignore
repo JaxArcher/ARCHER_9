@@ -56,3 +56,11 @@ backups/
 
 # Log files anywhere (they can contain camera URLs and personal content)
 *.log
+
+# Working notes kept on Col's PC only (2026-10-15)
+ARCHER_Antigravity_Worklog.md
+ARCHER_Claude_Reviews.md
+ARCHER_Workspace_Phase0_Audit_06OCT2026.md
+
+# Test cache
+.pytest_cache/

@@ -119,6 +119,7 @@ so you never save over a newer version.
 | Tool pool | ARCHER can add tools from git repos, only with Col's approval, and only after each repo is cleared by two independent cloud AI reviews: Claude (Anthropic) and OpenAI. |
 | Voice | Local only — Kokoro TTS, Faster-Whisper STT. ElevenLabs was removed 2026-10-06. |
 | People and faces | **No manual face enrollment — for anyone, Col included.** No button, form, script or command for enrolling faces. ARCHER picks up who people are from context — mainly names that come up naturally while that person is in view; a direct introduction ("this is Sam") also works, though Col rarely does that — keeps a snapshot of every new face, and later asks Col about them in conversation: first whether now is a good time, then one person at a time with the snapshot — who it is and anything worth remembering. Decided by Col 2026-09-16, restated 2026-10-09. See Phase 2b. |
+| Listening (second brain) | Whenever someone is in the room — Col included — ARCHER **transcribes** what it hears into text (updated 2026-10-13: presence comes from following people as well as the Reolink's person alerts). **No audio is saved.** Hearing Col's calls and everything he says is the point: ARCHER is his second brain. Col was told that California's consent rules may cover transcribing other people's conversations, and decided to go ahead (2026-10-10). See Phase 2c. |
 
 Defaults chosen by Claude that Col may change (flag if you think one is wrong):
 - GPU/CPU/VRAM/performance monitoring goes in the **System** tab; the
@@ -378,11 +379,33 @@ of what already exists, and log it in the worklog:
   view, and the name said while it's there. When unsure, don't guess; save the
   question for the conversational follow-up.
 - Naming adds the face as an extra reference, never replacing an existing one.
-- **Audit first:** find out what speech ARCHER actually hears outside wake-word
-  conversations. If it only hears what Col says to it after the wake word,
-  picking up names from Col's conversations with visitors would need ARCHER to
-  listen to the room. That is a new privacy decision: log it as a question for
-  Col, and don't build it until he answers.
+- **Names from conversation.** Col decided on 2026-10-10 that ARCHER
+  transcribes the room whenever the Reolink detects a person (Phase 2c). Build
+  Phase 2b first, using what ARCHER already hears: wake-word conversations and
+  the follow-up questions. Once Phase 2c exists, picking up names from those
+  transcripts joins this, under the same "only when the link is clear" rule.
+  For example, "Hi, I'm Sam" or Col greeting Sam while one unrecognized face is
+  in view counts. A name that is merely mentioned ("I talked to Sam yesterday")
+  never does.
+- **Col's own face (Col, 2026-10-10).** Every unrecognized face so far has been
+  Col, seen from angles and distances where the room camera doesn't recognize
+  him. ARCHER learns this from context instead of asking Col about himself:
+  - An unrecognized face counts as Col when the link is clear: exactly one
+    person is in view, and Col was recognized in the same scene in the observer
+    cycle just before or after, or by the other camera at the same moment.
+  - That sighting is logged as Col. The face is added as a new reference for Col
+    only when it also looks enough like his saved face. Otherwise it isn't kept
+    as a reference, so ARCHER's picture of Col doesn't drift towards blurry or
+    partial faces.
+  - When the link isn't clear, nothing changes: the face waits for the
+    conversational follow-up.
+  - Every face added to Col this way appears in the Change Log.
+  - **One-off clean-up:** every face waiting on 2026-10-10 is Col. The ones that
+    look enough like his saved face are added to his references. The rest are
+    too unclear to be useful, or aren't real faces, so they're marked "don't
+    know" and ARCHER stops asking about them. Back up `data/archer.db` first.
+  - **Replaced on 2026-10-12** by "Following people" below, which takes over
+    the ongoing rule. The one-off clean-up is done.
 
 **Asking Col later, in conversation**
 - When Col next talks to ARCHER and people are waiting, ARCHER asks whether now
@@ -403,6 +426,104 @@ of what already exists, and log it in the worklog:
   (section 1).
 - Snapshots and faces never leave the machine.
 
+**Following people (Col, 2026-10-12)**
+
+Col's point: once ARCHER has seen him come into the room, the person in the
+frame is still him as long as he hasn't left and nobody new has come in. Today
+ARCHER judges each snapshot on its own, so every off-angle look at him is a
+fresh guess.
+
+- **Follow people; don't re-guess.** On the room camera, ARCHER follows each
+  person from the moment they appear until they leave the frame. It looks at the
+  room a couple of times a second, in its own quick loop, separate from the slow
+  scene descriptions. It sees whole people (bodies), not just faces, so it can
+  tell "Col turned around" from "Col left and someone else came in".
+- **No video is kept.** Frames are looked at and dropped. Only what ARCHER
+  concludes is saved: who, when, and where in the room, as today.
+- **One identity for the whole stay.** The first time ARCHER clearly recognizes
+  a face, that person's whole stay in view counts as them, including the time
+  before. Every face sighting is logged with the stay it belongs to.
+- **When to stop assuming.** ARCHER doesn't carry an identity across a gap if:
+  - the person leaves the frame, at an edge or through a doorway in view; or
+  - two people overlap or cross paths. From that point, each of them starts a
+    new stay.
+
+  It waits for another clear look at each face.
+- **Losing sight isn't leaving (Col, 2026-10-12).** The detector often loses a
+  person in the middle of the room: sitting still, back turned, behind
+  furniture. If they show up again near where they were lost, and nobody was
+  seen coming in or going out in the meantime, it's the same stay. There is a
+  time limit, set from real data on Col's PC. *(Replaces "loses track of them
+  for more than a few seconds", which split one visit into many.)*
+- **Exits on the room camera (Col, 2026-10-13).** People come and go in three
+  places:
+  - the front door, off the left edge of the picture past the coat hooks;
+  - the hallway to the bathroom and bedroom: the doorway just right of where the
+    carved statue stood (the wall heater is there now), right of centre and
+    directly behind the right end of the couch;
+  - the kitchen door to the left of the fridge, at the right edge.
+
+  Everywhere else is inside the room. The bottom of the picture, where the couch
+  and the PC monitor are, is not an exit. A person is at an exit when their feet
+  are in one of these doorways. Someone sitting on the couch in front of the
+  hallway is inside the room. *(Clarified 2026-10-13: the hallway is not in the
+  middle of the picture.)*
+- **Only clear faces count.** A face that is turned away, looking down, blurry
+  or too dark gives an unreliable match: Col's own head, turned away, has scored
+  0.07 against his references. Such a face never names a stay, splits one,
+  starts a waiting label or gets learned. Inside a stay, it belongs to the
+  stay's person. How far a face is turned is measured, never assumed: a face
+  whose turn can't be measured doesn't count as clear.
+- **Faces that aren't people (Col, 2026-10-13).** The carved mask statue was
+  detected as a face, so Col moved it out of the camera's view. ARCHER doesn't
+  need its own way of spotting decor. Instead, when ARCHER asks about a face and
+  Col says it isn't a person (a statue, a poster, a picture on the TV), ARCHER
+  ignores that face from then on: it gets no label, is never attached to a
+  person, and never splits a stay. The statue had two faces, Person_61 and
+  Person_84; both are treated this way. Only a reply that is plainly about an
+  object counts: one that also mentions a person, a name or a role ("it's the TV
+  repair guy") does not. If Col corrects it straight away ("no, that's Sam"),
+  the mark is undone.
+- **Face checks run on their own schedule.** Checking the faces of the people
+  being followed doesn't wait for the slow scene descriptions, the motion alert,
+  or ARCHER being closed.
+- **Sharp looks (2026-10-14).** The room camera's small stream is for finding
+  people and their faces, at its full detail. Who a face belongs to is judged
+  from a sharp still from the camera's full-resolution stream, taken when the
+  face is turned toward the camera, at a limited rate per stay. On the small
+  stream alone, several clear faces of Col scored below 0.25 against him; on
+  sharp stills, none did. Only sharp, clear looks are learned.
+- **CPU budget (Claude's default, 2026-10-13; Col can change it).** While
+  following one person, the observer averages at most one CPU core (about 5% of
+  the PC) and never uses more than two, and the tracker keeps its couple of
+  frames a second.
+- **Someone it never recognizes** gets one waiting label for the whole stay, not
+  one label per sighting. The 2-minute rule counts the length of the stay. If
+  their face matches a label that is already waiting, that label is used: the
+  same person keeps one label across visits until they're named.
+- **Learning Col's face.** During a stay that is clearly Col, a clear face that
+  doesn't reach the recognition bar can be added to his references. The existing
+  limits apply: a match score against Col of 0.45 to 0.85, at most 3 a day, each
+  one in the Change Log.
+- **The mirror.** The room camera can see a mirror: the standing mirror by the
+  front door, on the left side of the picture. A reflection must never count as
+  a second person.
+- **The camera's own person alerts.** The Reolink can report people itself, but
+  ARCHER's listener for those alerts keeps failing ("not yet subscribed"). Fix
+  it and use it as a cross-check. Phase 2c's "transcribe while someone is
+  there" depends on it too.
+- **The desk webcam** is only looked at while ARCHER is open, through frame
+  requests, so it doesn't need to follow people.
+- **This replaces** the ongoing part of "Col's own face" above.
+
+**Audit first** (logged in the worklog, no code changes):
+- Which person detector and tracker can run on the CPU at a couple of frames a
+  second alongside the rest of the observer. Measure the CPU use on Col's PC.
+- Whether faces at room distance on the 640x480 stream are good enough, or
+  whether short, sharp crops from the camera's full-resolution stream are
+  needed.
+- How the mirror shows up.
+
 **Minimum time before asking (Col confirmed 2026-10-09):** ARCHER only asks
 about faces seen for 2 minutes or more in total, so one-off passers-by and
 delivery drivers don't come up. This matches Col's mobile-observer plan ("face
@@ -416,7 +537,204 @@ storage after 2+ minutes of interaction").
   with a name makes that face recognized from then on (it shows in the sightings
   log under that name).
 - "That's me", "don't know" and "forget them" each work as described.
+- **Following people:**
+  - With Col alone moving around the room for 10 minutes, every face sighting in
+    a stay where he was recognized at least once is logged as Col, and no new
+    labels appear.
+  - A second person who comes in is never filed as Col, and their stay gets one
+    waiting label. Test this live when someone is available; until then, with
+    automated tests.
+  - The mirror never creates a second person.
+  - The observer's CPU use, before and after, is in the worklog.
 - Tested with Col's real cameras (a manual checklist), plus automated checks that
+  can fail when the feature is broken.
+
+---
+
+## 5c. Phase 2c — Listening: transcribe the room (second brain)
+
+**Goal:** ARCHER is Col's second brain. Whenever someone is in the room — Col
+included — ARCHER turns what it hears into text: Col's
+phone calls, conversations with visitors, things he says to himself. **It saves
+the text, never the audio.** Later, Col can ask ARCHER about what was said ("what
+did I tell the contractor on Tuesday?"), and Phase 2b can pick up names from it.
+Decided by Col, 2026-10-10.
+
+**Start after Phase 2b is signed off.** Begin with a short audit (no code
+changes), logged in the worklog:
+- **Which microphone.** The Reolink RLC-520A has a built-in mic, and its
+  stream may carry audio. Col's desk mic (JLab GO Talk) is used by ARCHER's
+  voice pipeline. Find out which of these the observer service can actually use
+  while running as a Windows service before login. Test both for how clearly
+  each picks up normal speech across the room. Log the comparison and ask Col
+  if both work.
+- **Where it runs.** Transcription belongs with the always-on observer service,
+  so it works whether or not ARCHER's window is open, the same as the camera.
+  The observer runs on the CPU by design, to keep the graphics card free for
+  ARCHER's brain. Measure CPU load while transcribing, and log it.
+- **What already exists.** Faster-Whisper (local speech-to-text), voice activity
+  detection, the Reolink person-detection listener and its 30-second tail.
+
+**Behaviour**
+- **When:** whenever someone is in the room. That means while ARCHER is following
+  anyone on the room camera (an open stay, Phase 2b), plus the Reolink's own
+  person alert and its 30-second tail. Not otherwise. *(Updated 2026-10-13: the
+  camera's alerts stop once someone sits still, which would cut off a long phone
+  call on the couch.)*
+- **What:** only stretches that contain speech (voice activity detection), turned
+  into text. Audio is held in memory only as long as it takes to
+  transcribe, then discarded. Never write it to disk (the voice pipeline's
+  `scratch/*.wav` debug dumps must not happen here).
+- **ARCHER's own voice:** mark or drop lines that are ARCHER speaking, so ARCHER's
+  replies don't show up as things Col said.
+- **Date and time on everything (Col, 2026-10-10):** every transcript line
+  carries the full date and time it was spoken, in Col's local time. When ARCHER
+  shows or quotes a transcript, it shows the date and time too
+  (e.g. "Tue Oct 14, 3:42 PM").
+- **Storage:** transcripts go to ARCHER's own local database with their date,
+  time and source, linked to what the observer saw at that moment (who was in view, if
+  known). They are kept, because this is Col's memory; nothing expires
+  automatically.
+- **Memory:** transcripts become searchable for ARCHER, so Col can ask about past
+  conversations. The nightly maintenance pass can also fold them into its daily
+  summary.
+- **Names (Phase 2b):** follow the "only when the link is clear" rule in
+  Phase 2b.
+
+**Local only, no exceptions.** Speech-to-text runs entirely on Col's machine. The
+model must load from the local cache with no network calls. Today faster-whisper
+(and Kokoro and the voice-auth model) check Hugging Face for model details when
+they load; that must not happen for this, and ideally nowhere in ARCHER.
+
+**Defaults chosen by Claude — Col may change them:**
+- A **visible "Listening" indicator** in the left column while transcription is
+  active.
+- A way to **pause listening**: say "ARCHER, stop listening" or use a button,
+  until Col resumes it or for a set time.
+- **"Forget that"**: Col can ask ARCHER to delete the transcript of a recent
+  stretch.
+
+**Acceptance:**
+- With a person in view, ARCHER transcribes speech in the room; with no one in
+  view, it doesn't.
+- Every transcript line has its date and time, and ARCHER shows them when it
+  quotes one.
+- No audio files are written anywhere, and nothing is sent off the machine.
+- Col can ask ARCHER about something he said on a call earlier, and it answers
+  from the transcript.
+- The indicator, pause and "forget that" all work.
+- ARCHER's responsiveness isn't noticeably affected (CPU measured and logged).
+- Tested with Col's real room and voice (manual checklist), plus automated
+  checks that can fail when the feature is broken.
+
+**Launch phrase: "All systems go" (Col, 2026-10-13)**
+
+Once the observer can hear the room, Col can start ARCHER by voice.
+- **The phrase.** When Col says "all systems go" in the room, ARCHER starts the
+  web GUI: the same start-up as `ARCHER-Web.bat` (Docker, Ollama and the other
+  services, then the page at `http://127.0.0.1:8200/app` in the browser).
+- **Already open.** If ARCHER is already running, it brings its page to the
+  front, or reopens the page if it was closed. It never starts a second copy.
+- **Locked PC.** If the PC is locked or at the login screen, ARCHER opens the GUI
+  as soon as Col logs in.
+- **Confirmation.** When ARCHER is up, it says so in one short spoken line
+  (Claude's default; Col can change the wording or turn it off).
+- **Whose voice.** Any voice saying the phrase counts, because opening ARCHER
+  is harmless (Claude's default; Col can restrict it to his own voice).
+- **What it listens for.** The phrase uses the same listening as transcription,
+  so it works whenever someone is in the room. Nothing extra is recorded or kept
+  for it.
+- **What to find out in the audit.** The observer runs as a Windows service, and
+  services can't open windows on Col's desktop. Find out what in Col's own
+  login session should start ARCHER and open the page when the observer hears
+  the phrase. Log the options, and ask before adding anything that starts at
+  login.
+
+**Acceptance (launch phrase):**
+- ARCHER closed: Col says "all systems go" from the couch, and the GUI opens.
+- ARCHER already open: saying it again brings the page forward without
+  starting a second copy.
+- Saying it while the PC is locked opens the GUI right after Col logs in.
+- Ordinary conversation that doesn't contain the phrase never starts ARCHER
+  (checked over a day of real room audio).
+
+---
+
+## 5d. Phase 2d — Things that get moved
+
+**Goal:** ARCHER keeps track of the things that get moved around, by Col or by
+anyone else, so it can answer "where's my wallet?" with "On the dining table.
+You put it there at 2:15 PM."
+This is the real-time location tracking from the Inventory Manager plan
+(January 2026). It builds on "Following people" in Phase 2b. Decided by Col,
+2026-10-12.
+
+**Start after Phase 2c is signed off.** Col decided on 2026-10-12 that this
+comes after the room transcription.
+
+**Audit first** (logged in the worklog, no code changes):
+- **What the room camera can make out.** On the 640x480 stream a face is about
+  46 pixels tall, so keys or a wallet in a hand are only a few pixels. Check
+  whether short, sharp crops around people's hands, taken from the camera's
+  full-resolution stream, are enough to identify everyday items.
+- **Which local model can name a held item reliably.** Candidates are the
+  observer's scene describer, ARCHER's own vision model and a dedicated object
+  detector. Measure the CPU and GPU cost too: Col games on this PC.
+- **What already exists:** the inventory table and `inventory_SKILL.md`.
+
+**Behaviour**
+- **Anyone, not just Col (Col, 2026-10-12).** ARCHER watches everyone it is
+  following, not only Col. It records who moved the item: Col, a person it
+  knows by name, or a waiting label such as Person_N, along with that label's
+  photo.
+- **Only at key moments.** While following people, ARCHER notices when someone
+  picks something up, puts something down or carries something away. Only at
+  those moments does it take a closer look at their hands.
+- **What it records:** the item, who moved it, where it was put down, and the
+  date and time ("Tue Oct 14, 3:42 PM", as in Phase 2c).
+- **Telling Col.** ARCHER mentions moves made by anyone other than Col, both in
+  While You Were Away and the next time Col talks to it. For example: "Sarah
+  moved your keys from the hanger to the counter at 3:12 PM." Col's own moves
+  are recorded but not announced, and he can always ask. (This is Claude's
+  default; Col can change it.)
+- **A photo of where it was last seen.** For each item, ARCHER keeps a still
+  photo of the item where it was last seen, with enough of the surroundings to
+  recognize the spot. Each new move replaces it.
+- **Leaving with an item.** If someone leaves the frame carrying an item,
+  ARCHER keeps a sharp still photo of that person as they leave, linked to the
+  item: "last seen leaving with your keys, Tue Oct 14, 3:42 PM". If ARCHER
+  doesn't recognize the person, the photo also goes into the face follow-up
+  (spec 5b).
+- **Named places.** Places are named spots in the room, such as "dining table"
+  or "couch". The first time ARCHER needs a name for a spot, it asks Col.
+- **Where it goes.** Moves go into the existing inventory records, with a Change
+  Log entry for each one.
+- **Answers.** "Where's my X?" gives the last place and time, and "When did I
+  last have X?" works too. When ARCHER isn't sure what an item was, it says so.
+  It never makes up a location.
+- **Unknown items.** When ARCHER can't name an item, it keeps a cropped photo of
+  it and asks Col about it later in conversation, the same way it does with
+  faces: one at a time, when it's a good time.
+- **Privacy.** No video is kept. The only stills kept are:
+  - each item's last-seen photo
+  - the photo of someone leaving with an item
+  - photos of items ARCHER couldn't name
+
+  All of them stay on the PC and are listed with their item, and Col can delete
+  any of them. Photos of unnamed items are deleted once Col names or dismisses
+  the item.
+
+**Acceptance:**
+- Col picks up an everyday item (for example a phone, mug or remote) and puts it
+  somewhere else in the room. Asked "where's my X?", ARCHER gives the right
+  place and time, and shows the last-seen photo.
+- When someone other than Col moves an item, ARCHER records who did it and
+  mentions it to Col. Until there's a visitor to test with, check this with
+  automated tests.
+- Carrying an item out of the frame produces a photo of the person leaving,
+  linked to the item.
+- An item ARCHER can't identify leads to a question later, never a guess.
+- Tested with Col's real camera (a manual checklist), plus automated checks that
   can fail when the feature is broken.
 
 ---
@@ -611,6 +929,57 @@ page Col can watch and take over; the old mirror is gone.
 
 ---
 
+## 10b. Phase 7b — Android apps tab (Col, 2026-10-13)
+
+**Goal:** Col runs apps from his Android phone inside an ARCHER tab, on the PC.
+
+**Order:** Claude's default is right after Phase 2d. It doesn't depend on the
+approval system, because in this phase only Col uses the apps.
+
+**Audit first** (logged in the worklog, no installs):
+- **Emulator.** Which Android emulator can run Col's apps on his PC and show its
+  screen inside a browser tab, with his mouse, keyboard and gesture clicks going
+  back to it. Prefer free, open, maintained options: the official Android
+  Emulator with a Google Play system image, plus a way to stream it into the page
+  (the emulator's own streaming, or scrcpy). Avoid closed, ad-supported
+  emulators. Windows Subsystem for Android has been discontinued; don't use it.
+- **Graphics card.** The graphics card is already tight for ARCHER's brain, so
+  measure the emulator's VRAM and CPU use. Prefer a setup that leaves the card
+  free.
+- **Col's apps.** The ones he uses most (Col, 2026-10-13): **Messages**,
+  **Victure** (his cameras) and **eero** (his Wi-Fi). Check each one in the
+  emulator; some apps refuse to run on anything but a real phone. Report which
+  work.
+  - Messages is a special case: the emulator has no SIM or phone number, so it
+    can't send or receive Col's texts itself. Check whether Messages' own web
+    pairing with his phone, shown in this tab or in the browser of Phase 7,
+    serves him better.
+- **Dependencies.** List every install needed (emulator, system image,
+  streaming component), with licences, for Col's approval. None is pre-approved.
+
+**Behaviour**
+- **The tab.** A new **ANDROID** tab, placed after ARTIFACTS. Voice and text tab
+  switching accept "android", "phone" and "apps" (Claude's default label; Col may
+  rename it).
+- **Use.** The phone screen fills the tab, and Col uses it with mouse, keyboard
+  and gestures. Apps are installed from Google Play inside the emulator, signed
+  into Col's Google account, like setting up a new phone.
+- **Starting and stopping.** The emulator starts the first time Col opens the
+  tab and keeps running while ARCHER is open. Col can stop it from the tab. It
+  stops when ARCHER closes.
+- **Privacy.** The apps go online the way they do on Col's phone. ARCHER itself
+  sends nothing, and nothing from the emulator goes into ARCHER's memory unless
+  Col asks.
+- **ARCHER using the apps** (tapping, typing, reading the screen) is a later
+  step, through the Phase 3 approval gate like the browser in Phase 7.
+
+**Acceptance:** Col opens the tab, signs into Google Play, installs one of his
+apps, and uses it in the tab with mouse, keyboard and gestures. Switching away
+and back keeps the app where he left it. The CPU and VRAM cost is measured and
+logged, and ARCHER's replies don't slow down noticeably while the emulator runs.
+
+---
+
 ## 11. Phase 8 — Any desktop app inside the pane (prototype first)
 
 **Goal:** see and use any Windows app from the Artifacts tab.
@@ -652,6 +1021,8 @@ May be added to ARCHER's own `.venv` / `web/vendor/` without asking again:
 | `anthropic`, `openai` SDKs (if not already present) | 4 | The two AI reviews |
 | Monaco Editor (local copy) | 5 | Code view/edit in the Artifacts pane |
 | `pypdf`, `PyMuPDF`, `pdfplumber`, `ReportLab`, `OCRmyPDF` | 5 | PDF starter set — into a separate document-tools environment, not `.venv` |
+| One person-detector model file, permissively licensed (e.g. SSD-MobileNet via OpenCV, or YOLOX-Nano via onnxruntime; not Ultralytics/AGPL). Pinned source and checksum, recorded in the worklog. Approved by Col 2026-10-12. | 2b | Following people on the room camera |
+| Roboflow `trackers` (ByteTrack; Apache 2.0) and its `supervision` dependency, pinned version. Replaces the hand-written track matching. Approved by Col 2026-10-12. | 2b | Following people on the room camera |
 
 Everything else — including LibreOffice, Tesseract, Ghostscript and the
 virtual display driver — needs Col's explicit approval (git-repo tools go

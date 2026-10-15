@@ -173,6 +173,8 @@ async def _request_browser_camera_frame(ws: WebSocket, timeout: float = 5.0):
         b64_data = await asyncio.wait_for(fut, timeout=timeout)
         if not b64_data:
             return None
+        logger.info(f"[ServerWS] Received camera_frame_response req_id={req_id} ({len(b64_data)} b64 bytes)")
+        await _ws_send_safe(ws, json.dumps({"type": "camera_frame_ack", "request_id": req_id, "size": len(b64_data)}))
         img_bytes = base64.b64decode(b64_data)
         np_arr = np.frombuffer(img_bytes, np.uint8)
         return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -651,36 +653,6 @@ async def ws_voice(websocket: WebSocket):
                         int(commitment_id), fulfilled=bool(msg.get("fulfilled", True))
                     )
                     _broadcast_ws(_build_memory_snapshot())
-            elif msg_type == "memory_confirm_person":
-                # Col names a recurring stranger from the "Unrecognized
-                # People" pane -- pull the embedding InsightFace already
-                # captured for this face-cluster off the resolved row and
-                # enroll it as a known person, same store call the live
-                # "this is Sarah" path uses (CoreAgent._check_person_
-                # introduction). No re-capture, no second InsightFace pass.
-                store = get_sqlite_store()
-                confirmation_id = msg.get("id")
-                name = (msg.get("name") or "").strip()
-                if confirmation_id is not None and name:
-                    row = store.resolve_pending_person_confirmation(
-                        int(confirmation_id), status="confirmed", confirmed_name=name
-                    )
-                    if row and row.get("embedding"):
-                        # add_person_face (2026-10-06): adds a reference if the
-                        # name is already enrolled instead of overwriting it.
-                        how = store.add_person_face(name=name, embedding=row["embedding"], source="confirmation")
-                        logger.info(f"Named '{name}' from browser confirmation ({how}).")
-                    _broadcast_ws(_build_memory_snapshot())
-            elif msg_type == "memory_dismiss_person":
-                # A one-off stranger (delivery driver, etc.) Col doesn't
-                # want to name -- clears it from the pane without enrolling
-                # anyone. upsert_pending_person_confirmation() won't
-                # resurrect a dismissed row for this same face.
-                store = get_sqlite_store()
-                confirmation_id = msg.get("id")
-                if confirmation_id is not None:
-                    store.resolve_pending_person_confirmation(int(confirmation_id), status="dismissed")
-                    _broadcast_ws(_build_memory_snapshot())
             elif msg_type == "tasks_get_all":
                 await _ws_send_safe(websocket, json.dumps(_build_tasks_snapshot()))
             elif msg_type == "tasks_add":
@@ -850,9 +822,9 @@ def _build_memory_snapshot() -> dict:
         # can't match to known_persons, waiting on a name. The OTHER half
         # of no-manual-enrollment (see CoreAgent._check_person_introduction
         # for the live "this is Sarah" half) -- this is what happens when
-        # nobody ever says who a recurring visitor is out loud. Confirming
-        # or dismissing one is a round trip through memory_confirm_person /
-        # memory_dismiss_person below.
+        # nobody ever says who a recurring visitor is out loud. In Phase 2b,
+        # confirming, dismissing, or forgetting them is handled conversationally
+        # by CoreAgent when Colby reviews them.
         "pending_people": pending_people,
     }
 

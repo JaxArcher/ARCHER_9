@@ -16,6 +16,7 @@ Design rules:
 
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -118,12 +119,13 @@ class WebcamCapture:
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
                 self._cap = cv2.VideoCapture(self._camera_source)
 
+            def _sanitize_source(src: Any) -> str:
+                if isinstance(src, int):
+                    return f"device {src}"
+                return re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", str(src))
+
             if self._cap is None or not self._cap.isOpened():
-                source_desc = (
-                    f"device {self._camera_source}"
-                    if isinstance(self._camera_source, int)
-                    else self._camera_source
-                )
+                source_desc = _sanitize_source(self._camera_source)
                 logger.warning(
                     f"Could not open camera ({source_desc}). "
                     "Observer will run in no-camera mode."
@@ -141,11 +143,7 @@ class WebcamCapture:
             )
             self._capture_thread.start()
 
-            source_desc = (
-                f"device {self._camera_source}"
-                if isinstance(self._camera_source, int)
-                else self._camera_source
-            )
+            source_desc = _sanitize_source(self._camera_source)
             backend = self._cap.getBackendName() if hasattr(self._cap, "getBackendName") else "unknown"
             logger.info(
                 f"Camera capture started ({source_desc}, "
@@ -154,6 +152,7 @@ class WebcamCapture:
                 f"{1/self._capture_interval:.1f} FPS)"
             )
             return True
+
 
         except ImportError:
             logger.warning(
@@ -293,6 +292,10 @@ class WebcamCapture:
                 return self._latest_frame.copy(), self._frame_timestamp
             return None, 0.0
 
+    def capture_timestamp(self) -> float:
+        """Return real UTC wall-clock epoch timestamp (Spec 5b, Review Item 9)."""
+        return time.time()
+
     @property
     def is_running(self) -> bool:
         """Check if the capture thread is active."""
@@ -377,7 +380,8 @@ class WebcamCapture:
                 consecutive_errors = 0
                 with self._frame_lock:
                     self._latest_frame = frame
-                    self._frame_timestamp = time.monotonic()
+                    # Review 23:55 Item 9: Use real UTC wall-clock epoch time (time.time()), not time.monotonic()
+                    self._frame_timestamp = time.time()
                     self._frames_captured += 1
 
             except Exception as e:

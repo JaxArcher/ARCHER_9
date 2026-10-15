@@ -48,7 +48,12 @@ ArcherClient.on("artifactPush", ({ imageB64, title }) => {
   label.textContent = title ? `📸 ${title}` : "📸 Screenshot";
   const img = document.createElement("img");
   img.className = "artifact-image";
-  img.src = `data:image/png;base64,${imageB64}`;
+  if (imageB64.startsWith("data:")) {
+    img.src = imageB64;
+  } else {
+    const mime = imageB64.startsWith("/9j/") ? "image/jpeg" : "image/png";
+    img.src = `data:${mime};base64,${imageB64}`;
+  }
   img.alt = title || "Screenshot";
   wrap.appendChild(label);
   wrap.appendChild(img);

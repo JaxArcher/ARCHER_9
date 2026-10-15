@@ -227,6 +227,10 @@ Invoke-NssmChecked set $OllamaServiceName AppRotateBytes 10485760
 Invoke-NssmChecked set $OllamaServiceName Start SERVICE_AUTO_START
 Invoke-NssmChecked set $OllamaServiceName DisplayName "ARCHER Observer Ollama (CPU)"
 Invoke-NssmChecked set $OllamaServiceName Description "CPU-only Ollama on 127.0.0.1:11435 serving the ARCHER observer's vision model (moondream). Starts at boot, before ArcherObserver."
+# Below-normal priority (2026-10-12): the observer's vision model runs on the CPU
+# for ~9 s every ~40 s. At this priority it only uses spare CPU and always
+# yields to whatever Col is doing.
+Invoke-NssmChecked set $OllamaServiceName AppPriority BELOW_NORMAL_PRIORITY_CLASS
 
 Write-Host "Starting '$OllamaServiceName'..."
 Start-ServiceAndWait $OllamaServiceName
@@ -281,6 +285,7 @@ Invoke-NssmChecked set $ServiceName AppRotateBytes 10485760
 Invoke-NssmChecked set $ServiceName Start SERVICE_AUTO_START
 Invoke-NssmChecked set $ServiceName DisplayName "ARCHER Observer Service"
 Invoke-NssmChecked set $ServiceName Description "Always-on ambient observation for ARCHER (camera scene/person analysis + neglect detection). Starts at boot after ArcherObserverOllama; independent of the ARCHER desktop app / browser client."
+Invoke-NssmChecked set $ServiceName AppPriority BELOW_NORMAL_PRIORITY_CLASS
 
 # Works around a real, repeatedly-observed crash (2026-09-21, Col's report
 # "whenever I put my PC in sleep mode it restarts at some point" -- turned

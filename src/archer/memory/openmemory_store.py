@@ -74,6 +74,25 @@ class OpenMemoryStore:
             logger.error(f"Failed to add memory to OpenMemory: {e}")
             return ""
 
+    def delete_memory(self, memory_id: str) -> bool:
+        """
+        Delete a memory by its ID (Item 4).
+        """
+        if not memory_id:
+            return False
+        try:
+            if hasattr(self._om, "delete"):
+                import inspect
+                if inspect.iscoroutinefunction(self._om.delete):
+                    self._run_async(self._om.delete(memory_id))
+                else:
+                    self._om.delete(memory_id)
+                logger.debug(f"Deleted OpenMemory: {memory_id}")
+                return True
+        except Exception as e:
+            logger.debug(f"Failed to delete memory {memory_id} from OpenMemory: {e}")
+        return False
+
     def search(
         self,
         query: str,

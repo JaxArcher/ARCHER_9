@@ -115,16 +115,10 @@ def main() -> None:
     # the standalone archer/observer_service.py process (Col's call: the
     # observer shouldn't depend on this process or the desktop GUI). But
     # a lightweight, analysis-free ObserverPipeline instance is still
-    # needed HERE too, now that the browser client has its own live
-    # camera pane, ENROLL FACE button, and CAMERA release/reacquire
-    # toggle (all added 2026-09-16, after this comment was first
-    # written) — those all read/act on `_observer` in server.py, which
-    # was `None` in this process until now, silently leaving all three
-    # broken in browser-only mode even though they worked fine from the
-    # desktop app. Mirrors __main__.py's own instance exactly:
-    # run_analysis=False means it opens the camera but never runs its
-    # own analysis thread, so it doesn't duplicate the observer service's
-    # work or double-log every observation.
+    # needed HERE too, so server-side observer components and interventions
+    # run cleanly alongside the browser client. Mirrors __main__.py's
+    # own instance: run_analysis=False means it never runs its own analysis
+    # thread or duplicates the observer service's work.
     observer = None
     try:
         from archer.observer.pipeline import ObserverPipeline

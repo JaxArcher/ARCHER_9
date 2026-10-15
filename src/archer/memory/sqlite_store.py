@@ -17,7 +17,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -131,7 +133,9 @@ class SQLiteStore:
                     embedding BLOB,
                     snapshot_path TEXT,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    camera_source TEXT NOT NULL DEFAULT 'webcam'
+                    camera_source TEXT NOT NULL DEFAULT 'webcam',
+                    face_box TEXT,
+                    faces_in_frame INTEGER DEFAULT 1
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_sightings_person
@@ -457,11 +461,13 @@ class SQLiteStore:
                     embedding BLOB NOT NULL,
                     snapshot_path TEXT,
                     sighting_count INTEGER NOT NULL DEFAULT 1,
+                    total_duration_seconds REAL NOT NULL DEFAULT 0.0,
                     first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     status TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'confirmed' | 'dismissed'
                     confirmed_name TEXT,
-                    resolved_at TIMESTAMP
+                    resolved_at TIMESTAMP,
+                    face_box TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_pending_person_confirmations_status ON pending_person_confirmations(status);
 
@@ -522,9 +528,71 @@ class SQLiteStore:
                     source TEXT DEFAULT 'reflective_mode',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+
+                -- High-water mark for strictly monotonic Person_N sequence numbers
+                CREATE TABLE IF NOT EXISTS person_id_sequence (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    next_number INTEGER NOT NULL DEFAULT 1
+                );
+
+                -- Persistent key-value runtime state (e.g. checkin cooldown pauses)
+                CREATE TABLE IF NOT EXISTS app_kv_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                -- Stays record (Following people - Spec 5b, Review 19:30 Item 3)
+                CREATE TABLE IF NOT EXISTS person_stays (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stay_id TEXT NOT NULL UNIQUE,
+                    person_id TEXT NOT NULL,
+                    is_known INTEGER NOT NULL DEFAULT 0,
+                    confidence REAL NOT NULL DEFAULT 0.0,
+                    camera_source TEXT NOT NULL DEFAULT 'network_cam',
+                    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    ended_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    track_id INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_stays_person ON person_stays(person_id);
+                CREATE INDEX IF NOT EXISTS idx_stays_stay_id ON person_stays(stay_id);
+                CREATE INDEX IF NOT EXISTS idx_stays_started ON person_stays(started_at);
+                CREATE INDEX IF NOT EXISTS idx_stays_ended ON person_stays(ended_at);
             """)
+            try:
+                conn.execute(
+                    "ALTER TABLE pending_person_confirmations ADD COLUMN total_duration_seconds REAL NOT NULL DEFAULT 0.0"
+                )
+            except Exception:
+                pass
+            try:
+                conn.execute("ALTER TABLE person_sightings ADD COLUMN face_box TEXT")
+            except Exception:
+                pass
+            try:
+                conn.execute("ALTER TABLE pending_person_confirmations ADD COLUMN face_box TEXT")
+            except Exception:
+                pass
+            try:
+                conn.execute("ALTER TABLE person_sightings ADD COLUMN faces_in_frame INTEGER DEFAULT 1")
+            except Exception:
+                pass
+            try:
+                conn.execute("ALTER TABLE person_sightings ADD COLUMN stay_id TEXT")
+            except Exception:
+                pass
+            try:
+                conn.execute("ALTER TABLE pending_person_confirmations ADD COLUMN stay_id TEXT")
+            except Exception:
+                pass
             conn.commit()
             logger.info(f"SQLite store initialized at {self._db_path}")
+
+            # Backfill any pending face durations from sightings on startup
+            try:
+                self.backfill_pending_durations_from_sightings()
+            except Exception as e:
+                logger.debug(f"Initial duration backfill skipped/failed (non-fatal): {e}")
 
         finally:
             conn.close()
@@ -865,19 +933,270 @@ class SQLiteStore:
         finally:
             conn.close()
 
-    def add_person_face(self, name: str, embedding: bytes, source: str | None = None) -> str:
+    def add_person_face(self, name: str, embedding: bytes, source: str | None = None) -> dict[str, Any]:
         """Name a face (2026-10-06). New name: becomes that person's primary
-        enrollment. Existing name: added as an extra reference instead of
+        record. Existing name: added as an extra reference instead of
         overwriting the one they already have -- the overwrite is what
         broke Col's recognition on 2026-09-19. Used by the "this is X"
-        introduction path, the person-confirmation WS message, and
-        scripts/name_person.py. Returns "enrolled" or "reference"."""
+        introduction path and Phase 2b conversational confirmations.
+        Returns dict with action ('enrolled' or 'reference'), id, and name."""
         existing = {p["name"] for p in self.get_known_persons()}
         if name in existing:
-            self.add_known_person_reference(name, embedding, source)
-            return "reference"
-        self.add_known_person(name=name, embedding=embedding)
-        return "enrolled"
+            ref_id = self.add_known_person_reference(name, embedding, source)
+            return {"action": "reference", "id": ref_id, "name": name}
+        enrolled_id = self.add_known_person(name=name, embedding=embedding)
+        return {"action": "enrolled", "id": enrolled_id, "name": name}
+
+    def remove_known_person_reference(self, ref_id: int) -> None:
+        """Remove a reference by id from known_person_references (Item 4)."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute("DELETE FROM known_person_references WHERE id = ?", (ref_id,))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def remove_known_person(self, name: str) -> None:
+        """Remove a person from known_persons and any associated extra references (Item 4)."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute("DELETE FROM known_persons WHERE name = ?", (name,))
+                conn.execute("DELETE FROM known_person_references WHERE name = ?", (name,))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def delete_contact(self, name: str) -> None:
+        """Delete a contact by name from social_contacts (Item 4)."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                row = conn.execute("SELECT id FROM social_contacts WHERE name = ? COLLATE NOCASE", (name,)).fetchone()
+                if row:
+                    cid = row[0]
+                    conn.execute("DELETE FROM social_interactions WHERE contact_id = ?", (cid,))
+                    conn.execute("DELETE FROM social_commitments WHERE contact_id = ?", (cid,))
+                    conn.execute("DELETE FROM social_contacts WHERE id = ?", (cid,))
+                    conn.commit()
+            finally:
+                conn.close()
+
+    def get_face_box_for_snapshot(self, snapshot_path: str) -> str | None:
+        """Retrieve the exact bounding box saved with a specific snapshot photo (Item 5)."""
+        if not snapshot_path:
+            return None
+        import os
+        norm_path = os.path.normpath(snapshot_path)
+        base_name = os.path.basename(snapshot_path)
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT face_box FROM person_sightings 
+                WHERE (snapshot_path = ? OR snapshot_path = ? OR snapshot_path LIKE ?) 
+                  AND face_box IS NOT NULL 
+                ORDER BY id DESC LIMIT 1
+                """,
+                (snapshot_path, norm_path, f"%{base_name}"),
+            ).fetchone()
+            if row and row["face_box"]:
+                return row["face_box"]
+            return None
+        finally:
+            conn.close()
+
+    def has_only_col_been_seen_recently(
+        self,
+        camera_source: str | None = None,
+        within_seconds: float = 180.0,
+        before_timestamp: float | None = None,
+    ) -> bool:
+        """
+        Check if Col has been the ONLY face seen on camera_source for the last few minutes (Spec 5b / Item 6).
+        Returns True if Col was seen within within_seconds on this camera, AND NO other person/face
+        (unrecognized or other known person) was seen on this camera during that window.
+        If camera_source has no recent sightings, falls back to checking across all cameras.
+        """
+        target_dt = (
+            datetime.fromtimestamp(before_timestamp, tz=timezone.utc)
+            if before_timestamp
+            else datetime.now(timezone.utc)
+        )
+        cutoff_dt = target_dt - timedelta(seconds=within_seconds)
+
+        conn = self._get_connection()
+        try:
+            # Query recent sightings
+            if camera_source:
+                rows = conn.execute(
+                    """
+                    SELECT id, person_id, is_known, timestamp, camera_source FROM person_sightings 
+                    WHERE camera_source = ? 
+                    ORDER BY id DESC LIMIT 500
+                    """,
+                    (camera_source,),
+                ).fetchall()
+            else:
+                rows = []
+
+            # If this camera has sightings, evaluate on this camera
+            if rows:
+                has_col = False
+                for r in rows:
+                    ts_str = str(r["timestamp"])[:19]
+                    try:
+                        s_dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                    except Exception:
+                        continue
+                    if s_dt < cutoff_dt:
+                        break
+                    pid = r["person_id"]
+                    is_k = bool(r["is_known"])
+                    if pid == "Col" and is_k:
+                        has_col = True
+                    else:
+                        # Someone other than Col was seen on this camera
+                        return False
+                return has_col
+
+            # Fallback: check across all cameras if this camera had no recent sightings
+            all_rows = conn.execute(
+                """
+                SELECT id, person_id, is_known, timestamp FROM person_sightings 
+                ORDER BY id DESC LIMIT 500
+                """
+            ).fetchall()
+            if not all_rows:
+                return False
+
+            has_col = False
+            for r in all_rows:
+                ts_str = str(r["timestamp"])[:19]
+                try:
+                    s_dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                except Exception:
+                    continue
+                if s_dt < cutoff_dt:
+                    break
+                pid = r["person_id"]
+                is_k = bool(r["is_known"])
+                if pid == "Col" and is_k:
+                    has_col = True
+                else:
+                    return False
+            return has_col
+        finally:
+            conn.close()
+
+    def count_sightings_for_person(self, person_id: str) -> int:
+        """Count total sightings recorded for a person_id."""
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                "SELECT count(*) as cnt FROM person_sightings WHERE person_id = ?",
+                (person_id,),
+            ).fetchone()
+            return row["cnt"] if row else 0
+        finally:
+            conn.close()
+
+    def count_context_references_today(self, person_name: str = "Col") -> int:
+        """Count how many learned references were added for a person today (UTC day)."""
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT count(*) as cnt FROM known_person_references
+                WHERE name = ? AND source IN ('context_rule', 'sharp_crop')
+                  AND date(added_at) = date('now')
+                """,
+                (person_name,),
+            ).fetchone()
+            return row["cnt"] if row else 0
+        finally:
+            conn.close()
+
+    count_learned_references_today = count_context_references_today
+
+    def get_recent_known_sighting(
+        self, person_id: str = "Col", within_seconds: float = 75.0, before_timestamp: float | None = None
+    ) -> dict[str, Any] | None:
+        """Check if person was recognized within within_seconds in person_sightings (Spec 5b / Item 6)."""
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT * FROM person_sightings 
+                WHERE person_id = ? AND is_known = 1 
+                ORDER BY id DESC LIMIT 1
+                """,
+                (person_id,),
+            ).fetchone()
+            if not row:
+                return None
+            ts_str = str(row["timestamp"])[:19]
+            try:
+                last_dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                target_dt = (
+                    datetime.fromtimestamp(before_timestamp, tz=timezone.utc)
+                    if before_timestamp
+                    else datetime.now(timezone.utc)
+                )
+                diff = abs((target_dt - last_dt).total_seconds())
+                if diff <= within_seconds:
+                    return dict(row)
+            except Exception as e:
+                logger.debug(f"Error checking recent sighting timestamp: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def get_recent_unrecognized_sighting(
+        self, within_seconds: float = 75.0, before_timestamp: float | None = None, camera_source: str | None = None
+    ) -> dict[str, Any] | None:
+        """Check if an unrecognized single-person sighting occurred within within_seconds (Spec 5b retrospective link)."""
+        conn = self._get_connection()
+        try:
+            query = "SELECT * FROM person_sightings WHERE is_known = 0 AND person_id LIKE 'Person_%' AND COALESCE(faces_in_frame, 1) = 1"
+            params: list[Any] = []
+            if camera_source:
+                query += " AND camera_source = ?"
+                params.append(camera_source)
+            query += " ORDER BY id DESC LIMIT 1"
+            row = conn.execute(query, tuple(params)).fetchone()
+            if not row:
+                return None
+            ts_str = str(row["timestamp"])[:19]
+            try:
+                last_dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                target_dt = (
+                    datetime.fromtimestamp(before_timestamp, tz=timezone.utc)
+                    if before_timestamp
+                    else datetime.now(timezone.utc)
+                )
+                diff = abs((target_dt - last_dt).total_seconds())
+                if diff <= within_seconds:
+                    return dict(row)
+            except Exception as e:
+                logger.debug(f"Error checking recent unrecognized sighting timestamp: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def reassign_sighting_to_col(self, sighting_id: int) -> None:
+        """Update a past unrecognized sighting to Col (Spec 5b)."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    "UPDATE person_sightings SET person_id = 'Col', is_known = 1 WHERE id = ?",
+                    (sighting_id,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
     def log_person_sighting(
         self,
@@ -887,6 +1206,9 @@ class SQLiteStore:
         embedding: bytes | None = None,
         snapshot_path: str | None = None,
         camera_source: str = "webcam",
+        face_box: str | None = None,
+        faces_in_frame: int = 1,
+        stay_id: str | None = None,
     ) -> int:
         """Log a person sighting (known or unknown repeat visitor)."""
         with self._lock:
@@ -895,15 +1217,215 @@ class SQLiteStore:
                 cursor = conn.execute(
                     """
                     INSERT INTO person_sightings
-                        (person_id, is_known, confidence, embedding, snapshot_path, camera_source)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                        (person_id, is_known, confidence, embedding, snapshot_path, camera_source, face_box, faces_in_frame, stay_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (person_id, 1 if is_known else 0, confidence, embedding, snapshot_path, camera_source),
+                    (person_id, 1 if is_known else 0, confidence, embedding, snapshot_path, camera_source, face_box, faces_in_frame, stay_id),
                 )
                 conn.commit()
                 return cursor.lastrowid
             finally:
                 conn.close()
+
+    def backfill_stay_as_col(self, stay_id: str) -> int:
+        """
+        Backfill all sightings within a stay to Col once Col is recognized.
+        Spec 5b (Following people): 'The first time ARCHER clearly recognizes a face,
+        that person's whole stay in view counts as them, including the time before.
+        Every face sighting is logged with the stay it belongs to.'
+        """
+        if not stay_id:
+            return 0
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    """
+                    UPDATE person_sightings
+                    SET person_id = 'Col', is_known = 1
+                    WHERE stay_id = ? AND person_id != 'Col'
+                    """,
+                    (stay_id,),
+                )
+                updated_count = cursor.rowcount
+
+                # Also update person_stays record if present
+                conn.execute(
+                    """
+                    UPDATE person_stays
+                    SET person_id = 'Col', is_known = 1
+                    WHERE stay_id = ?
+                    """,
+                    (stay_id,),
+                )
+
+                # Review 23:55 Item 2: Every label started during this stay is closed as Col,
+                # as long as all of that label's sightings are in Col's stays.
+                candidate_labels = conn.execute(
+                    """
+                    SELECT DISTINCT id, person_id FROM pending_person_confirmations
+                    WHERE (stay_id = ? OR person_id IN (SELECT DISTINCT person_id FROM person_sightings WHERE stay_id = ?))
+                      AND status = 'pending'
+                    """,
+                    (stay_id, stay_id),
+                ).fetchall()
+
+                for c_row in candidate_labels:
+                    pid = c_row["person_id"]
+                    # Check that all of this label's sightings are in Col's stays (including this stay)
+                    other_sightings = conn.execute(
+                        """
+                        SELECT COUNT(*) as cnt FROM person_sightings ps
+                        LEFT JOIN person_stays st ON ps.stay_id = st.stay_id
+                        WHERE ps.person_id = ?
+                          AND ps.stay_id != ?
+                          AND (st.person_id IS NULL OR st.person_id != 'Col')
+                        """,
+                        (pid, stay_id),
+                    ).fetchone()
+                    if other_sightings is None or other_sightings["cnt"] == 0:
+                        conn.execute(
+                            """
+                            UPDATE pending_person_confirmations
+                            SET status = 'confirmed', confirmed_name = 'Col', resolved_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                            """,
+                            (c_row["id"],),
+                        )
+                        logger.info(f"SQLiteStore: Closed pending label {pid} as Col (all sightings in Col stays).")
+
+                conn.commit()
+                return updated_count
+            finally:
+                conn.close()
+
+    def log_or_update_stay(
+        self,
+        stay_id: str,
+        person_id: str,
+        camera_source: str = "network_cam",
+        started_at: str | None = None,
+        ended_at: str | None = None,
+        confidence: float = 0.0,
+        is_known: bool = False,
+        track_id: int | None = None,
+    ) -> int:
+        """
+        Record or update an ongoing visit / stay in view.
+        Spec 5b (Review 19:30 Item 3):
+        'Add a stays record: who, which camera, when it started, when it ended (updated while it continues),
+        and how sure ARCHER is of the identity. Keep it on the same retention as sightings.'
+        """
+        if not stay_id:
+            return 0
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                row = conn.execute(
+                    "SELECT id, person_id, is_known, confidence FROM person_stays WHERE stay_id = ?",
+                    (stay_id,),
+                ).fetchone()
+                if row is None:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO person_stays (stay_id, person_id, is_known, confidence, camera_source, started_at, ended_at, track_id)
+                        VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP), ?)
+                        """,
+                        (stay_id, person_id, 1 if is_known else 0, confidence, camera_source, started_at, ended_at, track_id),
+                    )
+                    conn.commit()
+                    return cursor.lastrowid
+                else:
+                    cur_person = row["person_id"]
+                    new_person = person_id if (person_id and (cur_person != "Col" or person_id == "Col")) else cur_person
+                    new_is_known = 1 if (is_known or row["is_known"]) else 0
+                    new_conf = max(confidence, float(row["confidence"]))
+                    conn.execute(
+                        """
+                        UPDATE person_stays
+                        SET ended_at = COALESCE(?, CURRENT_TIMESTAMP),
+                            person_id = ?,
+                            is_known = ?,
+                            confidence = ?,
+                            track_id = COALESCE(?, track_id)
+                        WHERE stay_id = ?
+                        """,
+                        (ended_at, new_person, new_is_known, new_conf, track_id, stay_id),
+                    )
+                    conn.commit()
+                    return row["id"]
+            finally:
+                conn.close()
+
+    def get_stay(self, stay_id: str) -> dict[str, Any] | None:
+        """Get stay record by stay_id."""
+        if not stay_id:
+            return None
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute("SELECT * FROM person_stays WHERE stay_id = ?", (stay_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def get_recent_stays(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Get recent stays ordered by started_at DESC."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute("SELECT * FROM person_stays ORDER BY started_at DESC LIMIT ?", (limit,))
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def split_stay(
+        self,
+        old_stay_id: str,
+        new_stay_id: str,
+        new_person_id: str,
+        split_time: str | None = None,
+        camera_source: str = "network_cam",
+        confidence: float = 0.0,
+        is_known: bool = False,
+        track_id: int | None = None,
+    ) -> None:
+        """
+        Split a stay when a re-check discovers a track now belongs to someone else.
+        Review 19:30 Item 2: 'If a clear face says it's someone else, split the stay at that point.'
+        """
+        if not old_stay_id or not new_stay_id:
+            return
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    "UPDATE person_stays SET ended_at = COALESCE(?, CURRENT_TIMESTAMP) WHERE stay_id = ?",
+                    (split_time, old_stay_id),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO person_stays (stay_id, person_id, is_known, confidence, camera_source, started_at, ended_at, track_id)
+                    VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP), ?)
+                    """,
+                    (new_stay_id, new_person_id, 1 if is_known else 0, confidence, camera_source, split_time, split_time, track_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_stay_sightings(self, stay_id: str) -> list[dict[str, Any]]:
+        """Get all person sightings belonging to a specific stay."""
+        if not stay_id:
+            return []
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute(
+                "SELECT * FROM person_sightings WHERE stay_id = ? ORDER BY id ASC",
+                (stay_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
 
     def get_person_sightings(self, limit: int = 100) -> list[dict[str, Any]]:
         """Get recent person sightings, including embeddings for matching unknown repeat visitors."""
@@ -914,6 +1436,18 @@ class SQLiteStore:
                 (limit,),
             )
             return [dict(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def get_latest_sighting_for_person(self, person_id: str) -> dict[str, Any] | None:
+        """Get the most recent sighting record for a given person_id."""
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                "SELECT * FROM person_sightings WHERE person_id = ? ORDER BY id DESC LIMIT 1",
+                (person_id,),
+            ).fetchone()
+            return dict(row) if row else None
         finally:
             conn.close()
 
@@ -1059,6 +1593,20 @@ class SQLiteStore:
                 return cursor.lastrowid
             finally:
                 conn.close()
+
+    def get_recent_actions(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Retrieve recent actions from action_audit."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute(
+                "SELECT * FROM action_audit ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    get_action_audit = get_recent_actions
 
     # --- Configuration / Toggle State ---
 
@@ -1756,48 +2304,251 @@ class SQLiteStore:
         person_id: str,
         embedding: bytes,
         snapshot_path: str | None = None,
+        sighting_timestamp: float | None = None,
+        face_box: str | None = None,
+        stay_id: str | None = None,
+        status: str = "pending",
     ) -> None:
         """Record/bump an unrecognized face-cluster as waiting on a name.
 
         No-op once that person_id has already been resolved (confirmed or
-        dismissed) -- otherwise a stranger Col dismissed once would just
-        get re-queued on their next sighting, and a face he already named
-        via the live-introduction path would briefly flicker back into the
-        pane before its next sighting re-matches known_persons."""
+        dismissed) unless updating with an explicit status like 'decor'.
+        """
+        now_ts = sighting_timestamp if sighting_timestamp is not None else time.time()
+        now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc)
+        now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
         with self._lock:
             conn = self._get_connection()
             try:
+                # Update monotonic sequence high-water mark if person_id is Person_N
+                if person_id and str(person_id).startswith("Person_"):
+                    try:
+                        p_num = int(str(person_id).split("_")[1])
+                        conn.execute(
+                            """
+                            INSERT INTO person_id_sequence (id, next_number) VALUES (1, ?)
+                            ON CONFLICT(id) DO UPDATE SET next_number = MAX(next_number, excluded.next_number)
+                            """,
+                            (p_num + 1,),
+                        )
+                    except (ValueError, IndexError):
+                        pass
+
                 existing = conn.execute(
-                    "SELECT status FROM pending_person_confirmations WHERE person_id = ?",
+                    "SELECT id, status, last_seen_at, total_duration_seconds, face_box FROM pending_person_confirmations WHERE person_id = ?",
                     (person_id,),
                 ).fetchone()
-                if existing and existing["status"] != "pending":
+                if existing and existing["status"] != "pending" and status == "pending":
                     return
-                conn.execute(
-                    """
-                    INSERT INTO pending_person_confirmations (person_id, embedding, snapshot_path)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(person_id) DO UPDATE SET
-                        embedding = excluded.embedding,
-                        snapshot_path = COALESCE(excluded.snapshot_path, pending_person_confirmations.snapshot_path),
-                        sighting_count = pending_person_confirmations.sighting_count + 1,
-                        last_seen_at = CURRENT_TIMESTAMP
-                    """,
-                    (person_id, embedding, snapshot_path),
-                )
+
+                if existing:
+                    delta = 0.0
+                    last_seen_str = existing["last_seen_at"]
+                    if last_seen_str:
+                        try:
+                            last_dt = datetime.fromisoformat(str(last_seen_str))
+                            if last_dt.tzinfo is None:
+                                last_dt = last_dt.replace(tzinfo=timezone.utc)
+                            diff = (now_dt - last_dt).total_seconds()
+                            if 0.0 < diff <= 75.0:
+                                delta = diff
+                        except Exception:
+                            try:
+                                last_dt = datetime.strptime(str(last_seen_str)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                                diff = (now_dt - last_dt).total_seconds()
+                                if 0.0 < diff <= 75.0:
+                                    delta = diff
+                            except Exception as e:
+                                logger.debug(f"Error computing sighting duration delta: {e}")
+
+                    curr_duration = float(existing["total_duration_seconds"] or 0.0) + delta
+                    # Item 5: face_box must match the stored photo's own sighting, not later frames
+                    box_to_save = face_box if snapshot_path else (existing["face_box"] or face_box)
+                    target_status = status if status != "pending" else existing["status"]
+                    conn.execute(
+                        """
+                        UPDATE pending_person_confirmations SET
+                            embedding = ?,
+                            snapshot_path = COALESCE(?, snapshot_path),
+                            sighting_count = sighting_count + 1,
+                            total_duration_seconds = ?,
+                            last_seen_at = ?,
+                            face_box = ?,
+                            stay_id = COALESCE(stay_id, ?),
+                            status = ?
+                        WHERE id = ?
+                        """,
+                        (embedding, snapshot_path, curr_duration, now_iso, box_to_save, stay_id, target_status, existing["id"]),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO pending_person_confirmations
+                            (person_id, embedding, snapshot_path, sighting_count, total_duration_seconds, first_seen_at, last_seen_at, face_box, stay_id, status)
+                        VALUES (?, ?, ?, 1, 0.0, ?, ?, ?, ?, ?)
+                        """,
+                        (person_id, embedding, snapshot_path, now_iso, now_iso, face_box, stay_id, status),
+                    )
                 conn.commit()
             finally:
                 conn.close()
 
-    def get_pending_person_confirmations(self, status: str = "pending", limit: int = 50) -> list[dict[str, Any]]:
+    def get_next_person_number(self) -> int:
+        """Return the next monotonic integer index N for Person_N, ensuring
+        numbers are strictly incremented and never reused across sightings or
+        confirmations, even when records are forgotten/deleted."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                c1 = conn.execute(
+                    "SELECT person_id FROM pending_person_confirmations WHERE person_id LIKE 'Person_%'"
+                ).fetchall()
+                c2 = conn.execute(
+                    "SELECT person_id FROM person_sightings WHERE person_id LIKE 'Person_%'"
+                ).fetchall()
+                max_num = 0
+                for row in list(c1) + list(c2):
+                    pid = row["person_id"] if isinstance(row, dict) or hasattr(row, "keys") else row[0]
+                    if pid and str(pid).startswith("Person_"):
+                        try:
+                            num = int(str(pid).split("_")[1])
+                            if num > max_num:
+                                max_num = num
+                        except (ValueError, IndexError):
+                            pass
+
+                seq_val = 1
+                try:
+                    s_row = conn.execute("SELECT next_number FROM person_id_sequence WHERE id = 1").fetchone()
+                    if s_row:
+                        seq_val = int(s_row[0] if isinstance(s_row, (tuple, list)) else s_row["next_number"])
+                except Exception:
+                    pass
+
+                next_num = max(seq_val, max_num + 1)
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO person_id_sequence (id, next_number) VALUES (1, ?)
+                        ON CONFLICT(id) DO UPDATE SET next_number = MAX(next_number, excluded.next_number)
+                        """,
+                        (next_num,),
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
+                return next_num
+            finally:
+                conn.close()
+
+    def forget_pending_person(self, confirmation_id: int) -> dict[str, Any] | None:
+        """Delete a pending person confirmation, their sightings, all photo files
+        on disk across all sightings of that person, and return the record dict."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM pending_person_confirmations WHERE id = ?", (confirmation_id,)
+                ).fetchone()
+                if not row:
+                    return None
+                row_dict = dict(row)
+                person_id = row_dict["person_id"]
+
+                paths_to_delete = set()
+                if row_dict.get("snapshot_path"):
+                    paths_to_delete.add(row_dict["snapshot_path"])
+
+                s_rows = conn.execute(
+                    "SELECT snapshot_path FROM person_sightings WHERE person_id = ? AND snapshot_path IS NOT NULL",
+                    (person_id,),
+                ).fetchall()
+                for sr in s_rows:
+                    p = sr[0] if isinstance(sr, (tuple, list)) else sr["snapshot_path"]
+                    if p:
+                        paths_to_delete.add(p)
+
+                conn.execute("DELETE FROM pending_person_confirmations WHERE id = ?", (confirmation_id,))
+                conn.execute("DELETE FROM person_sightings WHERE person_id = ?", (person_id,))
+                conn.commit()
+
+                for path_str in paths_to_delete:
+                    try:
+                        p_file = Path(path_str)
+                        if p_file.exists():
+                            p_file.unlink(missing_ok=True)
+                    except Exception as e:
+                        logger.warning(f"Failed to delete photo {path_str}: {e}")
+
+                return row_dict
+            finally:
+                conn.close()
+
+    def forget_pending_person_by_person_id(self, person_id: str) -> dict[str, Any] | None:
+        """Same as forget_pending_person but keyed by person_id (e.g. 'Person_2')."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM pending_person_confirmations WHERE person_id = ?", (person_id,)
+                ).fetchone()
+                row_dict = dict(row) if row else {"person_id": person_id}
+
+                paths_to_delete = set()
+                if row and row_dict.get("snapshot_path"):
+                    paths_to_delete.add(row_dict["snapshot_path"])
+
+                s_rows = conn.execute(
+                    "SELECT snapshot_path FROM person_sightings WHERE person_id = ? AND snapshot_path IS NOT NULL",
+                    (person_id,),
+                ).fetchall()
+                for sr in s_rows:
+                    p = sr[0] if isinstance(sr, (tuple, list)) else sr["snapshot_path"]
+                    if p:
+                        paths_to_delete.add(p)
+
+                conn.execute("DELETE FROM pending_person_confirmations WHERE person_id = ?", (person_id,))
+                conn.execute("DELETE FROM person_sightings WHERE person_id = ?", (person_id,))
+                conn.commit()
+
+                for path_str in paths_to_delete:
+                    try:
+                        p_file = Path(path_str)
+                        if p_file.exists():
+                            p_file.unlink(missing_ok=True)
+                    except Exception as e:
+                        logger.warning(f"Failed to delete photo {path_str}: {e}")
+
+                return row_dict
+            finally:
+                conn.close()
+
+    def get_pending_person_confirmations(
+        self,
+        status: str | list[str] | tuple[str, ...] | None = "pending",
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
         """Unrecognized face-clusters waiting on a name, most recently seen
-        first -- for the browser MEMORY tab's 'Unrecognized People' pane."""
+        first -- for the browser MEMORY tab's 'Unrecognized People' pane.
+        Supports filtering by a single status, multiple statuses, or None."""
         conn = self._get_connection()
         try:
-            rows = conn.execute(
-                "SELECT * FROM pending_person_confirmations WHERE status = ? ORDER BY last_seen_at DESC LIMIT ?",
-                (status, limit),
-            ).fetchall()
+            if status is None:
+                rows = conn.execute(
+                    "SELECT * FROM pending_person_confirmations ORDER BY last_seen_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            elif isinstance(status, (list, tuple, set)):
+                placeholders = ",".join("?" for _ in status)
+                rows = conn.execute(
+                    f"SELECT * FROM pending_person_confirmations WHERE status IN ({placeholders}) ORDER BY last_seen_at DESC LIMIT ?",
+                    (*list(status), limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM pending_person_confirmations WHERE status = ? ORDER BY last_seen_at DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()
@@ -1848,6 +2599,133 @@ class SQLiteStore:
                     (status, confirmed_name, person_id),
                 )
                 conn.commit()
+            finally:
+                conn.close()
+
+    def get_decor_embeddings(self) -> list[bytes]:
+        """Fetch all face embeddings of entities marked as decor / not a person (Spec 5b & Review Addendum)."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                rows = conn.execute(
+                    "SELECT embedding FROM pending_person_confirmations WHERE status = 'decor' AND embedding IS NOT NULL"
+                ).fetchall()
+                return [r["embedding"] for r in rows if r["embedding"]]
+            finally:
+                conn.close()
+
+    def get_recent_person_sightings(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Get the most recent person sightings."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM person_sightings ORDER BY id DESC LIMIT ?", (limit,)
+                ).fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                conn.close()
+
+
+    def backfill_pending_durations_from_sightings(self, continuous_threshold: float = 75.0) -> None:
+        """Backfill total_duration_seconds on pending_person_confirmations from
+        historical person_sightings timestamps for any rows where total_duration_seconds is 0.0 or low."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                pending_rows = conn.execute(
+                    "SELECT id, person_id, total_duration_seconds FROM pending_person_confirmations WHERE status = 'pending'"
+                ).fetchall()
+                for row in pending_rows:
+                    pid = row["person_id"]
+                    sightings = conn.execute(
+                        "SELECT timestamp FROM person_sightings WHERE person_id = ? ORDER BY timestamp ASC",
+                        (pid,),
+                    ).fetchall()
+                    if len(sightings) < 2:
+                        continue
+                    calc_duration = 0.0
+                    prev_dt = None
+                    for s in sightings:
+                        ts_val = s[0] if isinstance(s, (tuple, list)) else s["timestamp"]
+                        ts_str = str(ts_val)
+                        try:
+                            cur_dt = datetime.fromisoformat(ts_str)
+                            if cur_dt.tzinfo is None:
+                                cur_dt = cur_dt.replace(tzinfo=timezone.utc)
+                        except Exception:
+                            try:
+                                cur_dt = datetime.strptime(ts_str[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                            except Exception:
+                                continue
+                        if prev_dt is not None:
+                            diff = (cur_dt - prev_dt).total_seconds()
+                            if 0.0 < diff <= continuous_threshold:
+                                calc_duration += diff
+                        prev_dt = cur_dt
+
+                    curr_dur = float(row["total_duration_seconds"] or 0.0)
+                    if calc_duration > curr_dur:
+                        conn.execute(
+                            "UPDATE pending_person_confirmations SET total_duration_seconds = ? WHERE id = ?",
+                            (calc_duration, row["id"]),
+                        )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def update_pending_confirmation_duration(self, person_id: str, duration: float) -> None:
+        """Update total_duration_seconds for a pending confirmation row from its tracked stay duration."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    "UPDATE pending_person_confirmations SET total_duration_seconds = MAX(total_duration_seconds, ?) WHERE person_id = ?",
+                    (float(duration), person_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+
+    def count_snapshots_for_person(self, person_id: str) -> int:
+        """Count how many sightings of this person have snapshot photos on disk."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM person_sightings WHERE person_id = ? AND snapshot_path IS NOT NULL",
+                    (person_id,),
+                ).fetchone()
+                return int(row[0]) if row else 0
+            finally:
+                conn.close()
+
+    def set_kv_state(self, key: str, value: str) -> None:
+        """Set a persistent key-value configuration or runtime state string."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO app_kv_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (key, value),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_kv_state(self, key: str, default: str | None = None) -> str | None:
+        """Retrieve a persistent key-value configuration or runtime state string."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                row = conn.execute("SELECT value FROM app_kv_state WHERE key = ?", (key,)).fetchone()
+                if row:
+                    return str(row[0] if isinstance(row, (tuple, list)) else row["value"])
+                return default
             finally:
                 conn.close()
 

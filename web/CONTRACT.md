@@ -152,8 +152,9 @@ doesn't require starting it by hand in a separate window.
 | `hello`               | `mode`, `mic_muted`, `tts_muted`, `camera_released`, `camera_available` | Sent on connect — initial toolbar state                    |
 | `system_start`        | —                                | Session (re)started                                                      |
 
-| `camera_frame_request` | `request_id`                    | Server requests a JPEG frame from browser webcam stream for enrollment or vision query |
+| `camera_frame_request` | `request_id`                    | Server requests a JPEG frame from browser webcam stream for visual query or person introduction |
 | `camera_frame_response`| `request_id`, `image_b64`       | Browser returns base64 JPEG frame to server                             |
+| `camera_frame_ack`     | `request_id`, `size`            | Diagnostic: Server acknowledges receipt and successful decode of browser's camera frame |
 
 ## Messages (browser → server)
 
@@ -164,9 +165,8 @@ doesn't require starting it by hand in a separate window.
 {"type": "mic_mute_toggle"}
 {"type": "tts_mute_toggle"}
 {"type": "camera_frame_response", "request_id": "...", "image_b64": "..."}
+{"type": "request_camera_frame"}
 {"type": "memory_get_all"}
-{"type": "memory_confirm_person", "id": 1, "name": "Sarah"}
-{"type": "memory_dismiss_person", "id": 1}
 {"type": "tasks_get_all"}
 {"type": "tasks_add", "title": "...", "due_date": null}
 {"type": "tasks_complete", "task_id": 1}
@@ -215,7 +215,7 @@ web/
   js/
     app.js           WebSocket client + reconnect + dispatch (exposes window.ArcherClient — every other file depends on this being set)
     orb.js           the animated HUD orb (ArcherApertureOrb)
-    ui.js            toolbar (mode/mic/speaker/camera/enroll/halt) + transcript + text input
+    ui.js            toolbar (mode/mic/speaker/halt) + transcript + text input
     tabs.js           top-level tab switching (Dashboard/Gesture, plus legacy tab-name aliases)
     logs.js           builds the Dashboard's Logs card — scrolling tail view + Pause/Clear
     memory.js         builds the Dashboard's Memory card — "While You Were Away" + "Unrecognized People"

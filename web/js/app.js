@@ -273,12 +273,6 @@ const ArcherClient = (() => {
     sendMemoryResolveCommitment(commitmentId, fulfilled) {
       send({ type: "memory_resolve_commitment", commitment_id: commitmentId, fulfilled: fulfilled !== false });
     },
-    sendMemoryConfirmPerson(id, name) {
-      send({ type: "memory_confirm_person", id, name });
-    },
-    sendMemoryDismissPerson(id) {
-      send({ type: "memory_dismiss_person", id });
-    },
     sendTasksGetAll() {
       send({ type: "tasks_get_all" });
     },

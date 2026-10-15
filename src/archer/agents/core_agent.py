@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from loguru import logger
 
@@ -106,13 +106,13 @@ class CoreAgent:
     Unified Single-Agent Core for ARCHER.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, store: Optional[Any] = None, om_store: Optional[Any] = None) -> None:
         self._config = get_config()
         self._bus = get_event_bus()
         self._toggle = get_toggle_service()
-        self._store = get_sqlite_store()
+        self._store = store if store is not None else get_sqlite_store()
         self._redis = get_redis_buffer()
-        self._om = get_openmemory_store()
+        self._om = om_store if om_store is not None else get_openmemory_store()
         self._md = get_markdown_logger()
         self._chroma = get_chromadb_store()
         self.activity_buffer = ActivityStatusBuffer()
@@ -231,6 +231,13 @@ class CoreAgent:
         # changes to consume it.
         from archer.observer.pipeline import OBSERVER_REDIS_CHANNEL
         self._redis.subscribe(OBSERVER_REDIS_CHANNEL, self._on_redis_observer_event)
+
+        # Conversational Person Identification Follow-up (Phase 2b)
+        self._active_person_followup: Optional[Dict[str, Any]] = None
+        self._asked_person_ids_this_session: set[str] = set()
+        self._last_user_turn_timestamp: Optional[float] = None
+        self._checkin_pause_until: float = 0.0
+
         logger.info(f"CoreAgent (Single-Agent Architecture) initialized with primary model: {self.primary_model}")
 
     @property
@@ -585,15 +592,17 @@ class CoreAgent:
             img_b64 = base64.b64encode(img_bytes).decode("utf-8")
 
             debug_frame_path = None
-            try:
-                import os
-                os.makedirs("scratch", exist_ok=True)
-                ts = int(time.time() * 1000)
-                debug_frame_path = f"scratch/visual_qna_frame_{ts}.jpg"
-                with open(debug_frame_path, "wb") as f:
-                    f.write(img_bytes)
-            except Exception as e:
-                logger.debug(f"Visual Q&A frame debug dump failed (non-fatal): {e}")
+            # Privacy rule: Frames are processed in memory and dropped immediately.
+            # Never save frames to disk by default.
+            if os.environ.get("ARCHER_DEBUG_SAVE_VISION_FRAMES", "").lower() in ("1", "true"):
+                try:
+                    os.makedirs("scratch", exist_ok=True)
+                    ts = int(time.time() * 1000)
+                    debug_frame_path = f"scratch/visual_qna_frame_{ts}.jpg"
+                    with open(debug_frame_path, "wb") as f:
+                        f.write(img_bytes)
+                except Exception as e:
+                    logger.debug(f"Visual Q&A frame debug dump failed (non-fatal): {e}")
 
             identity_note = "Face recognition unavailable for this frame."
             try:
@@ -651,6 +660,30 @@ class CoreAgent:
         "funny", "annoying", "ridiculous", "amazing", "perfect", "wrong",
     }
 
+    def _pause_checkin(self, hours: float = 3.0) -> None:
+        """Pause unrecognized person check-ins for the specified duration (survives restart)."""
+        pause_until = time.time() + (hours * 3600.0)
+        self._checkin_pause_until = pause_until
+        if self._store:
+            try:
+                self._store.set_kv_state("checkin_pause_until", str(pause_until))
+            except Exception as e:
+                logger.debug(f"Failed to persist checkin pause: {e}")
+
+    def _is_checkin_paused(self) -> bool:
+        """Check whether unrecognized person check-ins are currently paused."""
+        now = time.time()
+        stored_val = None
+        if self._store:
+            try:
+                v = self._store.get_kv_state("checkin_pause_until")
+                if v:
+                    stored_val = float(v)
+            except Exception as e:
+                logger.debug(f"Failed to read checkin pause: {e}")
+        pause_val = stored_val if stored_val is not None else getattr(self, "_checkin_pause_until", 0.0)
+        return now < pause_val
+
     def _check_person_introduction(self, text: str) -> Optional[str]:
         """
         When Col introduces someone by name ("this is Sarah", "meet Dave")
@@ -659,6 +692,10 @@ class CoreAgent:
         add_person_face() -- no separate enrollment flow, no confirmation
         round-trip.
         """
+        # Suppress live introduction while Col is reviewing a snapshot card (Item 4)
+        if self._active_person_followup and self._active_person_followup.get("stage") == "awaiting_name":
+            return None
+
         name: Optional[str] = None
         for pattern in self._INTRODUCTION_PATTERNS:
             m = pattern.search(text)
@@ -709,6 +746,837 @@ class CoreAgent:
         except Exception as e:
             logger.debug(f"Person introduction binding failed (non-fatal): {e}")
             return None
+
+    def _get_eligible_pending_person(self) -> Optional[Dict[str, Any]]:
+        """
+        Find the oldest pending unrecognized person observed for at least 2 minutes (120s)
+        that has not yet been asked about during this session (Phase 2b).
+        """
+        if self._is_checkin_paused():
+            return None
+        try:
+            pending = self._store.get_pending_person_confirmations(status="pending", limit=100)
+            eligible = [
+                p for p in pending
+                if float(p.get("total_duration_seconds") or 0.0) >= 120.0
+                and p["person_id"] not in self._asked_person_ids_this_session
+            ]
+            if eligible:
+                eligible.sort(key=lambda x: str(x.get("first_seen_at") or ""))
+                return eligible[0]
+        except Exception as e:
+            logger.debug(f"Error checking eligible pending persons: {e}")
+        return None
+
+    def _push_person_snapshot(self, person_id: str, snapshot_path: Optional[str], face_box: Optional[str | list] = None) -> bool:
+        """
+        Push snapshot image card directly into the chat transcript via EventType.ARTIFACT_PUSH (Q-12 Option 1).
+        Marks the face with the stored InsightFace bounding box found when the photo was taken (Item 4).
+        Never runs a secondary Haar cascade over the saved frame.
+        """
+        if not snapshot_path:
+            return False
+        try:
+            import os
+            import base64
+            import cv2
+            import json
+            if os.path.exists(snapshot_path):
+                img_bytes = None
+                try:
+                    img = cv2.imread(snapshot_path)
+                    if img is not None:
+                        # Retrieve face_box if not explicitly provided (Item 5: match photo's own sighting)
+                        if face_box is None and self._store:
+                            try:
+                                if snapshot_path:
+                                    face_box = self._store.get_face_box_for_snapshot(snapshot_path)
+                                if not face_box:
+                                    pending = self._store.get_pending_person_confirmations(status=None, limit=100)
+                                    for p in pending:
+                                        if p.get("person_id") == person_id and p.get("face_box"):
+                                            face_box = p.get("face_box")
+                                            break
+                                if not face_box:
+                                    latest = self._store.get_latest_sighting_for_person(person_id)
+                                    if latest and latest.get("face_box"):
+                                        face_box = latest.get("face_box")
+                            except Exception as e:
+                                logger.debug(f"Failed to fetch stored face_box: {e}")
+
+                        if face_box:
+                            try:
+                                box = json.loads(face_box) if isinstance(face_box, str) else face_box
+                                fx, fy, fw, fh = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+                                cv2.rectangle(img, (fx, fy), (fx + fw, fy + fh), (0, 255, 0), 3)
+                                cv2.putText(img, person_id, (fx, max(25, fy - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                            except Exception as e:
+                                logger.debug(f"Failed to draw stored face_box: {e}")
+
+                        _, buf = cv2.imencode(".jpg", img)
+                        img_bytes = buf.tobytes()
+                except Exception as e:
+                    logger.debug(f"Face bounding box marking skipped: {e}")
+
+                if not img_bytes:
+                    with open(snapshot_path, "rb") as f:
+                        img_bytes = f.read()
+
+                img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                self._bus.publish(Event(
+                    type=EventType.ARTIFACT_PUSH,
+                    source="core_agent",
+                    data={
+                        "image_b64": img_b64,
+                        "kind": "person_snapshot",
+                        "title": f"Unrecognized Person ({person_id})",
+                    },
+                ))
+                logger.info(f"Pushed snapshot for {person_id} to chat transcript ({len(img_b64)} chars)")
+                return True
+            else:
+                logger.warning(f"Snapshot path does not exist on disk: {snapshot_path}")
+        except Exception as e:
+            logger.warning(f"Failed to push snapshot for {person_id}: {e}")
+        return False
+
+    def _format_sighting_details(self, person_id: str, first_seen_at: Any) -> str:
+        """
+        Format human-friendly when and where description for a sighting in Phase 2c style.
+        Converts UTC timestamp to system local time: 'Fri Oct 9, 5:15 PM on the room camera'.
+        """
+        when_str = "earlier"
+        if first_seen_at:
+            try:
+                s = str(first_seen_at)
+                if "T" in s:
+                    dt = datetime.fromisoformat(s)
+                else:
+                    dt = datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                local_dt = dt.astimezone()
+                time_part = local_dt.strftime("%I:%M %p").lstrip("0")
+                when_str = f"{local_dt.strftime('%a %b')} {local_dt.day}, {time_part}"
+            except Exception:
+                when_str = str(first_seen_at)
+
+        where_str = "on camera"
+        try:
+            latest = self._store.get_latest_sighting_for_person(person_id)
+            if latest and latest.get("camera_source"):
+                cam = latest["camera_source"].lower()
+                if "reolink" in cam or "network" in cam or "room" in cam:
+                    where_str = "on the room camera"
+                elif "webcam" in cam or "desk" in cam:
+                    where_str = "on the desk camera"
+        except Exception:
+            pass
+
+        return f"{when_str} {where_str}"
+
+    def _classify_person_reply(
+        self,
+        text: str,
+        stage: str = "awaiting_name",
+        recent_name: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Classify Colby's reply using ARCHER's local model (Ollama) with structured JSON format (Item 1).
+        Understands intent, extracted names, notes, corrections, self-identifications, and conversational hesitations.
+        Uses num_ctx 4096 (Item 3), retries once on error (Item 2), and uses a strictly non-destructive fallback (Item 2).
+        """
+        import httpx
+        import json
+        import re
+
+        prompt = f"""You are analyzing a user's reply in an in-person conversation with ARCHER.
+Situation:
+- Current interaction stage: {stage}
+- ARCHER asked: {"'Who is this person in the photo?'" if stage == "awaiting_name" else "'Is now a good time to go over people I have seen earlier?'"}
+- Recent name saved (if any): "{recent_name or 'none'}"
+
+User reply: "{text}"
+
+Analyze the user reply and classify it into exactly one of these intents:
+
+If stage is "ask_permission":
+- "yes": The user agrees to review the unrecognized people, or asks who was seen (e.g. asking who was seen, agreeing to take a look, or telling ARCHER to proceed).
+- "not_now": The user clearly declines, postpones, or indicates now is not a good time (e.g. declining, saying they are occupied, or asking to do it at another time). Do NOT use this for conversational pauses, brief hesitation, or questions about who was seen.
+- "unrelated": The user asks an unrelated question or switches topics.
+
+If stage is "awaiting_name":
+- "name": The user provides a person's name, relationship, role, or identity. Extract the person's name in "name" (if provided), and any relation or descriptive notes in "notes".
+  * If a specific name is provided (with or without a relationship), put the name in "name" and relationship in "notes".
+  * If only a relationship, role, or description is mentioned without an explicit personal name (e.g. describing someone as a relative, coworker, neighbor, or acquaintance), put that in "notes" and leave "name": null.
+  * If the user says they have no specific name to give or to just use their title/role (e.g. telling ARCHER to just call them Dad, or just Grandma), put that title/role in "name" and in "notes".
+  * Do NOT extract negated names (e.g. saying someone is not a certain person means do not save that name).
+- "thats_me": The user identifies themselves as the person in the photo (e.g. recognizing themselves, their own clothes, or stating it is them).
+- "not_a_person": The user states that the object in the photo is plainly an inanimate object or room decor (e.g. a statue, a poster, a picture on the TV, an ornament). Examples: "that's a statue", "it's just a poster", "that's the TV", "not a person".
+  * CRITICAL: Only a reply that is SOLELY about an object counts as "not_a_person".
+  * If the reply mentions a person, role, worker, or someone wearing an item (e.g. "it's the TV repair guy", "that's the heater guy, he fixed it", "that was the figure skating coach", "it's a mask he was wearing, that's Sam"), it is NEVER "not_a_person"!
+  * "that's not a person I know" or "not my brother" is NEVER "not_a_person"; it is about a human being (classify as "dont_know" or "unclear").
+- "dont_know": The user explicitly states they do not recognize or know who this person is at all, or that they are an unfamiliar stranger (e.g. "that's not a person I know", "don't know them").
+  * IMPORTANT: Negations that only rule out a specific person (e.g. saying someone is not a certain relative or acquaintance) do NOT mean "dont_know"; they must be classified as "unclear" with "name": null!
+- "forget": The user explicitly asks to permanently delete, discard, or purge this person and photo.
+- "skip": The user asks to pass or move to the next person without deciding on this one.
+- "correction": The user is immediately correcting the name or decor classification that was just recorded (e.g. "No, that's Sam", "Actually it's Sam", "Wait, that's Jenna"). Extract the corrected name in "name".
+- "not_now": The user explicitly wants to end or stop the review entirely. IMPORTANT: Do NOT use "not_now" for conversational pauses or brief hesitation, which MUST be classified as "unclear".
+- "unclear": The user is hesitating, pausing briefly, asking questions about the picture, requesting a clearer look, ruling someone out (negations), uncertain, or expressing doubt. Set "is_clear": false, "name": null. If a tentative name was mentioned with uncertainty (such as saying maybe, might be, or not sure), put it in "candidate_name".
+- "unrelated": The user asks an unrelated question or changes the topic.
+
+Output JSON format:
+{{
+  "intent": "<intent>",
+  "name": "<extracted person name or null>",
+  "notes": "<extracted notes/relationship or null>",
+  "candidate_name": "<name if tentative/uncertain, else null>",
+  "is_clear": true | false
+}}
+"""
+
+        lower_txt = text.lower().strip()
+        # Fast intent matching for clear permission / skip / decor queries
+        if stage == "ask_permission":
+            if re.search(r"^\s*who\s+(?:was\s+it|is\s+it|did\s+you\s+see|was\s+that|is\s+that|are\s+they)\??\s*$", lower_txt) or re.search(r"\bwho\s+was\s+it\b", lower_txt):
+                return {"intent": "yes", "is_clear": True, "name": None, "notes": None}
+        elif stage == "awaiting_name":
+            # Fast match for undoing a decor mark straight away ("No, that's Sam").
+            # Claude 2026-10-15: only right after a "not a person" answer, and only with
+            # a real name. Anything else ("No, that's me", "No, that's wrong", "Actually,
+            # that's Jenna" about the photo now on screen) goes to the full reader below,
+            # which knows which photo is being asked about.
+            last_confirmed = getattr(self, "_last_confirmed_person", None) or {}
+            if last_confirmed.get("status") == "decor":
+                corr_m = re.search(r"^\s*(?:no|wait|actually|hold\s+on),?\s+(?:that(?:'s|\s+is)|it(?:'s|\s+is))\s+([A-Za-z]+)\s*[.!]?$", lower_txt)
+                if corr_m:
+                    c_word = corr_m.group(1).lower()
+                    not_names = {
+                        "me", "myself", "him", "her", "them", "it", "this", "that", "wrong", "right",
+                        "fine", "ok", "okay", "correct", "true", "false", "nobody", "someone", "somebody",
+                        "nothing", "not", "statue", "poster", "tv", "sculpture", "painting", "decor",
+                    }
+                    if c_word not in not_names:
+                        return {"intent": "correction", "is_clear": True, "name": corr_m.group(1).title(), "notes": None}
+
+            if re.search(r"^\s*(?:skip(?:\s+this(?:\s+one)?)?(?:\s+for\s+now)?|pass|next(?:\s+one|\s+person)?)\s*[.!]?$", lower_txt) or re.search(r"\b(?:skip\s+this\s+one\s+for\s+now|skip\s+this\s+one|skip\s+for\s+now)\b", lower_txt):
+                return {"intent": "skip", "is_clear": True, "name": None, "notes": None}
+
+            # Must-fix 5: Only a reply that's plainly about an object counts as decor.
+            # A reply that also mentions a person, a name, a role, or someone wearing an item goes to the full reader!
+            has_person_words = bool(re.search(
+                r"\b(?:guy|man|woman|person|someone|anyone|boy|girl|coach|repair|worker|technician|fixer|"
+                r"he|she|him|her|they|them|sam|dave|jake|col|colby|jenna|dad|mom|father|mother|brother|"
+                r"sister|friend|neighbor|cousin|uncle|aunt|coworker|wearing|wore|fixed|know|knows|met)\b",
+                lower_txt
+            ))
+            if not has_person_words:
+                if re.search(r"^\s*(?:(?:that|it|this)(?:'s|\s+is|\s+was)?\s*(?:just\s+)?(?:a\s+|an\s+|the\s+)?(?:statue|sculpture|poster|tv|television|painting|doll|dummy|mannequin|carved\s+mask|decor|decoration|object)|(?:just\s+)?(?:a\s+|an\s+)?(?:statue|sculpture|poster|painting|decor)|not\s+a\s+person)\s*[.!]?$", lower_txt):
+                    return {"intent": "not_a_person", "is_clear": True, "name": None, "notes": None}
+
+
+
+        # Item 2: Retry once if model output is empty/invalid or network drops
+        for attempt in range(2):
+            try:
+                url = f"{self._config.ollama_base_url}/api/generate"
+                r = httpx.post(
+                    url,
+                    json={
+                        "model": self.primary_model,
+                        "prompt": prompt,
+                        "system": "Respond with raw JSON directly. Do not think or deliberate.",
+                        "format": "json",
+                        "stream": False,
+                        "keep_alive": "10m",
+                        "options": {
+                            "temperature": 0.0,
+                            "num_ctx": 4096,  # Item 3: match chat context to prevent model reload
+                            "num_predict": 1024,  # Item 2: token budget for reasoning and clean JSON
+                        },
+                    },
+                    timeout=60.0,
+                )
+                if r.status_code == 200:
+                    resp_json = r.json()
+                    resp_text = resp_json.get("response", "").strip()
+                    if "```" in resp_text:
+                        fence_m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", resp_text, re.DOTALL)
+                        if fence_m:
+                            resp_text = fence_m.group(1)
+                    sub_m = re.search(r"\{.*\}", resp_text, re.DOTALL)
+                    if sub_m:
+                        resp_text = sub_m.group(0)
+
+                    data = json.loads(resp_text)
+                    if "intent" in data and data["intent"]:
+                        # Review 6 Item 2 safeguard: Negations ruling someone out must NEVER be classified as dont_know
+                        if data["intent"] == "dont_know" and re.search(r"\b(?:not|isn'?t|aren'?t)\b", lower_txt):
+                            if not re.search(r"\b(?:don'?t\s+know|no\s+idea|stranger|never\s+seen|anyone\s+i\s+know)\b", lower_txt):
+                                data["intent"] = "unclear"
+                                data["is_clear"] = False
+                                data["name"] = None
+                        # Tentative / uncertain name safeguard: expressions of uncertainty (not sure, maybe, etc.)
+                        if re.search(r"\b(?:not\s+sure|maybe|might\s+be|could\s+be|possibly|perhaps)\b", lower_txt):
+                            cand = data.get("name") or data.get("candidate_name")
+                            if cand:
+                                data["intent"] = "unclear"
+                                data["is_clear"] = False
+                                data["name"] = None
+                                data["candidate_name"] = cand
+                        return data
+                    logger.warning(f"Ollama reply classification returned empty intent on attempt {attempt + 1}")
+            except Exception as e:
+                logger.warning(f"Ollama reply classification attempt {attempt + 1} failed: {e}")
+
+        # Item 2: Fallback NEVER makes permanent decisions (never saves, dismisses, or deletes)
+        return {"intent": "unclear", "is_clear": False, "name": None, "notes": None}
+
+    _RELATIONAL_PATTERNS = [
+        re.compile(r"\b(?:it'?s|that'?s|this\s+is)?\s*(?:my\s+)?(brother|sister|neighbor|coworker|friend|mom|dad|wife|husband|colleague|boss|cousin|partner|roommate)\s+([A-Za-z][\w'-]*)", re.IGNORECASE),
+        re.compile(r"\b([A-Za-z][\w'-]*)\s*,\s*(?:she|he|they)\s+(?:works\s+with\s+me|is\s+my\s+[\w\s]+)", re.IGNORECASE),
+    ]
+    _NAME_PATTERNS = [
+        re.compile(r"\b(?:that|this|it)(?:'s|\s+is|\s+was)\s+([A-Za-z][\w'-]*)", re.IGNORECASE),
+        re.compile(r"\b(?:her|his|their)\s+name(?:'s|\s+is|\s+was)\s+([A-Za-z][\w'-]*)", re.IGNORECASE),
+        re.compile(r"\bmeet\s+([A-Za-z][\w'-]*)", re.IGNORECASE),
+        re.compile(r"\b(?:think|guess)\s+(?:that'?s|it'?s)?\s*(?:my\s+)?(?:neighbor|brother|friend|coworker)?\s*([A-Za-z][\w'-]*)", re.IGNORECASE),
+    ]
+    _CONFIRMATION_STOPWORDS = {
+        "is", "the", "a", "an", "not", "just", "actually", "really", "so", "what",
+        "how", "great", "good", "bad", "fine", "important", "cool", "it", "my",
+        "your", "for", "about", "why", "all", "going", "here", "there", "me",
+        "you", "us", "them", "gonna", "correct", "right", "true", "false",
+        "done", "over", "on", "off", "nice", "awesome", "crazy", "weird",
+        "funny", "annoying", "ridiculous", "amazing", "perfect", "wrong",
+        "yes", "yeah", "yep", "no", "nope", "maybe", "later", "busy", "sure",
+        "okay", "ok", "who", "whom", "whose", "which", "where", "when",
+        "forget", "delete", "remove", "stranger", "unknown", "someone", "nobody",
+        "that", "that's", "thats", "this", "this's", "it's", "its", "honestly",
+        "hold", "wait", "can", "could", "would", "look", "closer", "zoom", "stop",
+        "cancel", "check", "see", "show", "tell", "give", "let", "second", "minute", "hang"
+    }
+
+    def _parse_person_name_and_notes(self, text: str) -> tuple[Optional[str], Optional[str]]:
+        """
+        Extract person name candidate and optional descriptive notes from user input.
+        Never guesses first words or conversational phrases as names (Item 2).
+        """
+        name: Optional[str] = None
+        notes: Optional[str] = None
+
+        # 1. Check relational patterns ("It's my brother Mike", "neighbor Dave", "Sarah, she works with me")
+        for pat in self._RELATIONAL_PATTERNS:
+            m = pat.search(text)
+            if m:
+                if pat.pattern.startswith(r"\b([A-Za-z]"):
+                    cand_name = m.group(1).strip("'\"., ")
+                    cand_rel = "coworker"
+                else:
+                    cand_rel = m.group(1).strip("'\"., ")
+                    cand_name = m.group(2).strip("'\"., ")
+                if cand_name.lower() not in self._CONFIRMATION_STOPWORDS and len(cand_name) > 1:
+                    name = cand_name[:1].upper() + cand_name[1:].lower()
+                    notes = cand_rel.lower()
+                    return name, notes
+
+        # 2. Check standard introductory patterns ("That's Sarah", "his name is Dave")
+        for pat in self._NAME_PATTERNS:
+            m = pat.search(text)
+            if m:
+                cand = m.group(1).strip("'\"., ")
+                if cand.lower() not in self._CONFIRMATION_STOPWORDS and len(cand) > 1:
+                    name = cand[:1].upper() + cand[1:].lower()
+                    break
+
+        # 3. Check if user answered with a single name only (e.g. "Sarah" or "Dave.")
+        if not name:
+            single_m = re.match(r"^\s*([A-Za-z][\w'-]+)\s*[.!]?$", text.strip())
+            if single_m:
+                cand = single_m.group(1).strip("'\"., ")
+                if cand.lower() not in self._CONFIRMATION_STOPWORDS and len(cand) > 1:
+                    name = cand[:1].upper() + cand[1:].lower()
+
+        if name:
+            name_idx = text.lower().find(name.lower())
+            if name_idx >= 0:
+                after = text[name_idx + len(name):].strip(" ,.-;")
+                if after:
+                    notes = after
+            if not notes and len(text) > len(name) + 4:
+                notes = text.strip()
+
+        return name, notes
+
+    def _apply_person_correction(self, user_input: str, classified: dict[str, Any]) -> Optional[str]:
+        """Apply a correction to the previously confirmed person, undoing previous record and re-saving (Item 4)."""
+        if not getattr(self, "_last_confirmed_person", None):
+            return None
+        corr_target = self._last_confirmed_person
+        new_name = classified.get("name")
+        if not new_name:
+            # Item 4: NEVER default to Jenna if model extracts no name; ask Col to clarify
+            return (
+                "\n[CLARIFY PERSON CORRECTION (Phase 2b): Colby indicated a correction but did not specify a clear name. "
+                "Ask Colby gently to clarify who they meant, without assuming or guessing any name.]"
+            )
+
+        prev_name = corr_target.get("name") or ("decor" if corr_target.get("status") == "decor" else None)
+        # 1. Undo previous save (face reference/enrollment, contact, memory)
+        try:
+            if prev_name == "Col":
+                if corr_target.get("face_id"):
+                    self._store.remove_known_person_reference(corr_target["face_id"])
+            elif prev_name and prev_name != "decor":
+                if corr_target.get("face_action") == "reference" and corr_target.get("face_id"):
+                    self._store.remove_known_person_reference(corr_target["face_id"])
+                else:
+                    self._store.remove_known_person(prev_name)
+                self._store.delete_contact(prev_name)
+                if corr_target.get("memory_id") and self._om:
+                    self._om.delete_memory(corr_target["memory_id"])
+        except Exception as e:
+            logger.debug(f"Error undoing previous person save: {e}")
+
+        # 2. Redo with new_name
+        face_res = None
+        new_mem_id = None
+        emb = corr_target.get("embedding")
+        if not emb and self._store:
+            try:
+                conf_rec = self._store.get_pending_person_confirmation_by_id(corr_target["confirmation_id"])
+                if conf_rec and conf_rec.get("embedding"):
+                    emb = conf_rec["embedding"]
+            except Exception:
+                pass
+
+        try:
+            self._store.resolve_pending_person_confirmation(
+                corr_target["confirmation_id"], status="confirmed", confirmed_name=new_name
+            )
+            if emb:
+                face_res = self._store.add_person_face(name=new_name, embedding=emb, source="conversation")
+            self._store.upsert_contact(name=new_name, relationship="contact", metadata={"notes": user_input})
+            self._store.log_interaction(
+                contact_name=new_name,
+                interaction_type="in-person",
+                notes=f"Corrected identification from sighting: {user_input}"
+            )
+            if self._om:
+                new_mem_id = self._om.add_memory(content=f"Met/identified {new_name}: {user_input}", sector="semantic")
+            self._store.log_action(
+                agent_name="core_agent",
+                action_type="correct_person_name",
+                description=f"Corrected person identification from {prev_name} to {new_name} (undid previous status, contact, and memory).",
+                metadata={"person_id": corr_target.get("person_id"), "previous_name": prev_name, "name": new_name}
+            )
+        except Exception as e:
+            logger.debug(f"Error updating corrected person name: {e}")
+
+        self._last_confirmed_person = {
+            "person_id": corr_target.get("person_id"),
+            "confirmation_id": corr_target.get("confirmation_id"),
+            "name": new_name,
+            "face_action": face_res.get("action") if isinstance(face_res, dict) else "enrolled",
+            "face_id": face_res.get("id") if isinstance(face_res, dict) else None,
+            "embedding": emb,
+            "memory_id": new_mem_id,
+        }
+        if corr_target.get("status") == "decor":
+            return (
+                f"\n[PERSON DECOR MARK UNDONE (Phase 2b): Colby clarified that this was not decor but {new_name} ('{user_input}'). "
+                f"You have removed the decor mark and saved them as {new_name}. "
+                f"Acknowledge the correction warmly and concisely.]"
+            )
+        return (
+            f"\n[PERSON NAME CORRECTED (Phase 2b): Colby corrected the previous person's name to {new_name}. "
+            f"You have undone the previous record and saved {new_name}. "
+            f"Acknowledge this correction directly and concisely (e.g. 'Got it, corrected to {new_name}.').]"
+        )
+
+    def _handle_conversational_person_followup(self, user_input: str) -> Optional[str]:
+        """
+        Manage conversational follow-up state machine for learning unrecognized faces (Phase 2b).
+        Model-driven intent understanding (Item 1), 2-turn auto-close (Item 2), and continuous multi-person review loop (Item 3).
+        """
+        import os
+        lower = user_input.lower().strip()
+
+        # CASE 1: Currently awaiting Colby's permission to go over an unrecognized person
+        if self._active_person_followup and self._active_person_followup.get("stage") == "ask_permission":
+            person_id = self._active_person_followup["person_id"]
+            confirmation_id = self._active_person_followup["confirmation_id"]
+            snapshot_path = self._active_person_followup.get("snapshot_path")
+            first_seen_at = self._active_person_followup.get("first_seen_at")
+
+            classified = self._classify_person_reply(user_input, stage="ask_permission")
+            intent = classified.get("intent")
+
+            if intent == "yes":
+                self._active_person_followup["stage"] = "awaiting_name"
+                self._active_person_followup["non_answer_turns_count"] = 0
+                self._push_person_snapshot(person_id, snapshot_path)
+                sighting_details = self._format_sighting_details(person_id, first_seen_at)
+                return (
+                    f"\n[UNRECOGNIZED PERSON IDENTIFICATION (Phase 2b): Colby agreed to review the unrecognized person ({person_id}). "
+                    f"A snapshot card has just been displayed in the chat transcript. "
+                    f"In your response: "
+                    f"1. Tell Colby you are showing the snapshot from {sighting_details}. "
+                    f"2. Ask Colby who this is, and if there is anything worth remembering about them (e.g. how Colby knows them or notes to keep). "
+                    f"3. Keep your spoken response brief (1-2 sentences).]"
+                )
+            elif intent == "not_now":
+                self._asked_person_ids_this_session.add(person_id)
+                self._active_person_followup = None
+                self._pause_checkin(3.0)
+                return (
+                    f"\n[UNRECOGNIZED PERSON CHECK-IN DECLINED (Phase 2b): Colby indicated now is not a good time. "
+                    f"Acknowledge politely without nagging (e.g. 'No problem, we can check later.') "
+                    f"and answer any other question Colby asked.]"
+                )
+            else:
+                # Unrelated question or remark (e.g. "What's the tire pressure?")
+                self._asked_person_ids_this_session.add(person_id)
+                self._active_person_followup = None
+                self._pause_checkin(3.0)
+                return None
+
+        # CASE 2: Currently awaiting the person's name or resolution
+        if self._active_person_followup and self._active_person_followup.get("stage") == "awaiting_name":
+            person_id = self._active_person_followup["person_id"]
+            confirmation_id = self._active_person_followup["confirmation_id"]
+            snapshot_path = self._active_person_followup.get("snapshot_path")
+            first_seen_at = self._active_person_followup.get("first_seen_at")
+
+            recent_name = getattr(self, "_last_confirmed_person", {}).get("name") if hasattr(self, "_last_confirmed_person") and self._last_confirmed_person else None
+            classified = self._classify_person_reply(user_input, stage="awaiting_name", recent_name=recent_name)
+            intent = classified.get("intent")
+            is_clear = classified.get("is_clear", True)
+
+            # Helper to advance to next waiting person (Item 3: One yes covers the whole review)
+            def advance_or_complete(action_msg: str) -> str:
+                self._asked_person_ids_this_session.add(person_id)
+                next_eligible = self._get_eligible_pending_person()
+                if next_eligible:
+                    next_pid = next_eligible["person_id"]
+                    next_cid = next_eligible["id"]
+                    next_snap = next_eligible.get("snapshot_path")
+                    next_first = next_eligible.get("first_seen_at")
+                    self._active_person_followup = {
+                        "stage": "awaiting_name",
+                        "person_id": next_pid,
+                        "confirmation_id": next_cid,
+                        "snapshot_path": next_snap,
+                        "first_seen_at": next_first,
+                        "non_answer_turns_count": 0,
+                    }
+                    self._push_person_snapshot(next_pid, next_snap)
+                    next_details = self._format_sighting_details(next_pid, next_first)
+                    return (
+                        f"{action_msg}\n\n"
+                        f"[CONTINUOUS PERSON REVIEW (Phase 2b): Moving directly to the next waiting unrecognized person ({next_pid}). "
+                        f"A snapshot card has just been displayed in the chat transcript. "
+                        f"In your response: "
+                        f"1. Acknowledge the previous person's save/action concisely. "
+                        f"2. Without asking permission again, tell Colby you are also showing this next person seen {next_details}. "
+                        f"3. Ask who this is. Keep your response brief (1-2 sentences).]"
+                    )
+                else:
+                    self._active_person_followup = None
+                    return (
+                        f"{action_msg}\n\n"
+                        f"[PERSON REVIEW COMPLETE (Phase 2b): That was the last waiting unrecognized person. "
+                        f"Acknowledge the action and note that you are all caught up.]"
+                    )
+
+            # Branch 0: Immediate Correction (Item 4)
+            if intent == "correction" and getattr(self, "_last_confirmed_person", None):
+                return self._apply_person_correction(user_input, classified)
+
+            # Branch 1: "That's me" (Item 1 & Spec 5b)
+            if intent == "thats_me" and is_clear:
+                row = self._store.resolve_pending_person_confirmation(
+                    confirmation_id, status="confirmed", confirmed_name="Col"
+                )
+                face_res = None
+                if row and row.get("embedding"):
+                    face_res = self._store.add_person_face(name="Col", embedding=row["embedding"], source="conversation")
+                sighting_details = self._format_sighting_details(person_id, first_seen_at)
+                self._store.log_action(
+                    agent_name="core_agent",
+                    action_type="confirm_person",
+                    description=f"Confirmed that the person seen {sighting_details} was Col.",
+                    metadata={"person_id": person_id, "name": "Col", "source": "conversation"}
+                )
+                self._last_confirmed_person = {
+                    "person_id": person_id,
+                    "confirmation_id": confirmation_id,
+                    "name": "Col",
+                    "face_action": face_res.get("action") if isinstance(face_res, dict) else "reference",
+                    "face_id": face_res.get("id") if isinstance(face_res, dict) else None,
+                    "embedding": row.get("embedding") if row else None,
+                    "memory_id": None,
+                }
+                return advance_or_complete(
+                    "\n[PERSON CONFIRMED AS COLBY (Phase 2b): Colby confirmed that the unrecognized face was himself. "
+                    "Warmly acknowledge that you have added this to Colby's face profile so you will recognize him from that angle going forward.]"
+                )
+
+            # Branch 2: "Don't know" / "Stranger"
+            # Review 6 Item 2: Only clear "I don't know them" or "stranger" dismisses.
+            # Negations ruling someone out must NOT dismiss the face.
+            is_negation = bool(re.search(r"\b(?:not|isn'?t|aren'?t)\b", lower))
+            is_explicit_dont_know = bool(re.search(r"\b(?:don'?t\s+know|no\s+idea|stranger|never\s+seen|anyone\s+i\s+know)\b", lower))
+            if intent == "dont_know" and is_clear and (is_explicit_dont_know or not is_negation):
+                self._store.resolve_pending_person_confirmation(
+                    confirmation_id, status="dismissed"
+                )
+                sighting_details = self._format_sighting_details(person_id, first_seen_at)
+                self._store.log_action(
+                    agent_name="core_agent",
+                    action_type="dismiss_person",
+                    description=f"Marked the visitor seen {sighting_details} ({person_id}) as an unrecognized stranger.",
+                    metadata={"person_id": person_id, "status": "dismissed"}
+                )
+                self._last_confirmed_person = {"person_id": person_id, "confirmation_id": confirmation_id, "name": None}
+                return advance_or_complete(
+                    "\n[PERSON DISMISSED AS STRANGER (Phase 2b): Colby indicated they do not know this person or they are a stranger. "
+                    "Acknowledge that you have noted them as unrecognized and will not ask about them again.]"
+                )
+
+            # Branch 2b: "Not a person" / "Decor" (Spec 5b & Review Addendum 13:05)
+            if intent in ("not_a_person", "decor") and is_clear:
+                row = self._store.resolve_pending_person_confirmation(
+                    confirmation_id, status="decor"
+                )
+                emb = row.get("embedding") if row else None
+                if not emb and self._store:
+                    try:
+                        conf_rec = self._store.get_pending_person_confirmation_by_id(confirmation_id)
+                        if conf_rec and conf_rec.get("embedding"):
+                            emb = conf_rec["embedding"]
+                    except Exception:
+                        pass
+                sighting_details = self._format_sighting_details(person_id, first_seen_at)
+                self._store.log_action(
+                    agent_name="core_agent",
+                    action_type="mark_decor",
+                    description=f"Marked {person_id} seen {sighting_details} as room decor / not a person ({user_input}).",
+                    metadata={"person_id": person_id, "status": "decor"}
+                )
+                self._last_confirmed_person = {
+                    "person_id": person_id,
+                    "confirmation_id": confirmation_id,
+                    "name": None,
+                    "status": "decor",
+                    "embedding": emb,
+                }
+                return advance_or_complete(
+                    "\n[PERSON MARKED AS DECOR (Phase 2b): Colby indicated this is not a person (e.g. a statue, poster, or TV). "
+                    "Acknowledge clearly that you have noted this is not a person and will ignore this face from now on.]"
+                )
+
+
+            # Branch 3: "Forget them" / "Delete"
+
+            if intent == "forget" and is_clear:
+                self._store.forget_pending_person(confirmation_id)
+                sighting_details = self._format_sighting_details(person_id, first_seen_at)
+                self._store.log_action(
+                    agent_name="core_agent",
+                    action_type="forget_person",
+                    description=f"Purged all photos and sighting records for {person_id} seen {sighting_details}.",
+                    metadata={"person_id": person_id}
+                )
+                self._last_confirmed_person = None
+                return advance_or_complete(
+                    "\n[PERSON PURGED & FORGOTTEN (Phase 2b): Colby asked to forget or delete all records for this person. "
+                    "Acknowledge clearly that you have deleted all records and removed all photos.]"
+                )
+
+            # Branch 4: Col says stop / not now during the review
+            if intent == "not_now":
+                self._asked_person_ids_this_session.add(person_id)
+                self._active_person_followup = None
+                self._pause_checkin(3.0)
+                return (
+                    f"\n[PERSON REVIEW PAUSED (Phase 2b): Colby indicated to stop or do this later. "
+                    f"Acknowledge politely without nagging and return to Colby's flow.]"
+                )
+
+            # Branch 4b: Skip this person for now (Minor Item 1)
+            if intent == "skip":
+                self._asked_person_ids_this_session.add(person_id)
+                return advance_or_complete(
+                    f"\n[PERSON SKIPPED (Phase 2b): Colby chose to skip {person_id} for now. "
+                    f"Moving on to the next person without making any changes to this one.]"
+                )
+
+            # Branch 5: Name provided by Colby
+            cand_name = classified.get("name") if intent == "name" else None
+            cand_notes = classified.get("notes")
+
+            # Review 6 Item 1: Disambiguate relationship titles from personal names
+            # If model extracted a relationship word as name (e.g. "Dad") from "That's my dad", treat as relationship unless user said "just Dad"
+            rel_titles = {"dad", "mom", "father", "mother", "brother", "sister", "neighbor", "cousin", "friend", "uncle", "aunt", "coworker", "boss", "roommate", "landlord", "partner", "wife", "husband"}
+            user_has_just_directive = bool(re.search(r"\b(?:just|only|call\s+(?:him|her|them)|no\s+name|save\s+as)\b", user_input, re.IGNORECASE))
+            if cand_name and cand_name.lower() in rel_titles and not user_has_just_directive and not self._active_person_followup.get("pending_notes"):
+                cand_notes = cand_notes or cand_name.lower()
+                cand_name = None
+
+            # If Colby explicitly confirms saving as the pending relationship title (answering "yes")
+            if not cand_name and intent == "yes" and self._active_person_followup.get("pending_notes"):
+                p_note = self._active_person_followup.get("pending_notes")
+                if p_note.lower().startswith("my "):
+                    p_note = p_note[3:].strip()
+                cand_name = p_note.title()
+
+            # If cand_name is now resolved and cand_notes is empty, reuse pending_notes
+            if cand_name and not cand_notes and self._active_person_followup.get("pending_notes"):
+                cand_notes = self._active_person_followup.get("pending_notes")
+
+            if (intent == "name" or cand_name) and is_clear and cand_name:
+                self._active_person_followup.pop("pending_notes", None)
+                row = self._store.resolve_pending_person_confirmation(
+                    confirmation_id, status="confirmed", confirmed_name=cand_name
+                )
+                face_res = None
+                if row and row.get("embedding"):
+                    face_res = self._store.add_person_face(name=cand_name, embedding=row["embedding"], source="conversation")
+
+                rel = cand_notes if cand_notes else "contact"
+                mem_id = None
+                try:
+                    self._store.upsert_contact(name=cand_name, relationship=rel, metadata={"notes": user_input})
+                    self._store.log_interaction(
+                        contact_name=cand_name,
+                        interaction_type="in-person",
+                        notes=f"Identified from sighting: {user_input}"
+                    )
+                    if self._om:
+                        mem_id = self._om.add_memory(content=f"Met/identified {cand_name}: {user_input}", sector="semantic")
+                except Exception as e:
+                    logger.debug(f"Error saving contact details for {cand_name}: {e}")
+
+                sighting_details = self._format_sighting_details(person_id, first_seen_at)
+                rel_desc = f", {cand_notes}" if cand_notes else ""
+                self._store.log_action(
+                    agent_name="core_agent",
+                    action_type="confirm_person",
+                    description=f"Learned that the person seen {sighting_details} is {cand_name}{rel_desc}.",
+                    metadata={"person_id": person_id, "name": cand_name, "notes": user_input}
+                )
+                self._last_confirmed_person = {
+                    "person_id": person_id,
+                    "confirmation_id": confirmation_id,
+                    "name": cand_name,
+                    "face_action": face_res.get("action") if isinstance(face_res, dict) else "enrolled",
+                    "face_id": face_res.get("id") if isinstance(face_res, dict) else None,
+                    "embedding": row.get("embedding") if row else None,
+                    "memory_id": mem_id,
+                }
+                return advance_or_complete(
+                    f"\n[PERSON CONFIRMED & LEARNED (Phase 2b): Colby identified this person as {cand_name}{rel_desc}. "
+                    f"You have saved their face embedding and details to memory and will recognize them from now on. "
+                    f"Acknowledge this warmly and concisely, stating what was saved (e.g. 'Got it, that's {cand_name}{rel_desc}.').]"
+                )
+
+            # Branch 5b: Relationship / notes provided without personal name (Review 6 Item 1)
+            if (intent == "name" or cand_notes) and not cand_name and cand_notes:
+                self._active_person_followup["pending_notes"] = cand_notes
+                self._active_person_followup["non_answer_turns_count"] = 0
+                clean_note = cand_notes.lower()
+                if clean_note.startswith("my "):
+                    clean_note = clean_note[3:].strip()
+                return (
+                    f"\n[PERSON RELATIONSHIP NOTED (Phase 2b): Colby identified this person as their {clean_note}, "
+                    f"but did not give a personal name ('{user_input}'). "
+                    f"Acknowledge the relationship warmly and ask Colby for their name "
+                    f"(or if they would like you to just save them as {clean_note.capitalize()}). "
+                    f"Keep your response brief (1-2 sentences).]"
+                )
+
+            # Branch 6: Hesitant / clarification needed (e.g. "Not sure, maybe Jake from next door")
+            cand_tentative = classified.get("candidate_name")
+            if cand_tentative:
+                return (
+                    f"\n[CLARIFY PERSON NAME (Phase 2b): Colby mentioned this might be {cand_tentative} ('{user_input}'). "
+                    f"Ask Colby gently whether he wants you to save them as {cand_tentative} or leave them as unrecognized for now. "
+                    f"Do not guess.]"
+                )
+
+            # Branch 6b: Negation / Ruled out (Review 6 Item 2)
+            negation_m = re.search(r"\b(?:not|isn'?t|aren'?t)\s+(?:my\s+)?([A-Za-z]+)\b", user_input, re.IGNORECASE)
+            if negation_m or (intent in ("unclear", "dont_know") and re.search(r"\b(?:not|isn'?t|aren'?t)\b", lower)):
+                ruled_out = negation_m.group(1) if negation_m else None
+                ruled_out_str = f" {ruled_out}" if ruled_out and ruled_out.lower() not in self._CONFIRMATION_STOPWORDS else ""
+                self._active_person_followup["non_answer_turns_count"] = 0
+                return (
+                    f"\n[PERSON NEGATION (Phase 2b): Colby clarified that this person is not{ruled_out_str} ('{user_input}'). "
+                    f"Acknowledge that it is not that person, and politely ask Colby if they know who it is instead. "
+                    f"Do not guess, and do not dismiss or delete the person.]"
+                )
+
+            # Branch 7: Non-answer / Unclear without candidate / Unrelated (Item 2: 2-turn auto-close)
+            turns = self._active_person_followup.get("non_answer_turns_count", 0)
+            if turns == 0:
+                self._active_person_followup["non_answer_turns_count"] = 1
+                # Keep question open for this one reply, WITHOUT repeating reminder
+                return None
+            else:
+                # Reply after that isn't an answer either: drop quietly, treat as not now (3h pause)
+                self._asked_person_ids_this_session.add(person_id)
+                self._active_person_followup = None
+                self._pause_checkin(3.0)
+                return None
+
+        # Check for immediate correction after review completion (Item 4 & Must-fix 5)
+        if getattr(self, "_last_confirmed_person", None):
+            recent_name = self._last_confirmed_person.get("name") or ("decor" if self._last_confirmed_person.get("status") == "decor" else None)
+            classified = self._classify_person_reply(user_input, stage="awaiting_name", recent_name=recent_name)
+
+            if classified.get("intent") == "correction":
+                return self._apply_person_correction(user_input, classified)
+            else:
+                self._last_confirmed_person = None
+
+        # CASE 3: No active follow-up — check if an eligible person is waiting (>2 mins observed)
+        # Item 7: Check-in only on first turn after a quiet spell (>15 min / 900s), never mid-task or back-and-forth.
+        # Item 6: Never check-in if 3-hour pause is active.
+        if self._is_checkin_paused():
+            return None
+
+        now_ts = time.time()
+        is_quiet_spell = False
+        if self._last_user_turn_timestamp is None:
+            is_quiet_spell = True
+        elif (now_ts - self._last_user_turn_timestamp) >= 900.0:
+            is_quiet_spell = True
+
+        if not is_quiet_spell:
+            return None
+
+        eligible = self._get_eligible_pending_person()
+        if eligible:
+            person_id = eligible["person_id"]
+            self._active_person_followup = {
+                "stage": "ask_permission",
+                "person_id": person_id,
+                "confirmation_id": eligible["id"],
+                "snapshot_path": eligible.get("snapshot_path"),
+                "first_seen_at": eligible.get("first_seen_at"),
+            }
+            return (
+                f"\n[UNRECOGNIZED PERSON CHECK-IN (Phase 2b): You observed an unrecognized visitor ({person_id}) for over 2 minutes. "
+                f"CRITICAL INSTRUCTION: "
+                f"1. Answer Colby's current question/request completely and naturally first. "
+                f"2. At the very end of your response, add a brief, polite check-in asking if now is a good time to go over who they were "
+                f"(for example: 'By the way, I saw someone earlier that I didn't recognize. Is now a good time to go over who they were?'). "
+                f"3. Do NOT ask multiple questions.]"
+            )
+
+        return None
+
 
     @property
     def pc_controller(self):
@@ -1028,6 +1896,12 @@ class CoreAgent:
         if person_learn_note:
             domain_kb = (domain_kb + f"\n[Person Recognition] {person_learn_note}").strip()
 
+        # 4c. Conversational person identification follow-up (Phase 2b):
+        # Asks Col later in conversation about unrecognized faces seen for 2+ minutes.
+        person_followup_note = self._handle_conversational_person_followup(text)
+        if person_followup_note:
+            domain_kb = (domain_kb + person_followup_note).strip()
+
         kb_block = f"\n\n## Reference Domain Knowledge (External Reference - NOT spoken by user)\n{domain_kb}" if domain_kb else ""
 
         # 5. Personal Memory Retrieval
@@ -1108,6 +1982,7 @@ class CoreAgent:
         token_est = len(full_system_prompt) // 4
         cloud_trigger = self.evaluate_cloud_delegation(text, token_est)
 
+        self._last_user_turn_timestamp = time.time()
         return full_system_prompt, cloud_trigger, visual_image_b64, profile_block
 
     def process_turn_streaming(self, user_input: str) -> Generator[str, None, None]:

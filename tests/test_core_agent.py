@@ -47,13 +47,13 @@ class TestCoreAgent:
 
     def test_build_context_system_prompt(self, core_agent):
         """System prompt should include identity, stance, and activity status."""
-        prompt, trigger = core_agent.build_context_system_prompt("Let's plan my workout")
+        prompt, trigger, *rest = core_agent.build_context_system_prompt("Let's plan my workout")
         assert "ARCHER" in prompt
         assert "High-Performance Fitness" in prompt
 
     def test_date_time_in_system_prompt(self, core_agent):
         """System prompt should contain current local date and time."""
-        prompt, _ = core_agent.build_context_system_prompt("What is today's date?")
+        prompt, *_ = core_agent.build_context_system_prompt("What is today's date?")
         assert "CURRENT SYSTEM ENVIRONMENT" in prompt
         assert "Current Local Date & Time:" in prompt
 
@@ -82,14 +82,14 @@ class TestCoreAgent:
 
     def test_operational_feedback_instruction_in_prompt(self, core_agent):
         """System prompt should include directives for direct operational feedback and visual precision."""
-        prompt, _ = core_agent.build_context_system_prompt("Testing prompt guidelines")
+        prompt, *_ = core_agent.build_context_system_prompt("Testing prompt guidelines")
         assert "DIRECT OPERATIONAL FEEDBACK & CORRECTIONS" in prompt
         assert "VISUAL QUESTIONS & CAMERA FEED" in prompt
         assert "GLOBAL NO ROLE-FILLER RULE" in prompt
 
     def test_fragmentary_input_guard(self, core_agent):
         """Short fragmentary input without context should inject clarification directive instead of guessing."""
-        prompt, _ = core_agent.build_context_system_prompt("of this.")
+        prompt, *_ = core_agent.build_context_system_prompt("of this.")
         assert "CRITICAL AMBIGUOUS INPUT INSTRUCTION" in prompt
         assert "DO NOT guess, invent a backstory, or fabricate a hypothetical topic" in prompt
 

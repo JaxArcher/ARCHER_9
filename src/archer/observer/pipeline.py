@@ -31,18 +31,25 @@ motion-gate on in that case.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
+import uuid
+
+import cv2
+import numpy as np
+
 
 from loguru import logger
 
 from archer.config import get_config
 from archer.core.event_bus import Event, EventType, get_event_bus
 from archer.memory.redis_buffer import get_redis_buffer
-from archer.memory.sqlite_store import get_sqlite_store
+from archer.memory.sqlite_store import SQLiteStore, get_sqlite_store
 from archer.observer.camera import WebcamCapture
 from archer.observer.analyzers import DetectionResult, SceneAnalyzer
 from archer.observer.person_id import PersonIdentifier
+from archer.observer.person_tracker import PersonTracker
 
 # Single Redis channel for every observation this pipeline (or the
 # staleness reasoner, a separate periodic pass -- see
@@ -53,6 +60,12 @@ OBSERVER_REDIS_CHANNEL = "archer:observer:events"
 # How often to check "did a motion window just open" while otherwise
 # silent -- cheap (no camera/model work), just a clock check.
 _IDLE_POLL_INTERVAL_S = 1.0
+
+# Sharp looks (spec 5b, 2026-10-14): at most one full-resolution still per stay
+# every few seconds, and only while the face is turned toward the camera.
+_SHARP_LOOK_MIN_INTERVAL_S = 5.0
+# Spread a waiting label's (up to 3) photos over the stay.
+_WAITING_PHOTO_MIN_INTERVAL_S = 20.0
 
 
 class ObserverPipeline:
@@ -73,21 +86,22 @@ class ObserverPipeline:
         analysis_interval: float | None = None,
         run_analysis: bool = True,
         open_camera: bool = True,
+        db_path: str | None = None,
     ) -> None:
         self._config = get_config()
         self._bus = get_event_bus()
-        self._store = get_sqlite_store()
+        self._db_path = db_path
+        self._store = SQLiteStore(db_path) if db_path else get_sqlite_store()
         self._redis = get_redis_buffer()
         self._analysis_interval = analysis_interval or self._config.observer_analysis_frequency
         self._active_interval = self._config.observer_motion_active_interval
         self._motion_tail_s = self._config.observer_motion_tail_seconds
         self._open_camera = open_camera
 
-        # run_analysis=False: camera capture + person-detection overlay +
-        # enroll_current_person still work (the desktop GUI's live preview
-        # widget needs these), but the analysis thread never starts, so
-        # this instance never logs/publishes observations. Added
-        # 2026-09-16 so __main__.py's own ObserverPipeline (kept only for
+        # run_analysis=False: camera capture and person-detection overlay
+        # still work (the desktop GUI's live preview widget needs these),
+        # but the analysis thread never starts, so this instance never logs/
+        # publishes observations. Added 2026-09-16 so __main__.py's own
         # the GUI's camera widget) doesn't duplicate the standalone
         # observer service's analysis work and double-log every
         # observation.
@@ -128,13 +142,21 @@ class ObserverPipeline:
 
         # Analyzers
         self._scene_analyzer = SceneAnalyzer(cooldown_seconds=30.0)
-        self._person_identifier = PersonIdentifier()
+        self._person_identifier = PersonIdentifier(db_path=db_path)
+        self._person_tracker = PersonTracker()
 
         # Control
         self._running = threading.Event()
         self._paused = threading.Event()  # Pause Observer (privacy)
         self._camera_released = threading.Event()  # Camera device fully released (see release_camera())
         self._analysis_thread: threading.Thread | None = None
+        self._tracker_thread: threading.Thread | None = None
+        self._face_check_thread: threading.Thread | None = None
+        self._tracker_updates_count = 0
+        self._tracker_last_update_ts = 0.0
+        self._sharp_crops_count = 0
+        self._fallback_crops_count = 0
+        self._last_crop_stats_log_ts = time.time()
         self._camera_lock = threading.Lock()  # Protects camera swap during switching
 
         # Track voice pipeline state so the (CPU-bound, moondream-on-CPU)
@@ -198,6 +220,22 @@ class ObserverPipeline:
         self._pipeline_started_at = time.monotonic()
 
         if self._run_analysis:
+            # Start dedicated person tracking thread at ~2 FPS (Spec 5b, Review 15:40 Item 1)
+            self._tracker_thread = threading.Thread(
+                target=self._tracker_loop,
+                name="ObserverTracker",
+                daemon=True,
+            )
+            self._tracker_thread.start()
+
+            # Start face checks thread on its own schedule alongside tracker (Spec 5b & Review 23:55 Item 5)
+            self._face_check_thread = threading.Thread(
+                target=self._face_check_loop,
+                name="ObserverFaceChecks",
+                daemon=True,
+            )
+            self._face_check_thread.start()
+
             # Start analysis thread regardless — it handles no-camera gracefully
             self._analysis_thread = threading.Thread(
                 target=self._analysis_loop,
@@ -223,6 +261,14 @@ class ObserverPipeline:
         self._running.clear()
         if self._camera:
             self._camera.stop()
+
+        if self._tracker_thread is not None:
+            self._tracker_thread.join(timeout=3.0)
+            self._tracker_thread = None
+
+        if self._face_check_thread is not None:
+            self._face_check_thread.join(timeout=3.0)
+            self._face_check_thread = None
 
         if self._analysis_thread is not None:
             self._analysis_thread.join(timeout=5.0)
@@ -316,6 +362,23 @@ class ObserverPipeline:
     def person_identifier(self) -> PersonIdentifier:
         """Expose person identifier."""
         return self._person_identifier
+
+    @property
+    def person_tracker(self) -> PersonTracker:
+        """Expose person tracker for following people."""
+        return self._person_tracker
+
+    @property
+    def tracker_updates_count(self) -> int:
+        return self._tracker_updates_count
+
+    @property
+    def sharp_crops_count(self) -> int:
+        return self._sharp_crops_count
+
+    @property
+    def fallback_crops_count(self) -> int:
+        return self._fallback_crops_count
 
     def get_latest_detections(self) -> list[dict]:
         """Get the latest detection results for GUI overlay drawing."""
@@ -441,6 +504,457 @@ class ObserverPipeline:
         with self._motion_lock:
             return time.monotonic() < self._motion_active_until
 
+    def _tracker_loop(self) -> None:
+        """
+        Dedicated quick tracking loop (Spec 5b, Review 15:40 Item 1).
+        Runs at ~2 FPS (~500ms) on the room camera, completely decoupled from
+        the slow scene analysis cycle.
+        """
+        tracker_interval = 1.0 / self._person_tracker.fps  # ~0.50s (2 FPS)
+        logger.info(f"ObserverTracker thread started (~{self._person_tracker.fps:.1f} FPS, {tracker_interval*1000:.0f}ms loop).")
+        while self._running.is_set():
+            time.sleep(tracker_interval)
+
+            if not self._running.is_set() or self._paused.is_set():
+                continue
+
+            # Only track bodies on room camera
+            is_room_cam = (
+                self._active_source == self._config.network_camera_url
+                or not self._config.network_camera_url
+                or "network" in str(self._active_source).lower()
+                or "room" in str(self._active_source).lower()
+                or "rtsp" in str(self._active_source).lower()
+            )
+            if not is_room_cam:
+                continue
+
+            with self._camera_lock:
+                if self._camera is None:
+                    continue
+                frame, timestamp = self._camera.get_latest_frame()
+
+            if frame is None:
+                continue
+
+            try:
+                self._person_tracker.update(frame, timestamp=timestamp, store=self._store)
+                self._tracker_updates_count += 1
+                self._tracker_last_update_ts = time.time()
+            except Exception as e:
+                logger.error(f"Observer tracker update failed: {e}")
+
+    def _face_check_loop(self) -> None:
+        """
+        Face checks run on their own schedule alongside the tracker (Spec 5b & Review 23:55 Item 5).
+        Runs un-gated by motion alerts, slow scene descriptions, or ARCHER GUI state.
+        Cadence:
+        - Unconfirmed tracks: checks every 1.5–2.0 seconds.
+        - Confirmed Col tracks: re-checks every 60 seconds.
+        """
+        logger.info("ObserverFaceChecks thread started (face check schedule).")
+        while self._running.is_set():
+            time.sleep(1.0)
+            if not self._running.is_set() or self._paused.is_set():
+                continue
+
+            with self._camera_lock:
+                if self._camera is None:
+                    continue
+                frame, timestamp = self._camera.get_latest_frame()
+
+            if frame is None:
+                continue
+
+            try:
+                self._run_tracker_face_checks(frame, timestamp=timestamp)
+                # Must-fix 3: Publish presence every 30s for every identified stay
+                self._publish_room_camera_presence(self._person_tracker.active_tracks, timestamp)
+            except Exception as e:
+                logger.error(f"Observer face check failed: {e}")
+
+    def _select_track_face(self, track: Track, candidate_faces: list[Any]) -> Optional[Any]:
+        """
+        Select the correct face for a person track (Review 2026-10-13 Item 2 & 11).
+        1. Filter out decor faces.
+        2. When a box contains more than one face, pick the one at the person's head (lowest y / top of body box).
+        """
+        if not candidate_faces:
+            return None
+        tx, ty, tw, th = track.box
+        inside_faces = []
+        for f in candidate_faces:
+            fb = f.bbox
+            fcx = (fb[0] + fb[2]) / 2.0
+            fcy = (fb[1] + fb[3]) / 2.0
+            if tx <= fcx <= tx + tw and ty <= fcy <= ty + th:
+                if hasattr(f, "embedding") and f.embedding is not None:
+                    emb = np.array(f.embedding, dtype=np.float32)
+                    if self._person_identifier and self._person_identifier.is_decor_face(emb, store=self._store):
+                        continue
+                inside_faces.append(f)
+
+        if not inside_faces:
+            return None
+
+        # Pick the face at the person's head (lowest y / top of body box)
+        return min(inside_faces, key=lambda f: f.bbox[1])
+
+    def _publish_room_camera_presence(self, tracks: list[Track], now: Optional[float] = None) -> None:
+        """
+        Publish 'person seen' observation events from active room-camera stays (Review 2026-10-13 Item 5 & Must-fix 3).
+        Keeps the Blindspot agent's time-in-the-room tracking and the chat's activity status updated.
+        Publishes for every identified stay, every 30 seconds while it lasts.
+        """
+        curr_ts = now if now is not None else time.time()
+        for track in tracks:
+            if getattr(track, "is_known", False) and track.assigned_identity and track.state == "active":
+                last_pub = getattr(track, "_last_presence_published_ts", 0.0)
+                if (curr_ts - last_pub) >= 30.0:
+                    self._publish_observation(DetectionResult(
+                        source="network_cam",
+                        event_type="person_sighting",
+                        confidence=track.confidence,
+                        data={
+                            "person_id": track.assigned_identity,
+                            "is_known": True,
+                            "box": track.box,
+                            "stay_id": track.stay_id,
+                            "track_id": track.track_id,
+                        },
+                    ))
+                    track._last_presence_published_ts = curr_ts
+
+    def _run_tracker_face_checks(self, frame: np.ndarray, timestamp: Optional[float] = None) -> None:
+        """
+        Face checks run on their own schedule alongside the tracker (Spec 5b & Review 23:55 Item 5).
+        Runs un-gated by motion alerts, slow scene descriptions, or ARCHER GUI state.
+        Cadence:
+        - Unconfirmed tracks: checks every 1.5–2.0 seconds.
+        - Confirmed Col tracks: re-checks every 60 seconds.
+        """
+        if not self._person_identifier or not self._person_identifier.is_available:
+            return
+
+        now = timestamp if timestamp is not None else time.time()
+        # Must-fix 3: Publish 'person seen' events for every identified stay every 30 seconds
+        self._publish_room_camera_presence(self._person_tracker.active_tracks, now)
+
+        # Should-fix 10: Check only tracks currently in view (state == "active")
+        tracks = [t for t in self._person_tracker.active_tracks if t.state == "active"]
+        if not tracks:
+            return
+
+        tracks_to_check = []
+        for track in tracks:
+            needs_initial_id = (not track.confirmed_known or track.assigned_identity is None) and (now - track.last_face_check_ts >= 1.5)
+            needs_periodic_recheck = (track.confirmed_known and track.assigned_identity == "Col" and (now - track.last_face_check_ts >= 60.0))
+            if needs_initial_id or needs_periodic_recheck:
+                tracks_to_check.append((track, needs_initial_id, needs_periodic_recheck))
+
+        if not tracks_to_check:
+            return
+
+        cam_source_str = "network_cam" if self._config.network_camera_url else "webcam"
+        sub_faces = self._person_identifier.get_faces(frame, camera_source=cam_source_str)
+
+        for track, needs_initial_id, needs_periodic_recheck in tracks_to_check:
+            # Pick head face, skipping decor (Review 2026-10-13 Item 2 & 11)
+            track_face = self._select_track_face(track, sub_faces)
+            if track_face is None:
+                continue
+
+            fx1, fy1, fx2, fy2 = [int(v) for v in track_face.bbox]
+            sub_face_box = [fx1, fy1, fx2 - fx1, fy2 - fy1]
+            track.last_face_check_ts = now
+
+            # Small-stream crop around the face (blur/brightness checks; never a photo).
+            crop, crop_box, _ = self._person_tracker.capture_sharp_face_crop(
+                track,
+                frame_sub=frame,
+                network_camera_url=self._config.network_camera_url,
+                reolink_detector=self._reolink_detector,
+                sub_face_box=sub_face_box,
+                fetch_network_still=False,
+            )
+
+            # Sharp looks (spec 5b, 2026-10-14; Claude 2026-10-15): who a face belongs
+            # to is judged from a sharp still from the main stream, taken only when the
+            # face is turned toward the camera, at most once every few seconds per stay.
+            analysis = None
+            is_sharp = False
+            if (
+                self._config.network_camera_url
+                and self._person_identifier.is_facing_camera(track_face)
+                and (now - getattr(track, "_last_sharp_look_ts", 0.0)) >= _SHARP_LOOK_MIN_INTERVAL_S
+            ):
+                track._last_sharp_look_ts = now
+                still_crop, still_box, got_still = self._person_tracker.capture_sharp_face_crop(
+                    track,
+                    frame_sub=frame,
+                    network_camera_url=self._config.network_camera_url,
+                    reolink_detector=self._reolink_detector,
+                    sub_face_box=sub_face_box,
+                    fetch_network_still=True,
+                )
+                if got_still and still_crop is not None:
+                    analysis = self._person_identifier.analyze_face_crop(
+                        still_crop,
+                        store=self._store,
+                        stay_id=track.stay_id,
+                        camera_source=cam_source_str,
+                    )
+                    if analysis is not None:
+                        is_sharp = True
+                        crop, crop_box = still_crop, still_box
+
+            if analysis is None:
+                # Small-stream look: reuse the face already analysed in the whole
+                # frame instead of running the face model again on the same pixels.
+                analysis = self._person_identifier.analyze_detected_face(
+                    track_face, crop, store=self._store
+                )
+            if analysis is None:
+                continue
+
+            if is_sharp:
+                self._sharp_crops_count += 1
+            else:
+                self._fallback_crops_count += 1
+
+            is_clear = analysis["is_clear"]
+            col_sim = analysis["col_sim"]
+            crop_emb = analysis["embedding"]
+            match_res = analysis["match_res"]
+            det_conf = analysis["det_score"]
+
+            if needs_periodic_recheck:
+                # Only a sharp, clear look can split Col's stay (small-stream faces of
+                # Col have scored below 0.25 while clear; sharp ones haven't).
+                self.recheck_track_face(track, crop_emb, is_clear=(is_clear and is_sharp), timestamp=now)
+            elif needs_initial_id:
+                pid = match_res.get("person_id")
+                is_k = match_res.get("is_known", False)
+                sim = match_res.get("sim", 0.0)
+
+                stay_is_col = (track.assigned_identity == "Col" and track.confirmed_known)
+                if stay_is_col:
+                    is_clear_stranger = (
+                        is_clear and (
+                            (is_k and pid != "Col" and sim >= self._person_identifier._threshold)
+                            or (col_sim < 0.25)
+                        )
+                    )
+                    if is_clear_stranger:
+                        # Must-fix 6: Single look < 0.25 does not split Col's stay
+                        if col_sim < 0.25 and not is_k:
+                            track._consecutive_stranger_looks = getattr(track, "_consecutive_stranger_looks", 0) + 1
+                            if track._consecutive_stranger_looks >= 2:
+                                self._person_tracker.resolve_track_identity(
+                                    track, pid or "Person", is_known=is_k, confidence=sim, store=self._store
+                                )
+                        else:
+                            self._person_tracker.resolve_track_identity(
+                                track, pid or "Person", is_known=is_k, confidence=sim, store=self._store
+                            )
+                    else:
+                        track.assigned_identity = "Col"
+                        track.confirmed_known = True
+                        track.is_known = True
+                        track._consecutive_stranger_looks = 0
+                else:
+                    if is_k and pid == "Col":
+                        self._person_tracker.resolve_track_identity(
+                            track, "Col", is_known=True, confidence=col_sim, store=self._store
+                        )
+                        self._publish_room_camera_presence([track], now)
+                    elif is_k and pid != "Col":
+                        self._person_tracker.resolve_track_identity(
+                            track, pid, is_known=True, confidence=sim, store=self._store
+                        )
+                        self._publish_room_camera_presence([track], now)
+                    elif is_clear and is_sharp and not is_k:
+                        # Must-fix 1: Unrecognized stranger gets one waiting label for the whole stay with photo (up to 3).
+                        # Only a sharp, clear look starts or feeds a label (Claude 2026-10-15).
+                        waiting_lbl = getattr(track, "waiting_label_id", None)
+                        if not waiting_lbl:
+                            # A face that matches a label already waiting keeps that label
+                            # (spec 5b acceptance: same label on later sightings).
+                            if pid and sim >= self._person_identifier._threshold:
+                                waiting_lbl = pid
+                            else:
+                                next_n = self._store.get_next_person_number()
+                                waiting_lbl = f"Person_{next_n}"
+                            track.waiting_label_id = waiting_lbl
+                            self._person_tracker.resolve_track_identity(
+                                track, waiting_lbl, is_known=False, confidence=det_conf, store=self._store
+                            )
+
+                        snap_path = getattr(track, "_last_saved_snapshot_path", None)
+                        waiting_photos = getattr(track, "_waiting_photos_count", 0)
+                        last_photo_ts = getattr(track, "_last_waiting_photo_ts", None)
+                        if waiting_photos < 3 and (last_photo_ts is None or (now - last_photo_ts) >= _WAITING_PHOTO_MIN_INTERVAL_S):
+                            # `crop` is the sharp still taken for this look.
+                            snap_filename = f"{int(now)}_{waiting_lbl}.jpg"
+                            snap_path = self._person_identifier.save_snapshot(crop, snap_filename)
+                            track._waiting_photos_count = waiting_photos + 1
+                            track._last_waiting_photo_ts = now
+                            track._last_saved_snapshot_path = snap_path
+
+                        box_to_store = json.dumps(crop_box) if crop_box else None
+                        self._store.upsert_pending_person_confirmation(
+                            person_id=waiting_lbl,
+                            embedding=crop_emb.tobytes() if crop_emb is not None else b"",
+                            snapshot_path=snap_path,
+                            sighting_timestamp=now,
+                            face_box=box_to_store,
+                            stay_id=track.stay_id,
+                            status="pending",
+                        )
+                        self._store.update_pending_confirmation_duration(waiting_lbl, track.duration)
+
+            # Should-fix Item 9: Throttle sighting logging for unconfirmed stays to at most once per 30s
+            last_sight = getattr(track, "_last_sighting_log_ts", 0.0)
+            id_changed = (track.assigned_identity != getattr(track, "_last_logged_identity", None))
+            should_log_sight = (last_sight == 0.0 or id_changed or (now - last_sight >= 30.0))
+            if should_log_sight and track.assigned_identity:
+                try:
+                    # Minor Item 1: Mark as stay_association only if face itself did not match Col
+                    is_col_direct = (track.assigned_identity == "Col" and col_sim >= 0.55)
+                    self._store.log_person_sighting(
+                        person_id=track.assigned_identity,
+                        is_known=track.is_known,
+                        confidence=col_sim if (track.assigned_identity == "Col") else det_conf,
+                        embedding=crop_emb.tobytes() if crop_emb is not None else None,
+                        camera_source=cam_source_str if is_col_direct or track.assigned_identity != "Col" else f"{cam_source_str}:stay_association",
+                        stay_id=track.stay_id,
+                    )
+                    track._last_sighting_log_ts = now
+                    track._last_logged_identity = track.assigned_identity
+                except Exception as e:
+                    logger.debug(f"Failed logging throttled sighting: {e}")
+
+            if is_sharp and is_clear and track.confirmed_known and track.assigned_identity == "Col":
+                self.maybe_learn_col_face(
+                    track=track,
+                    face_embedding=crop_emb,
+                    similarity_to_col=col_sim,
+                    detector_confidence=det_conf,
+                    is_sharp=is_sharp,
+                    is_clear=is_clear,
+                )
+
+    def recheck_track_face(
+        self,
+        track: Track,
+        face_embedding: np.ndarray,
+        is_clear: bool,
+        timestamp: Optional[float] = None,
+    ) -> bool:
+        """
+        Re-check a track confirmed as Col (Spec 5b & Review 23:55 Item 1, Review 2026-10-13 Must-fix 6).
+        Splits Col's stay only on a clear face that is someone else:
+        - matches another named person (sim >= threshold), or
+        - is plainly unlike Col (similarity to Col < 0.25).
+        Per Must-fix 6: A single look under 0.25 does NOT split Col's stay; requires >= 2 consecutive stranger looks.
+        Off-angle looks (0.25 <= similarity < 0.55) or unclear faces inside Col's stay do not split the stay.
+        """
+        now = timestamp if timestamp is not None else time.time()
+        col_sim = self._person_identifier.get_similarity_to_col(face_embedding, store=self._store)
+        match_res = self._person_identifier.match_face_embedding(face_embedding, store=self._store)
+        pid = match_res.get("person_id")
+        is_k = match_res.get("is_known", False)
+        best_sim = match_res.get("sim", 0.0)
+
+        is_clear_stranger = (
+            is_clear and (
+                (is_k and pid != "Col" and best_sim >= self._person_identifier._threshold)
+                or (col_sim < 0.25)
+            )
+        )
+
+        if is_clear_stranger:
+            if col_sim < 0.25 and not is_k:
+                track._consecutive_stranger_looks = getattr(track, "_consecutive_stranger_looks", 0) + 1
+                if track._consecutive_stranger_looks < 2:
+                    return False
+
+            new_stay_id = f"stay_{uuid.uuid4().hex[:12]}"
+            # Review 23:55 Item 9: UTC time for split_time
+            split_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now))
+            self._store.split_stay(
+                old_stay_id=track.stay_id,
+                new_stay_id=new_stay_id,
+                new_person_id=pid or "Stranger",
+                split_time=split_ts,
+                camera_source="network_cam",
+                confidence=best_sim if is_k else col_sim,
+                is_known=is_k,
+                track_id=track.track_id,
+            )
+            logger.info(
+                f"Observer: Re-check identified clear stranger ({pid}, col_sim: {col_sim:.2f}). "
+                f"Split stay from Col ({track.stay_id}) to {new_stay_id}."
+            )
+            track.stay_id = new_stay_id
+            track.assigned_identity = pid
+            track.is_known = is_k
+            track.confidence = best_sim if is_k else col_sim
+            track.confirmed_known = is_k
+            track._consecutive_stranger_looks = 0
+            return True
+        else:
+            track.confidence = max(track.confidence, col_sim)
+            track._consecutive_stranger_looks = 0
+            return False
+
+
+    def maybe_learn_col_face(
+        self,
+        track: Track,
+        face_embedding: np.ndarray,
+        similarity_to_col: float,
+        detector_confidence: float = 0.90,
+        is_sharp: bool = True,
+        is_clear: bool = True,
+    ) -> bool:
+        """
+        Learn sharp-photo samples of Col during stays clearly identified as him (Spec 5b & Review 23:55 Item 10).
+        Gates learning on similarity to Col (0.45 <= similarity_to_col < 0.85), requiring a sharp, clear face.
+        Logs plain English change log line: 'Learned a new view of Col's face from the room camera.'
+        """
+        if not (is_sharp and is_clear and track.confirmed_known and track.assigned_identity == "Col"):
+            return False
+
+        if 0.45 <= similarity_to_col < 0.85:
+            try:
+                learned_today = self._store.count_learned_references_today("Col")
+                if learned_today < 3:
+                    emb_bytes = (
+                        face_embedding.tobytes()
+                        if isinstance(face_embedding, np.ndarray)
+                        else face_embedding
+                    )
+                    self._store.add_person_face(name="Col", embedding=emb_bytes, source="sharp_crop")
+                    self._store.log_action(
+                        agent_name="observer",
+                        action_type="learned_reference",
+                        description="Learned a new view of Col's face from the room camera.",
+                        metadata={
+                            "similarity": similarity_to_col,
+                            "source": "sharp_crop",
+                            "stay_id": track.stay_id,
+                        },
+                    )
+                    logger.info(
+                        f"Observer: Learned sharp-photo face reference for Col "
+                        f"(similarity: {similarity_to_col:.2f}, learned today: {learned_today + 1}/3)."
+                    )
+                    return True
+            except Exception as e:
+                logger.debug(f"Failed learning sharp face reference for Col: {e}")
+        return False
+
     def _analysis_loop(self) -> None:
         """
         Motion-gated analysis loop (see module docstring). While no
@@ -508,36 +1022,83 @@ class ObserverPipeline:
 
         cam_source_str = "network_cam" if self._active_source == self._config.network_camera_url else "webcam"
 
-        # --- Person Identification (InsightFace) ---
-        person_detections = self._person_identifier.identify_persons(frame, camera_source=cam_source_str)
+        # --- Multi-Person Following & Identification (Spec 5b) ---
         gui_detections: list[dict] = []
-        for pd in person_detections:
-            gui_detections.append({
-                "type": "person",
-                "person_id": pd.get("person_id", "Person"),
-                "is_known": pd.get("is_known", False),
-                "box": pd.get("box", []),
-                "confidence": pd.get("confidence", 0.0),
-            })
-            # Exclude the raw embedding BLOB (2026-09-21 finding) -- pd
-            # carries it so CoreAgent can bind a live "this is Sarah" to
-            # this exact face without a second InsightFace pass, but
-            # _publish_observation JSON-serializes this payload for both
-            # the observation_events log and the Redis publish, and bytes
-            # isn't JSON serializable. Confirmed live: this was silently
-            # failing every single person_sighting observation ("Failed to
-            # log observation: Object of type bytes is not JSON
-            # serializable") -- the embedding itself is already persisted
-            # separately as a BLOB via log_person_sighting inside
-            # identify_persons(), so it isn't lost, just correctly left out
-            # of this JSON payload.
-            pd_for_log = {k: v for k, v in pd.items() if k != "embedding"}
-            self._publish_observation(DetectionResult(
-                source=cam_source_str,
-                event_type="person_sighting",
-                confidence=pd.get("confidence", 0.9),
-                data=pd_for_log,
-            ))
+        is_room_cam = (cam_source_str == "network_cam")
+
+        if is_room_cam:
+            # 1. Tracker runs in its own 2 FPS thread (_tracker_loop).
+            # If tracker thread is not running (e.g. standalone test call), update now:
+            if self._tracker_thread is None:
+                tracks = self._person_tracker.update(frame, timestamp=timestamp, store=self._store)
+            else:
+                tracks = self._person_tracker.active_tracks
+
+            now = time.time()
+
+            # Record / maintain stay for every active track (Review 19:30 Item 3)
+            for track in tracks:
+                try:
+                    self._store.log_or_update_stay(
+                        stay_id=track.stay_id,
+                        person_id=track.assigned_identity or "Person",
+                        camera_source=cam_source_str,
+                        confidence=track.confidence,
+                        is_known=track.is_known,
+                        track_id=track.track_id,
+                    )
+                except Exception as e:
+                    logger.debug(f"Stay logging failed: {e}")
+
+                gui_detections.append({
+                    "type": "track",
+                    "track_id": track.track_id,
+                    "stay_id": track.stay_id,
+                    "person_id": track.assigned_identity or "Tracking...",
+                    "is_known": track.is_known,
+                    "box": track.box,
+                    "duration": track.duration,
+                })
+
+            # Face checks run on their own schedule in _tracker_loop (Review 23:55 Item 5).
+            # Reflect active tracked persons to GUI detections.
+            for track in tracks:
+                gui_detections.append({
+                    "type": "person",
+                    "person_id": track.assigned_identity or "Tracking...",
+                    "is_known": track.is_known,
+                    "box": track.box,
+                    "confidence": track.confidence,
+                })
+
+            # Periodically log INFO count of sharp crops vs fallbacks (never credentials)
+            if now - self._last_crop_stats_log_ts >= 180.0:
+                total_crops = self._sharp_crops_count + self._fallback_crops_count
+                if total_crops > 0:
+                    pct = (self._sharp_crops_count / total_crops) * 100.0
+                    logger.info(
+                        f"Face Crop Stats: {self._sharp_crops_count} sharp crops, "
+                        f"{self._fallback_crops_count} fallbacks ({pct:.1f}% sharp success rate)."
+                    )
+                self._last_crop_stats_log_ts = now
+        else:
+            # Desk webcam: direct face identification without continuous body tracking
+            person_detections = self._person_identifier.identify_persons(frame, camera_source=cam_source_str)
+            for pd in person_detections:
+                gui_detections.append({
+                    "type": "person",
+                    "person_id": pd.get("person_id", "Person"),
+                    "is_known": pd.get("is_known", False),
+                    "box": pd.get("box", []),
+                    "confidence": pd.get("confidence", 0.0),
+                })
+                pd_for_log = {k: v for k, v in pd.items() if k != "embedding"}
+                self._publish_observation(DetectionResult(
+                    source=cam_source_str,
+                    event_type="person_sighting",
+                    confidence=pd.get("confidence", 0.9),
+                    data=pd_for_log,
+                ))
 
         with self._detections_lock:
             self._latest_detections = gui_detections

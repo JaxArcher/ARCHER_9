@@ -3,7 +3,7 @@
  *
  * Phase 2 Redesign: The browser client opens the webcam itself via getUserMedia
  * on page load. The left column #archer-system-camera-feed video element binds
- * to this stream. When the server needs a frame for ENROLL FACE or visual Q&A,
+ * to this stream. When the server needs a frame for visual Q&A or introductions,
  * it sends a "camera_frame_request" message and this module replies with
  * "camera_frame_response" containing the current video frame as a base64 JPEG.
  */
