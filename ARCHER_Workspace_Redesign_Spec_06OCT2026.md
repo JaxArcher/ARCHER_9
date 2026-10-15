@@ -49,6 +49,13 @@ passes its acceptance checks and Col has signed it off.
     answer yourself. Write it up as a question in the worklog (Section 0b) and
     wait for the answer. This applies to small things too (a label, a file
     location, a default value).
+11. **Look for an existing project first (Col, 2026-10-15).** Before building
+    any component, search for an existing open-source project or library that
+    already does it (GitHub and the package indexes). The audit lists what was
+    found: what it does, licence, upkeep, Windows support, and whether it fits
+    ARCHER's rules (local only, no new cloud traffic). Prefer adopting a good
+    fit over writing new code. Adopting one is still a new dependency, so it
+    needs Col's approval and a Section 12 entry.
 
 ---
 
@@ -681,6 +688,10 @@ Once the observer can hear the room, Col can start ARCHER by voice.
   that" all go through the database the observer and ARCHER already share.
   No new link between the two processes, and nothing that needs Redis or
   ARCHER's window to be open.
+- **Launch confirmation (Col, 2026-10-15):** the launcher itself says
+  nothing. When ARCHER starts, ARCHER announces itself in its own voice with
+  one short line that never contains the launch phrase; the line is logged as
+  ARCHER's speech like everything else it says.
 - **Pause and "forget that":** by button, or by saying "ARCHER, stop
   listening" or "ARCHER, forget that" in the room. Pausing lasts 15 minutes,
   1 hour, or until resumed; it holds even when ARCHER is closed or the
