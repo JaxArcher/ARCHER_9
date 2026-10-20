@@ -517,6 +517,33 @@ def _gui_active_heartbeat_loop() -> None:
 threading.Thread(target=_gui_active_heartbeat_loop, daemon=True, name="archer-gui-active-heartbeat").start()
 
 
+# --- Room listening status (Phase 2c, Claude 2026-10-15) ---
+# Room listening runs in the observer service, a different process, so its
+# state reaches this page through the shared database rather than the event
+# bus (which only works inside one process). The observer writes its state
+# and a heartbeat; this loop reads it every 2 s and tells the page when it
+# changes. The page shows: listening / paused / empty (nobody in the room) /
+# off (the observer isn't reporting).
+_last_listening_status: dict = {}
+
+
+def _listening_status_loop() -> None:
+    global _last_listening_status
+    while True:
+        try:
+            if _ws_clients:
+                status = get_sqlite_store().get_listening_status()
+                if status != _last_listening_status:
+                    _last_listening_status = status
+                    _on_bus_event("listening_state", **status)
+        except Exception as e:
+            logger.debug(f"Listening status check failed: {e}")
+        _time.sleep(2.0)
+
+
+threading.Thread(target=_listening_status_loop, daemon=True, name="archer-listening-status").start()
+
+
 @app.websocket("/ws/voice")
 async def ws_voice(websocket: WebSocket):
     """
@@ -540,6 +567,7 @@ async def ws_voice(websocket: WebSocket):
     try:
         from archer.voice import get_audio_manager
         am = get_audio_manager()
+        listening_status = get_sqlite_store().get_listening_status()
         await _ws_send_safe(websocket, json.dumps({
             "type": "hello",
             "mode": get_toggle_service().mode,
@@ -547,6 +575,7 @@ async def ws_voice(websocket: WebSocket):
             "tts_muted": am.is_tts_muted,
             "camera_released": bool(_observer and _observer.is_camera_released),
             "camera_available": _observer is not None,
+            "listening_state": listening_status,
         }))
     except Exception as e:
         logger.debug(f"Could not send initial state snapshot to browser client: {e}")
@@ -600,6 +629,27 @@ async def ws_voice(websocket: WebSocket):
                 new_val = not am.is_tts_muted
                 am.set_tts_muted(new_val)
                 _broadcast_ws({"type": "tts_mute", "muted": new_val})
+            elif msg_type == "set_listening_pause":
+                # duration: seconds to pause; -1 = until resumed; 0 = resume.
+                try:
+                    duration = float(msg.get("duration", 0.0))
+                except (TypeError, ValueError):
+                    duration = 0.0
+                store = get_sqlite_store()
+                store.set_listening_pause(duration_seconds=duration)
+                global _last_listening_status
+                _last_listening_status = store.get_listening_status()
+                _broadcast_ws({"type": "listening_state", **_last_listening_status})
+            elif msg_type == "forget_recent_room":
+                try:
+                    seconds = float(msg.get("seconds", 120.0))
+                except (TypeError, ValueError):
+                    seconds = 120.0
+                deleted = get_sqlite_store().forget_recent_room_transcripts(seconds=max(0.0, min(seconds, 3600.0)))
+                _broadcast_ws({
+                    "type": "room_transcripts_forgotten",
+                    "deleted": deleted,
+                })
             elif msg_type == "camera_frame_response":
                 req_id = msg.get("request_id")
                 image_b64 = msg.get("image_b64")

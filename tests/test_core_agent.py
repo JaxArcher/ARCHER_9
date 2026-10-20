@@ -94,3 +94,12 @@ class TestCoreAgent:
         assert "DO NOT guess, invent a backstory, or fabricate a hypothetical topic" in prompt
 
 
+
+
+def test_core_agent_imports_os_for_the_camera_question():
+    # _check_visual_query used os.environ without importing os, so every
+    # "can you see me?" question failed with "name 'os' is not defined"
+    # (live, 2026-10-20 13:21). Claude, 2026-10-20.
+    import archer.agents.core_agent as ca
+
+    assert hasattr(ca, "os")

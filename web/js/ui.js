@@ -16,6 +16,13 @@ const modeBtnEl = document.getElementById("archer-mode-btn");
 const micBtnEl = document.getElementById("archer-mic-btn");
 const ttsBtnEl = document.getElementById("archer-tts-btn");
 const haltBtnEl = document.getElementById("archer-halt-btn");
+const listeningIndicatorEl = document.getElementById("archer-listening-indicator");
+const listeningStatusTextEl = document.getElementById("archer-listening-status-text");
+const pause15mBtnEl = document.getElementById("archer-listen-pause-15m");
+const pause1hBtnEl = document.getElementById("archer-listen-pause-1h");
+const pauseHoldBtnEl = document.getElementById("archer-listen-pause-hold");
+const resumeBtnEl = document.getElementById("archer-listen-resume");
+const forgetBtnEl = document.getElementById("archer-listen-forget");
 
 function addTranscriptLine(role, text) {
   if (!text) return;
@@ -94,10 +101,11 @@ function setTtsButton(muted) {
   ttsBtnEl.classList.toggle("is-muted", muted);
 }
 
-ArcherClient.on("hello", ({ mode, micMuted, ttsMuted }) => {
+ArcherClient.on("hello", ({ mode, micMuted, ttsMuted, listeningState }) => {
   if (mode) setModeButton(mode);
   setMicButton(!!micMuted);
   setTtsButton(!!ttsMuted);
+  if (listeningState) setListeningState(listeningState.state, listeningState.until);
 });
 ArcherClient.on("mode", setModeButton);
 ArcherClient.on("micMute", setMicButton);
@@ -105,10 +113,65 @@ ArcherClient.on("ttsMute", setTtsButton);
 ArcherClient.on("connected", () => statusDotEl.classList.remove("is-offline"));
 ArcherClient.on("disconnected", () => statusDotEl.classList.add("is-offline"));
 
+// Room listening state (Phase 2c). state: "listening" | "paused" | "empty" | "off".
+// until: for "paused", the epoch seconds it ends, or -1 for "until resumed".
+const LISTENING_LOOK = {
+  listening: { badge: "badge-listening", label: "LISTENING", text: "Transcribing speech in the room" },
+  paused: { badge: "badge-paused", label: "PAUSED", text: "Room listening paused" },
+  empty: { badge: "badge-empty", label: "EMPTY", text: "Room is empty — not transcribing" },
+  off: { badge: "badge-off", label: "OFF", text: "The observer isn't running — not transcribing" },
+};
+
+function setListeningState(state, until) {
+  if (!listeningIndicatorEl) return;
+  const look = LISTENING_LOOK[state] || LISTENING_LOOK.off;
+  listeningIndicatorEl.classList.remove("badge-listening", "badge-paused", "badge-empty", "badge-off");
+  listeningIndicatorEl.classList.add(look.badge);
+  listeningIndicatorEl.textContent = look.label;
+
+  const paused = state === "paused";
+  for (const btn of [pause15mBtnEl, pause1hBtnEl, pauseHoldBtnEl]) {
+    if (btn) btn.style.display = paused ? "none" : "inline-block";
+  }
+  if (resumeBtnEl) resumeBtnEl.style.display = paused ? "inline-block" : "none";
+
+  let text = look.text;
+  if (paused) {
+    if (until === -1) {
+      text += " until you resume it";
+    } else if (until && until > 0) {
+      const mins = Math.max(1, Math.round((until - Date.now() / 1000) / 60));
+      text += ` (about ${mins} min left)`;
+    }
+  }
+  if (listeningStatusTextEl) listeningStatusTextEl.textContent = text;
+}
+
+ArcherClient.on("listeningState", ({ state, until }) => {
+  setListeningState(state, until);
+});
+
 modeBtnEl.addEventListener("click", () => ArcherClient.sendModeToggle());
 micBtnEl.addEventListener("click", () => ArcherClient.sendMicMuteToggle());
 ttsBtnEl.addEventListener("click", () => ArcherClient.sendTtsMuteToggle());
 haltBtnEl.addEventListener("click", () => ArcherClient.sendHalt());
+
+if (pause15mBtnEl) pause15mBtnEl.addEventListener("click", () => ArcherClient.sendSetListeningPause(900));
+if (pause1hBtnEl) pause1hBtnEl.addEventListener("click", () => ArcherClient.sendSetListeningPause(3600));
+if (pauseHoldBtnEl) pauseHoldBtnEl.addEventListener("click", () => ArcherClient.sendSetListeningPause(-1));
+if (resumeBtnEl) resumeBtnEl.addEventListener("click", () => ArcherClient.sendSetListeningPause(0));
+if (forgetBtnEl) forgetBtnEl.addEventListener("click", () => {
+  ArcherClient.sendForgetRecentRoom(120);
+  if (listeningStatusTextEl) {
+    const prev = listeningStatusTextEl.textContent;
+    listeningStatusTextEl.textContent = "Last 2 minutes erased.";
+    setTimeout(() => {
+      if (listeningStatusTextEl.textContent === "Last 2 minutes erased.") {
+        listeningStatusTextEl.textContent = prev;
+      }
+    }, 3000);
+  }
+});
 
 // Offline until the first "connected" event actually fires.
 statusDotEl.classList.add("is-offline");

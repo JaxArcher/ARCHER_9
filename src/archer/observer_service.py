@@ -54,6 +54,11 @@ import threading
 from pathlib import Path
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+# The observer never contacts Hugging Face (Phase 2c, 2026-10-15): room
+# listening loads Faster-Whisper and the voice model from data/models/ only.
+# Set here, for this service alone -- not in a module ARCHER's app also imports.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from dotenv import load_dotenv
 from loguru import logger

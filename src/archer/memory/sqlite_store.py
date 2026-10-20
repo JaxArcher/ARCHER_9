@@ -15,6 +15,7 @@ the schema, provides typed access to all tables, and ensures thread-safe access.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -25,6 +26,16 @@ from typing import Any
 from loguru import logger
 
 from archer.config import get_config
+
+
+def format_room_transcript_timestamp(ts: float) -> str:
+    """Format Unix timestamp as 'Tue Oct 14, 3:42 PM' (human readable, local time)."""
+    dt = datetime.fromtimestamp(ts)
+    day = str(dt.day)
+    hour = str(int(dt.strftime("%I")))
+    minute = dt.strftime("%M")
+    ampm = dt.strftime("%p")
+    return f"{dt.strftime('%a %b')} {day}, {hour}:{minute} {ampm}"
 
 
 class SQLiteStore:
@@ -558,6 +569,78 @@ class SQLiteStore:
                 CREATE INDEX IF NOT EXISTS idx_stays_stay_id ON person_stays(stay_id);
                 CREATE INDEX IF NOT EXISTS idx_stays_started ON person_stays(started_at);
                 CREATE INDEX IF NOT EXISTS idx_stays_ended ON person_stays(ended_at);
+
+                -- --- PHASE 2C: ROOM TRANSCRIPTS & LISTENING (2026-10-15) ---
+                CREATE TABLE IF NOT EXISTS room_transcripts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    start_time REAL NOT NULL,
+                    end_time REAL NOT NULL,
+                    start_datetime TEXT NOT NULL,
+                    end_datetime TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    people_in_view TEXT NOT NULL,
+                    stay_id TEXT,
+                    transcript TEXT NOT NULL,
+                    is_archer INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_room_transcripts_start ON room_transcripts(start_time);
+                CREATE INDEX IF NOT EXISTS idx_room_transcripts_end ON room_transcripts(end_time);
+                CREATE INDEX IF NOT EXISTS idx_room_transcripts_stay ON room_transcripts(stay_id);
+                CREATE INDEX IF NOT EXISTS idx_room_transcripts_archer ON room_transcripts(is_archer);
+
+                -- FTS5 full-text search index for room transcripts
+                CREATE VIRTUAL TABLE IF NOT EXISTS room_transcripts_fts USING fts5(
+                    transcript,
+                    people_in_view,
+                    start_datetime,
+                    content='room_transcripts',
+                    content_rowid='id'
+                );
+
+                CREATE TRIGGER IF NOT EXISTS trg_room_transcripts_ai AFTER INSERT ON room_transcripts BEGIN
+                    INSERT INTO room_transcripts_fts(rowid, transcript, people_in_view, start_datetime)
+                    VALUES (new.id, new.transcript, new.people_in_view, new.start_datetime);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_room_transcripts_ad AFTER DELETE ON room_transcripts BEGIN
+                    INSERT INTO room_transcripts_fts(room_transcripts_fts, rowid, transcript, people_in_view, start_datetime)
+                    VALUES ('delete', old.id, old.transcript, old.people_in_view, old.start_datetime);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_room_transcripts_au AFTER UPDATE ON room_transcripts BEGIN
+                    INSERT INTO room_transcripts_fts(room_transcripts_fts, rowid, transcript, people_in_view, start_datetime)
+                    VALUES ('delete', old.id, old.transcript, old.people_in_view, old.start_datetime);
+                    INSERT INTO room_transcripts_fts(rowid, transcript, people_in_view, start_datetime)
+                    VALUES (new.id, new.transcript, new.people_in_view, new.start_datetime);
+                END;
+
+                -- Spoken output from ARCHER itself (for echo/self-transcription tagging)
+                CREATE TABLE IF NOT EXISTS archer_speech_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_at REAL NOT NULL,
+                    ended_at REAL NOT NULL,
+                    text TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_archer_speech_log_started ON archer_speech_log(started_at);
+
+                -- Persistent listening pause state (survives restarts)
+                CREATE TABLE IF NOT EXISTS listening_control (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    paused_until REAL NOT NULL DEFAULT 0.0,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT OR IGNORE INTO listening_control (id, paused_until) VALUES (1, 0.0);
+
+                -- Col's voice profile as heard through the room camera's mic
+                -- (Phase 2c voice rule, Claude 2026-10-15). Separate from
+                -- voice_enrollment (ARCHER's own desk-mic voice login).
+                CREATE TABLE IF NOT EXISTS room_voice_profile (
+                    name TEXT PRIMARY KEY,
+                    embedding TEXT NOT NULL,
+                    samples INTEGER NOT NULL DEFAULT 0,
+                    enrolled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
             """)
             try:
                 conn.execute(
@@ -585,6 +668,24 @@ class SQLiteStore:
                 conn.execute("ALTER TABLE pending_person_confirmations ADD COLUMN stay_id TEXT")
             except Exception:
                 pass
+            # Phase 2c fixes (Claude 2026-10-15): whose voice each line is,
+            # the observer's live listening state, the "forget that" window,
+            # and "all systems go" launch requests -- all shared through this
+            # database, since the observer service and ARCHER are separate
+            # processes.
+            for table, column, decl in (
+                ("room_transcripts", "voice", "TEXT NOT NULL DEFAULT 'unchecked'"),
+                ("room_transcripts", "voice_score", "REAL"),
+                ("listening_control", "listener_state", "TEXT NOT NULL DEFAULT 'off'"),
+                ("listening_control", "listener_heartbeat", "REAL NOT NULL DEFAULT 0.0"),
+                ("listening_control", "forget_from", "REAL NOT NULL DEFAULT 0.0"),
+                ("listening_control", "forget_until", "REAL NOT NULL DEFAULT 0.0"),
+                ("listening_control", "launch_requested_at", "REAL NOT NULL DEFAULT 0.0"),
+                ("listening_control", "launch_handled_at", "REAL NOT NULL DEFAULT 0.0"),
+            ):
+                existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             conn.commit()
             logger.info(f"SQLite store initialized at {self._db_path}")
 
@@ -2960,6 +3061,450 @@ class SQLiteStore:
                 return {"total_detections": total, "confirmed": confirmed, "accuracy": confirmed / total}
             except Exception:
                 return {"total_detections": 0, "confirmed": 0, "accuracy": 0.0}
+
+
+
+
+    # =========================================================================
+    # Phase 2c: Room Transcripts & Listening Control
+    # (Antigravity 2026-10-15; reworked by Claude 2026-10-15 after review)
+    # =========================================================================
+
+    _ROOM_TRANSCRIPT_COLUMNS = (
+        "id, start_time, end_time, start_datetime, end_datetime, source, "
+        "people_in_view, stay_id, transcript, is_archer, voice, voice_score"
+    )
+
+    @staticmethod
+    def _room_transcript_row_to_dict(row: Any) -> dict:
+        try:
+            piv = json.loads(row[6])
+            if not isinstance(piv, list):
+                piv = [piv]
+        except Exception:
+            piv = [row[6]] if row[6] else []
+        return {
+            "id": row[0],
+            "start_time": row[1],
+            "end_time": row[2],
+            "start_datetime": row[3],
+            "formatted_time": row[3],
+            "end_datetime": row[4],
+            "source": row[5],
+            "people_in_view": piv,
+            "stay_id": row[7],
+            "transcript": row[8],
+            "text": row[8],
+            "is_archer": bool(row[9]),
+            "voice": row[10],
+            "voice_score": row[11],
+        }
+
+    def insert_room_transcript(
+        self,
+        text: str = "",
+        start_time: float = 0.0,
+        end_time: float = 0.0,
+        start_datetime: str | None = None,
+        end_datetime: str | None = None,
+        source: str = "room_cam",
+        people_in_view: list[str] | str | None = None,
+        stay_id: str | None = None,
+        transcript: str = "",
+        is_archer: bool = False,
+        voice: str = "unchecked",
+        voice_score: float | None = None,
+        **kwargs,
+    ) -> int:
+        """Insert a transcribed line from room listening. Returns the row id, or -1."""
+        actual_text = (transcript or text or kwargs.get("transcript") or kwargs.get("text") or "").strip()
+        piv = people_in_view if people_in_view is not None else kwargs.get("persons_in_view", [])
+        people_str = json.dumps(piv) if isinstance(piv, list) else json.dumps([str(piv)])
+
+        if not start_datetime:
+            start_datetime = format_room_transcript_timestamp(start_time)
+        if not end_datetime:
+            end_datetime = format_room_transcript_timestamp(end_time)
+
+        conn = self._get_connection()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO room_transcripts (
+                        start_time, end_time, start_datetime, end_datetime,
+                        source, people_in_view, stay_id, transcript, is_archer,
+                        voice, voice_score
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        float(start_time),
+                        float(end_time),
+                        start_datetime,
+                        end_datetime,
+                        source,
+                        people_str,
+                        stay_id,
+                        actual_text,
+                        1 if is_archer else 0,
+                        voice,
+                        None if voice_score is None else float(voice_score),
+                    ),
+                )
+                return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"Failed to insert room transcript: {e}")
+            return -1
+        finally:
+            conn.close()
+
+    def search_room_transcripts(
+        self,
+        query: str,
+        limit: int = 5,
+        since_timestamp: float | None = None,
+        include_archer: bool = False,
+        until_timestamp: float | None = None,
+    ) -> list[dict]:
+        """Search room transcripts by words (FTS5, falling back to LIKE)."""
+        cleaned_query = re.sub(r"[^a-zA-Z0-9\s]", " ", query or "").strip()
+        if not cleaned_query:
+            return []
+
+        terms = [t for t in cleaned_query.split() if len(t) > 2] or cleaned_query.split()
+        fts_expr = " OR ".join(f'"{t}"' for t in terms)
+
+        filters = ""
+        params: list[Any] = []
+        if not include_archer:
+            filters += " AND t.is_archer = 0"
+        if since_timestamp is not None:
+            filters += " AND t.start_time >= ?"
+            params.append(float(since_timestamp))
+        if until_timestamp is not None:
+            filters += " AND t.start_time < ?"
+            params.append(float(until_timestamp))
+
+        conn = self._get_connection()
+        try:
+            try:
+                cursor = conn.execute(
+                    f"""
+                    SELECT t.id, t.start_time, t.end_time, t.start_datetime, t.end_datetime,
+                           t.source, t.people_in_view, t.stay_id, t.transcript, t.is_archer,
+                           t.voice, t.voice_score
+                    FROM room_transcripts t
+                    JOIN room_transcripts_fts fts ON t.id = fts.rowid
+                    WHERE room_transcripts_fts MATCH ? {filters}
+                    ORDER BY bm25(room_transcripts_fts) LIMIT ?
+                    """,
+                    tuple([fts_expr] + params + [int(limit)]),
+                )
+                return [self._room_transcript_row_to_dict(r) for r in cursor.fetchall()]
+            except Exception as e:
+                logger.debug(f"FTS search failed, falling back to LIKE: {e}")
+                like_terms = " OR ".join("t.transcript LIKE ?" for _ in terms)
+                cursor = conn.execute(
+                    f"""
+                    SELECT {", ".join("t." + c.strip() for c in self._ROOM_TRANSCRIPT_COLUMNS.split(","))}
+                    FROM room_transcripts t
+                    WHERE ({like_terms}) {filters}
+                    ORDER BY t.start_time DESC LIMIT ?
+                    """,
+                    tuple([f"%{t}%" for t in terms] + params + [int(limit)]),
+                )
+                return [self._room_transcript_row_to_dict(r) for r in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Room transcript search failed: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_recent_room_transcripts(
+        self,
+        limit: int = 20,
+        include_archer: bool = True,
+    ) -> list[dict]:
+        """Fetch recent room transcripts, newest first."""
+        conn = self._get_connection()
+        try:
+            sql = f"SELECT {self._ROOM_TRANSCRIPT_COLUMNS} FROM room_transcripts"
+            if not include_archer:
+                sql += " WHERE is_archer = 0"
+            sql += " ORDER BY start_time DESC LIMIT ?"
+            cursor = conn.execute(sql, (int(limit),))
+            return [self._room_transcript_row_to_dict(r) for r in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to fetch recent room transcripts: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_room_transcripts_range(
+        self,
+        start_time: float,
+        end_time: float,
+        include_archer: bool = False,
+    ) -> list[dict]:
+        """Fetch room transcripts that started within [start_time, end_time], oldest first."""
+        conn = self._get_connection()
+        try:
+            sql = (
+                f"SELECT {self._ROOM_TRANSCRIPT_COLUMNS} FROM room_transcripts "
+                "WHERE start_time >= ? AND start_time <= ?"
+            )
+            if not include_archer:
+                sql += " AND is_archer = 0"
+            sql += " ORDER BY start_time ASC"
+            cursor = conn.execute(sql, (float(start_time), float(end_time)))
+            return [self._room_transcript_row_to_dict(r) for r in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to fetch room transcripts range: {e}")
+            return []
+        finally:
+            conn.close()
+
+    # --- ARCHER's own speech (so the room listener can mark it) ---
+
+    def log_archer_speech(self, started_at: float, ended_at: float, text: str) -> int:
+        """Record when ARCHER spoke and what it said."""
+        conn = self._get_connection()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    "INSERT INTO archer_speech_log (started_at, ended_at, text) VALUES (?, ?, ?)",
+                    (float(started_at), float(ended_at), (text or "").strip()),
+                )
+                return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"Failed to log ARCHER speech: {e}")
+            return -1
+        finally:
+            conn.close()
+
+    # Common words don't count when deciding whether a line repeats ARCHER.
+    _COMMON_WORDS = frozenset(
+        "the and you your for are was were with that this have has had not but "
+        "what when where which who how why can will would could should there "
+        "their they them then than its it's from just about into out our all "
+        "any get got let lets yes yeah okay one two now here some more very "
+        "been being did does doing say said see".split()
+    )
+
+    @classmethod
+    def _content_words(cls, text: str) -> set[str]:
+        return {
+            w for w in re.findall(r"[a-z']{3,}", (text or "").lower())
+            if w not in cls._COMMON_WORDS
+        }
+
+    def check_if_archer_speech(
+        self,
+        start_time: float,
+        end_time: float,
+        text: str,
+        lag_seconds: float = 1.18,
+    ) -> bool:
+        """
+        True when a room line is ARCHER's own voice: it overlaps a stretch of
+        ARCHER's speech in time (after removing the camera's audio delay, with
+        1.5 s slack) AND repeats its words (ignoring common words). A line that
+        only overlaps in time is Col talking over ARCHER, and stays his.
+        """
+        line_words = self._content_words(text)
+        if not line_words:
+            return False
+        adj_start = start_time - lag_seconds
+        adj_end = end_time - lag_seconds
+
+        conn = self._get_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT text FROM archer_speech_log
+                WHERE started_at <= ? AND ended_at >= ?
+                ORDER BY id DESC LIMIT 10
+                """,
+                (adj_end + 1.5, adj_start - 1.5),
+            ).fetchall()
+        except Exception as e:
+            logger.error(f"Error checking ARCHER speech: {e}")
+            return False
+        finally:
+            conn.close()
+
+        spoken_words: set[str] = set()
+        for (spoken,) in rows:
+            spoken_words |= self._content_words(spoken)
+        if not spoken_words:
+            return False
+        overlap = len(line_words & spoken_words)
+        return overlap >= 4 or overlap / len(line_words) >= 0.5
+
+    # --- Listening control (pause, live state, "forget that", launch) ---
+
+    def _listening_row(self) -> dict:
+        conn = self._get_connection()
+        try:
+            row = conn.execute("SELECT * FROM listening_control WHERE id = 1").fetchone()
+            return dict(row) if row else {}
+        except Exception:
+            return {}
+        finally:
+            conn.close()
+
+    def _update_listening(self, **values: Any) -> None:
+        if not values:
+            return
+        sets = ", ".join(f"{k} = ?" for k in values)
+        conn = self._get_connection()
+        try:
+            with conn:
+                conn.execute("INSERT OR IGNORE INTO listening_control (id, paused_until) VALUES (1, 0.0)")
+                conn.execute(
+                    f"UPDATE listening_control SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+                    tuple(values.values()),
+                )
+        except Exception as e:
+            logger.error(f"Failed to update listening control: {e}")
+        finally:
+            conn.close()
+
+    def set_listening_pause(
+        self,
+        paused_until: float | None = None,
+        duration_seconds: float | None = None,
+    ) -> None:
+        """
+        Pause room listening.
+        paused_until: 0.0 = listening, -1.0 = paused until resumed, >0 = paused until that time.
+        duration_seconds: >0 = pause for that long, -1 = until resumed, 0 = resume.
+        """
+        if duration_seconds is not None:
+            if duration_seconds == -1:
+                target = -1.0
+            elif duration_seconds <= 0:
+                target = 0.0
+            else:
+                target = time.time() + float(duration_seconds)
+        elif paused_until is not None:
+            target = float(paused_until)
+        else:
+            target = 0.0
+        self._update_listening(paused_until=target)
+
+    def get_listening_pause(self) -> float:
+        """The paused_until value (0.0 when not paused, -1.0 until resumed)."""
+        try:
+            return float(self._listening_row().get("paused_until", 0.0) or 0.0)
+        except Exception:
+            return 0.0
+
+    def is_listening_paused(self, now: float | None = None) -> bool:
+        curr = now if now is not None else time.time()
+        p = self.get_listening_pause()
+        return p == -1.0 or p > curr
+
+    def set_listener_state(self, state: str, now: float | None = None) -> None:
+        """The observer's room listener reports what it's doing (listening / paused / empty)."""
+        self._update_listening(
+            listener_state=state,
+            listener_heartbeat=float(now if now is not None else time.time()),
+        )
+
+    def get_listening_status(self, now: float | None = None, stale_after: float = 45.0) -> dict:
+        """
+        What the page shows: state is 'paused', 'listening', 'empty' or 'off'
+        (the observer isn't reporting), with 'until' for a timed pause
+        (0 = no timed pause, -1 = until resumed).
+        """
+        curr = now if now is not None else time.time()
+        row = self._listening_row()
+        paused_until = float(row.get("paused_until", 0.0) or 0.0)
+        if paused_until == -1.0 or paused_until > curr:
+            return {"state": "paused", "until": paused_until}
+        heartbeat = float(row.get("listener_heartbeat", 0.0) or 0.0)
+        if curr - heartbeat > stale_after:
+            return {"state": "off", "until": 0.0}
+        state = row.get("listener_state") or "off"
+        if state not in ("listening", "empty"):
+            state = "listening" if state == "paused" else "off"
+        return {"state": state, "until": 0.0}
+
+    def forget_recent_room_transcripts(self, seconds: float = 120.0, now: float | None = None) -> int:
+        """
+        "Forget that": delete every line from the last `seconds` (default 2
+        minutes) up to `now`, and remember that window, so a line from it that
+        the observer is still transcribing is never saved. Returns rows deleted.
+        """
+        curr = now if now is not None else time.time()
+        cutoff = curr - float(seconds)
+        deleted = 0
+        conn = self._get_connection()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    "DELETE FROM room_transcripts WHERE end_time >= ? AND start_time <= ?",
+                    (cutoff, curr),
+                )
+                deleted = cursor.rowcount
+        except Exception as e:
+            logger.error(f"Failed to forget recent room transcripts: {e}")
+        finally:
+            conn.close()
+        row = self._listening_row()
+        prev_from = float(row.get("forget_from", 0.0) or 0.0)
+        prev_until = float(row.get("forget_until", 0.0) or 0.0)
+        # Merge with an earlier window that touches this one.
+        new_from = min(prev_from, cutoff) if prev_until >= cutoff and prev_from > 0 else cutoff
+        self._update_listening(forget_from=new_from, forget_until=max(prev_until, curr))
+        logger.info(f"Forget that: {deleted} room transcript lines deleted")
+        return deleted
+
+    def is_in_forgotten_window(self, start_time: float, end_time: float) -> bool:
+        """True when a line overlaps the most recent "forget that" window."""
+        row = self._listening_row()
+        f_from = float(row.get("forget_from", 0.0) or 0.0)
+        f_until = float(row.get("forget_until", 0.0) or 0.0)
+        if f_until <= 0.0:
+            return False
+        return end_time >= f_from and start_time <= f_until
+
+    def request_launch(self, now: float | None = None) -> None:
+        """'All systems go' was heard: the launch task picks this up (scripts/launch_check.py)."""
+        self._update_listening(launch_requested_at=float(now if now is not None else time.time()))
+
+    # --- Col's voice profile through the room camera's mic ---
+
+    def save_room_voice_profile(self, embedding: list[float], samples: int, name: str = "Col") -> None:
+        conn = self._get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO room_voice_profile (name, embedding, samples, enrolled_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(name) DO UPDATE SET
+                        embedding = excluded.embedding,
+                        samples = excluded.samples,
+                        enrolled_at = CURRENT_TIMESTAMP
+                    """,
+                    (name, json.dumps([float(x) for x in embedding]), int(samples)),
+                )
+        finally:
+            conn.close()
+
+    def get_room_voice_profile(self, name: str = "Col") -> list[float] | None:
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                "SELECT embedding FROM room_voice_profile WHERE name = ?", (name,)
+            ).fetchone()
+            return json.loads(row[0]) if row else None
+        except Exception:
+            return None
+        finally:
+            conn.close()
 
 # ====== END OF NEW METHODS ======
 

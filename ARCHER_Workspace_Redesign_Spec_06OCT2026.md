@@ -732,11 +732,49 @@ Once the observer can hear the room, Col can start ARCHER by voice.
     speakerphone, and nothing is saved. On a phone call, Col's side is kept.
   - Spoken commands ("all systems go", stop listening, forget that) count only
     from speech that is kept, so a TV can't trigger them.
+    - **Changed 2026-10-20 (live test):** short phrases score low on the voice
+      check, so Col's "all systems go" was dropped. A command now also counts
+      from any voice, as long as the PC wasn't playing those words. If it's
+      unknown whether the PC was playing, the old rule holds.
+  - **Another voice only while the PC is quiet (2026-10-20).** Col mutes the TV
+    to talk with someone. The people tracker's phantoms (Col tracked twice,
+    boxes that aren't people) had let TV speech in as "another voice".
+  - **A lower voice bar while the PC is quiet (2026-10-20):** 0.35 instead of
+    0.50, so Col's short remarks are kept (muted-TV test: 0.37 to 0.42).
+  - **The room counts as occupied for 2 hours after anyone was last seen
+    (2026-10-20),** and right after the observer starts. The people detector
+    missed Col lying still on the couch, so "all systems go" went unheard.
+    Setting: `ARCHER_ROOM_LINGER_MINUTES` (120).
   - Test it before relying on it: Col's own lines kept, TV and video speech
     dropped, with the TV on.
   - If the voice check can't tell Col from the TV reliably at that distance,
     the fallback is: keep every line, mark lines that aren't Col's voice, and
     ARCHER ignores those lines when answering. Col is asked first.
+- **TV speech (Col, 2026-10-20): matched against what the PC is playing.**
+  - The TV test showed the voice check alone can't do it: one TV narrator
+    who sounds like Col scored 0.62, and Col's own lines 0.55 to 0.68.
+  - Videos play from the PC with the TV as its screen. So the observer
+    records the PC's own playback (Windows loopback, through the `soundcard`
+    package ARCHER's voice pipeline already uses, so it's not a new
+    dependency).
+  - When a line would be kept, the observer also transcribes what the PC
+    played around that moment. If the line repeats those words (half or more
+    of its words, common words aside), it's the TV and isn't saved, whoever's
+    voice it sounds like. This is the same idea as ARCHER's own-voice check.
+    ARCHER's own lines are still marked and kept, because that check comes
+    first.
+  - Matching loudness over time was tried first and failed live: the two
+    audio streams can't be lined up closely enough.
+  - The last 2 minutes of the PC's playback are held in memory only. No
+    audio is stored.
+  - Works from the observer service's SYSTEM account (probe, 2026-10-20). If
+    the playback can't be recorded, the voice rule above decides alone.
+  - Settings: `ARCHER_ROOM_TV_MATCH` (share of words, set from the TV test)
+    and `ARCHER_ROOM_TV_CHECK` (on or off).
+  - Rule 11: no existing project does this locally (the one found relies on
+    an online speech service), so this reuses ARCHER's own approach.
+  - Not covered: video from a source other than the PC, such as an app on
+    the TV itself.
 
 ---
 

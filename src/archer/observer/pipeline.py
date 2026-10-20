@@ -50,6 +50,7 @@ from archer.observer.camera import WebcamCapture
 from archer.observer.analyzers import DetectionResult, SceneAnalyzer
 from archer.observer.person_id import PersonIdentifier
 from archer.observer.person_tracker import PersonTracker
+from archer.observer.room_listener import RoomListener
 
 # Single Redis channel for every observation this pipeline (or the
 # staleness reasoner, a separate periodic pass -- see
@@ -144,6 +145,9 @@ class ObserverPipeline:
         self._scene_analyzer = SceneAnalyzer(cooldown_seconds=30.0)
         self._person_identifier = PersonIdentifier(db_path=db_path)
         self._person_tracker = PersonTracker()
+        self._room_listener: RoomListener | None = RoomListener(
+            pipeline=self, tracker=self._person_tracker, db_path=db_path
+        )
 
         # Control
         self._running = threading.Event()
@@ -243,6 +247,11 @@ class ObserverPipeline:
                 daemon=True,
             )
             self._analysis_thread.start()
+
+            # Start ambient room listener (Phase 2c)
+            if self._room_listener is not None:
+                self._room_listener.start()
+
             logger.info(
                 f"Observer pipeline started "
                 f"(motion-gated: active interval {self._active_interval}s, "
@@ -261,6 +270,12 @@ class ObserverPipeline:
         self._running.clear()
         if self._camera:
             self._camera.stop()
+
+        if self._room_listener is not None:
+            try:
+                self._room_listener.stop()
+            except Exception as e:
+                logger.debug(f"RoomListener stop error: {e}")
 
         if self._tracker_thread is not None:
             self._tracker_thread.join(timeout=3.0)
@@ -367,6 +382,11 @@ class ObserverPipeline:
     def person_tracker(self) -> PersonTracker:
         """Expose person tracker for following people."""
         return self._person_tracker
+
+    @property
+    def room_listener(self) -> RoomListener | None:
+        """Expose ambient room listener (Phase 2c)."""
+        return self._room_listener
 
     @property
     def tracker_updates_count(self) -> int:

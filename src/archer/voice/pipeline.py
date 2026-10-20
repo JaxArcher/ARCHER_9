@@ -798,7 +798,14 @@ class VoicePipeline:
             filler_audio = self._tts.synthesize(filler_text) if is_contextual else self._get_cached_filler(filler_text)
             if filler_audio:
                 audio_bytes, sample_rate = filler_audio
+                t_fill_start = time.time()
                 self._audio.play_audio_bytes(audio_bytes, sample_rate)
+                t_fill_end = time.time()
+                try:
+                    from archer.memory.sqlite_store import get_sqlite_store
+                    get_sqlite_store().log_archer_speech(t_fill_start, t_fill_end, filler_text)
+                except Exception:
+                    pass
             elif is_contextual:
                 logger.warning(
                     f"Contextual filler synthesis returned no audio for "
@@ -1090,7 +1097,14 @@ class VoicePipeline:
             filler_audio = self._get_cached_filler(filler_text)
             if filler_audio:
                 audio_bytes, sample_rate = filler_audio
+                t_fill_start = time.time()
                 self._audio.play_audio_bytes(audio_bytes, sample_rate)
+                t_fill_end = time.time()
+                try:
+                    from archer.memory.sqlite_store import get_sqlite_store
+                    get_sqlite_store().log_archer_speech(t_fill_start, t_fill_end, filler_text)
+                except Exception:
+                    pass
 
             first = sentence_queue.get()
 
@@ -1203,6 +1217,37 @@ class VoicePipeline:
                 logger.warning(f"Failed to cache filler '{phrase}': {e}")
         logger.info(f"Filler cache ready ({len(self._filler_cache)} clips)")
 
+    def announce(self, text: str) -> None:
+        """
+        Say one short line in ARCHER's own voice, in its own thread (Phase 2c,
+        Col 2026-10-15: ARCHER announces itself when it starts). Shown in the
+        page like the wake acknowledgement, honours the speaker mute, and is
+        logged as ARCHER's speech so the room listener marks it as ARCHER's.
+        """
+        def _speak():
+            try:
+                self._bus.publish(Event(
+                    type=EventType.WAKE_ACK_PLAY,
+                    source="voice_pipeline",
+                    data={"text": text},
+                ))
+                result = self._tts.synthesize(text)
+                if not result:
+                    return
+                audio_bytes, sample_rate = result
+                t_start = time.time()
+                self._audio.play_audio_bytes(audio_bytes, sample_rate)
+                t_end = time.time()
+                try:
+                    from archer.memory.sqlite_store import get_sqlite_store
+                    get_sqlite_store().log_archer_speech(t_start, t_end, text)
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.warning(f"Announcement failed (non-critical): {e}")
+
+        threading.Thread(target=_speak, daemon=True, name="Announce").start()
+
     def _play_wake_ack(self) -> None:
         """
         Play a brief verbal acknowledgment that the wake word was heard.
@@ -1237,7 +1282,14 @@ class VoicePipeline:
                     result = self._tts.synthesize(phrase)
                 if result:
                     audio_bytes, sample_rate = result
+                    t_ack_start = time.time()
                     self._audio.play_audio_bytes(audio_bytes, sample_rate)
+                    t_ack_end = time.time()
+                    try:
+                        from archer.memory.sqlite_store import get_sqlite_store
+                        get_sqlite_store().log_archer_speech(t_ack_start, t_ack_end, phrase)
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.warning(f"Wake-ack playback failed (non-critical): {e}")
             finally:
@@ -1333,7 +1385,14 @@ class VoicePipeline:
                 logger.warning(f"TTS synthesis returned 0 audio bytes for sentence '{sentence[:30]}...' — skipping sentence.")
                 continue
 
+            t_speak_start = time.time()
             self._audio.play_audio_bytes(audio_bytes, sample_rate)
+            t_speak_end = time.time()
+            try:
+                from archer.memory.sqlite_store import get_sqlite_store
+                get_sqlite_store().log_archer_speech(t_speak_start, t_speak_end, sentence)
+            except Exception:
+                pass
 
         response_text = " ".join(collected_text)
         self._last_spoken_text = response_text

@@ -33,6 +33,9 @@ load_dotenv(_env_path, override=True)
 from archer.__main__ import setup_logging, setup_latest_log_mirror  # reuses the exact same logging setup
 from archer.config import get_config
 
+# Spoken once ARCHER is up (Phase 2c). Never contains "all systems go".
+STARTUP_ANNOUNCEMENT = "ARCHER online."
+
 
 def main() -> None:
     setup_logging()
@@ -84,6 +87,12 @@ def main() -> None:
             pipeline.precache_fillers()
         except Exception as e:
             logger.warning(f"Filler pre-cache failed (non-fatal): {e}")
+        # ARCHER announces itself once it's up (Col, 2026-10-15). The line
+        # must never contain "all systems go": the room listener would hear it.
+        try:
+            pipeline.announce(STARTUP_ANNOUNCEMENT)
+        except Exception as e:
+            logger.warning(f"Start-up announcement failed (non-fatal): {e}")
 
     threading.Thread(target=_init_and_start_pipeline, daemon=True, name="PipelineInit").start()
 

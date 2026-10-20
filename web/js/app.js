@@ -29,8 +29,11 @@ const ArcherClient = (() => {
     tasksSnapshot: [],
     systemSnapshot: [],
     browserScreenshot: [],
+    artifactPush: [],
     hello: [],
     cameraFrameRequest: [],
+    listeningState: [],
+    roomTranscript: [],
     connected: [],
     disconnected: [],
   };
@@ -156,6 +159,12 @@ const ArcherClient = (() => {
         // see CONTRACT.md's Browser pane section.
         emit("browserScreenshot", { imageB64: msg.image_b64 || null, active: !!msg.active });
         break;
+      case "listening_state":
+        emit("listeningState", { state: msg.state, until: msg.until || 0 });
+        break;
+      case "room_transcript":
+        emit("roomTranscript", { text: msg.text, is_archer: msg.is_archer, timestamp: msg.timestamp });
+        break;
       case "hello":
         emit("hello", {
           mode: msg.mode,
@@ -163,6 +172,7 @@ const ArcherClient = (() => {
           ttsMuted: msg.tts_muted,
           cameraReleased: msg.camera_released,
           cameraAvailable: msg.camera_available,
+          listeningState: msg.listening_state || null,
         });
         break;
       case "system_start":
@@ -308,6 +318,12 @@ const ArcherClient = (() => {
     },
     sendBrowserGetScreenshot() {
       send({ type: "browser_get_screenshot" });
+    },
+    sendSetListeningPause(duration) {
+      send({ type: "set_listening_pause", duration });
+    },
+    sendForgetRecentRoom(seconds) {
+      send({ type: "forget_recent_room", seconds: seconds || 120 });
     },
     connect,
   };

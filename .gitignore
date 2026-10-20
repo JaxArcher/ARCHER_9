@@ -64,3 +64,6 @@ ARCHER_Workspace_Phase0_Audit_06OCT2026.md
 
 # Test cache
 .pytest_cache/
+
+# Antigravity's in-place backups (Phase 2c, 2026-10-15)
+*.bak_2c

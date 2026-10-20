@@ -149,12 +149,14 @@ doesn't require starting it by hand in a separate window.
 | `tasks_snapshot`      | `tasks`, `habits`               | Bulk tasks/habits payload                                                |
 | `system_snapshot`     | `gpu`, `cpu`, `tokens_per_sec`, `ollama_loaded`, `available_models`, `current_model`, `mic_devices`, `speaker_devices`, `current_mic_index`, `current_speaker_index` | GPU/VRAM/temp, CPU%, tokens/sec, ollama-ps-equivalent, and device lists for the controls bar + System card |
 | `browser_screenshot`  | `image_b64`, `active`           | Mirror of ARCHER's own Playwright browser, when a session is open        |
-| `hello`               | `mode`, `mic_muted`, `tts_muted`, `camera_released`, `camera_available` | Sent on connect — initial toolbar state                    |
+| `hello`               | `mode`, `mic_muted`, `tts_muted`, `camera_released`, `camera_available`, `listening_state` | Sent on connect — initial toolbar state; `listening_state` is `{state, until}` as below |
 | `system_start`        | —                                | Session (re)started                                                      |
 
 | `camera_frame_request` | `request_id`                    | Server requests a JPEG frame from browser webcam stream for visual query or person introduction |
 | `camera_frame_response`| `request_id`, `image_b64`       | Browser returns base64 JPEG frame to server                             |
 | `camera_frame_ack`     | `request_id`, `size`            | Diagnostic: Server acknowledges receipt and successful decode of browser's camera frame |
+| `listening_state`      | `state`, `until`            | Phase 2c room listening, sent on change: `state` is `listening`, `paused`, `empty` (nobody in the room) or `off` (the observer isn't reporting); `until` is when a pause ends (epoch seconds), `-1` until resumed, `0` otherwise. The observer service reports through the database; the server checks it every 2 s |
+| `room_transcripts_forgotten` | `deleted`                   | Phase 2c confirmation of purged recent room transcripts |
 
 ## Messages (browser → server)
 
@@ -179,6 +181,8 @@ doesn't require starting it by hand in a separate window.
 {"type": "system_switch_speaker", "device_index": 16}
 {"type": "system_switch_model", "model": "gemma4:e4b"}
 {"type": "browser_get_screenshot"}
+{"type": "set_listening_pause", "duration": 900}   // seconds; -1 = until resumed; 0 = resume
+{"type": "forget_recent_room", "seconds": 120}
 ```
 
 `text_input` bypasses voice entirely and goes straight to the active

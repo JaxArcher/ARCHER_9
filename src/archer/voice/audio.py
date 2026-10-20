@@ -767,16 +767,6 @@ class AudioManager:
             f"  - first_20_values: {audio_data[:20].flatten().tolist()}"
         )
 
-        # Write exact hardware playback audio array to disk for external media player verification
-        try:
-            import soundfile as sf
-            os.makedirs("scratch", exist_ok=True)
-            ts = int(time.time() * 1000)
-            dump_filename = f"scratch/last_hardware_playback_{ts}.wav"
-            sf.write(dump_filename, audio_data, rate)
-            logger.info(f"Saved live hardware playback array to {dump_filename} ({len(audio_data)} samples @ {rate}Hz)")
-        except Exception as e:
-            logger.warning(f"Failed to dump hardware playback audio: {e}")
 
         with self._playback_lock:
             # Clear any stale data

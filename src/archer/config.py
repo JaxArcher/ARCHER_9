@@ -184,6 +184,33 @@ class ArcherConfig(BaseSettings):
     observer_motion_active_interval: float = Field(default=5.0, alias="ARCHER_OBSERVER_ACTIVE_INTERVAL")
     observer_motion_tail_seconds: float = Field(default=30.0, alias="ARCHER_OBSERVER_MOTION_TAIL")
 
+    # --- Room listening (Phase 2c, 2026-10-15) ---
+    # Cosine similarity between a stretch of room speech and Col's voice
+    # profile enrolled through the room camera's mic (scripts/room_voice.py).
+    # At or above this, the speech counts as Col's and is always kept; below
+    # it, it's kept only while the camera sees someone besides Col.
+    # Set from the TV test (2026-10-20, profile from 8 stretches): TV and
+    # video voices scored 0.08-0.45, except one narrator who sounds like Col
+    # at 0.62; Col talking over the TV 0.55-0.68; Col's own enrollment
+    # stretches matched each other at 0.54 or more. No threshold separates
+    # that narrator from Col, so 0.50 is an interim value until TV speech
+    # is recognised another way.
+    room_voice_threshold: float = Field(default=0.50, alias="ARCHER_ROOM_VOICE_THRESHOLD")
+    # ...and while nothing is playing on the PC (no TV to mistake for Col).
+    # Muted-TV test (2026-10-20 12:01): Col's longer remarks 0.50-0.69, his
+    # short ones ("testing for", "let's just button that") 0.37-0.42.
+    room_voice_threshold_quiet: float = Field(default=0.35, alias="ARCHER_ROOM_VOICE_THRESHOLD_QUIET")
+    # Room listening carries on this long after someone was last seen in the
+    # room (or the observer started): the people detector misses Col lying
+    # still on the couch (2026-10-20).
+    room_linger_minutes: float = Field(default=120.0, alias="ARCHER_ROOM_LINGER_MINUTES")
+    # TV check (2026-10-20): videos play from the PC, so a room line that
+    # would be kept but repeats the PC's words (this share of its words or
+    # more, common words aside) is the TV and isn't saved. From the TV test
+    # (11:45): TV lines mostly 0.50-1.00; Col talking over the TV 0.00-0.29.
+    room_tv_check: bool = Field(default=True, alias="ARCHER_ROOM_TV_CHECK")
+    room_tv_match_threshold: float = Field(default=0.50, alias="ARCHER_ROOM_TV_MATCH")
+
     # --- Staleness / neglect reasoning (2026-09-16) ---
     # Deliberately NOT a hardcoded checklist (Col's explicit requirement)
     # -- observer/staleness_reasoner.py asks the local model to use its

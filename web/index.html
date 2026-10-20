@@ -50,6 +50,23 @@
             <canvas id="archer-camera-canvas" style="display:none;"></canvas>
           </div>
         </div>
+
+        <div id="archer-listening-column" class="archer-left-card">
+          <div class="archer-left-card-header">
+            <span>ROOM LISTENING</span>
+            <span id="archer-listening-indicator" class="listening-badge badge-off" title="Room Listening Status">OFF</span>
+          </div>
+          <div id="archer-listening-pane">
+            <div id="archer-listening-status-text">Waiting for the observer…</div>
+            <div id="archer-listening-controls">
+              <button id="archer-listen-pause-15m" type="button" class="listen-btn" title="Pause room listening for 15 minutes">Pause 15m</button>
+              <button id="archer-listen-pause-1h" type="button" class="listen-btn" title="Pause room listening for 1 hour">Pause 1h</button>
+              <button id="archer-listen-pause-hold" type="button" class="listen-btn" title="Pause room listening until you resume it">Pause</button>
+              <button id="archer-listen-resume" type="button" class="listen-btn resume" style="display:none;" title="Resume room listening">Resume</button>
+              <button id="archer-listen-forget" type="button" class="listen-btn danger" title="Purge room transcripts from the last 2 minutes">Forget That</button>
+            </div>
+          </div>
+        </div>
       </aside>
 
       <!-- Right Tabbed Workspace: FILES, ARTIFACTS, TOOLS, AWAY & TASKS, SYSTEM, LOGS -->

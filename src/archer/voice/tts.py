@@ -81,6 +81,46 @@ def sanitize_text_for_tts(text: str) -> str:
     return t
 
 
+def _import_kokoro_pipeline():
+    """
+    Import kokoro's KPipeline without losing ARCHER's log files.
+
+    kokoro's __init__ calls loguru's logger.remove(), which drops every log
+    handler in the process, including ARCHER's dated log file and the
+    latest-session mirror (Claude, 2026-10-20: every ARCHER run's log
+    stopped at "VAD initialized", the moment the voice pipeline loaded
+    kokoro). While kokoro imports, remove() is switched off; afterwards the
+    console handler kokoro adds for itself is taken back out so nothing is
+    printed twice.
+    """
+    import sys
+
+    if "kokoro" in sys.modules:
+        from kokoro import KPipeline
+        return KPipeline
+
+    real_remove, real_add = logger.remove, logger.add
+    added: list[int] = []
+
+    def _add(*args, **kwargs):
+        handler_id = real_add(*args, **kwargs)
+        added.append(handler_id)
+        return handler_id
+
+    logger.remove = lambda *args, **kwargs: None
+    logger.add = _add
+    try:
+        from kokoro import KPipeline
+    finally:
+        del logger.remove, logger.add  # back to loguru's own methods
+        for handler_id in added:
+            try:
+                real_remove(handler_id)
+            except ValueError:
+                pass
+    return KPipeline
+
+
 class LocalTTS(TTSBackend):
     """Local TTS backend using Kokoro-82M neural engine (with HTTP fallback)."""
 
@@ -91,7 +131,7 @@ class LocalTTS(TTSBackend):
 
     def _init_kokoro(self) -> None:
         try:
-            from kokoro import KPipeline
+            KPipeline = _import_kokoro_pipeline()
             self._kokoro_pipeline = KPipeline(lang_code="a")
             logger.info("LocalTTS initialized with Kokoro-82M neural engine.")
         except BaseException as e:
@@ -133,16 +173,6 @@ class LocalTTS(TTSBackend):
                     buf = io.BytesIO()
                     sf.write(buf, audio_float, 24000, format="WAV")
                     audio_bytes = buf.getvalue()
-
-                    # Save unique debug dump with timestamp
-                    try:
-                        import os
-                        os.makedirs("scratch", exist_ok=True)
-                        ts = int(time.time() * 1000)
-                        with open(f"scratch/raw_chatterbox_response_{ts}.wav", "wb") as f:
-                            f.write(audio_bytes)
-                    except Exception:
-                        pass
 
                     return audio_bytes, 24000
                 except Exception as e:

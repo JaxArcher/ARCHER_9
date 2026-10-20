@@ -50,13 +50,22 @@ def run_consolidation(target_date: str | None = None) -> bool:
 
     logger.info(f"Starting ARCHER daily consolidation pass for {target_date}...")
 
-    # 1. Pull observations and sightings from SQLite
+    # 1. Pull observations, sightings, and ambient room transcripts from SQLite
     data = store.get_day_observations(target_date)
     observations = data.get("observations", [])
     sightings = data.get("sightings", [])
 
-    if not observations and not sightings:
-        logger.info(f"No scene observations or person sightings recorded for {target_date}. Skipping consolidation.")
+    # Phase 2c: Pull day's ambient room transcripts
+    start_dt = datetime.strptime(target_date, "%Y-%m-%d")
+    end_dt = start_dt.replace(hour=23, minute=59, second=59)
+    day_transcripts = store.get_room_transcripts_range(
+        start_time=start_dt.timestamp(),
+        end_time=end_dt.timestamp(),
+        include_archer=False,
+    )
+
+    if not observations and not sightings and not day_transcripts:
+        logger.info(f"No scene observations, person sightings, or room transcripts recorded for {target_date}. Skipping consolidation.")
         md.log_audit(
             action="daily_consolidation",
             result="skipped",
@@ -85,6 +94,20 @@ def run_consolidation(target_date: str | None = None) -> bool:
         known = "known" if s.get("is_known") else "unrecognized"
         sighting_lines.append(f"[{ts}] Sighting: {pid} ({known})")
 
+    # Up to 60 lines, spread across the whole day (not just the first 60).
+    # Whisper can't tell who spoke, so lines say whose voice it was (Col's or
+    # another) and who was in view, not a speaker.
+    if len(day_transcripts) > 60:
+        step = len(day_transcripts) / 60.0
+        day_transcripts_sample = [day_transcripts[int(i * step)] for i in range(60)]
+    else:
+        day_transcripts_sample = day_transcripts
+    transcript_lines = []
+    for t in day_transcripts_sample:
+        voice = {"col": "Col's voice", "other": "another voice"}.get(t.get("voice") or "", "voice not checked")
+        seen = ", ".join(t.get("people_in_view") or []) or "nobody identified"
+        transcript_lines.append(f"[{t['start_datetime']}] ({voice}; in view: {seen}): \"{t['transcript']}\"")
+
     # 2. Retrieve recent session context & past memories for continuity
     recent_convs = store.get_recent_conversations(limit=10)
     conv_lines = [f"{c.get('role', '')}: {c.get('content', '')}" for c in recent_convs if c.get("content")]
@@ -94,12 +117,14 @@ def run_consolidation(target_date: str | None = None) -> bool:
 
     prompt = (
         f"You are ARCHER's end-of-day cognitive consolidation engine.\n"
-        f"Synthesize the following ambient observation log and person sightings into a concise, insightful "
+        f"Synthesize the following ambient observation log, person sightings, and room conversations into a concise, insightful "
         f"daily behavioral summary for date {target_date}.\n\n"
         f"## Ambient Visual Observations ({len(observations)} events):\n"
         + ("\n".join(obs_lines[:50]) if obs_lines else "None recorded") + "\n\n"
         f"## Person Sightings ({len(sightings)} events):\n"
         + ("\n".join(sighting_lines[:50]) if sighting_lines else "None recorded") + "\n\n"
+        f"## Ambient Room Transcripts ({len(day_transcripts)} utterances):\n"
+        + ("\n".join(transcript_lines) if transcript_lines else "None recorded") + "\n\n"
         f"## Recent Conversational Context:\n"
         + ("\n".join(conv_lines[-10:]) if conv_lines else "None") + "\n\n"
         f"## Prior OpenMemory Context:\n"
@@ -107,7 +132,8 @@ def run_consolidation(target_date: str | None = None) -> bool:
         f"Formulate a structured 1-2 paragraph synthesis summarizing:\n"
         f"1. Key behavioral patterns, activities, and daily workflow observed.\n"
         f"2. Notable presence of known persons (Col) or unrecognized visitors.\n"
-        f"3. Any notable focus sessions, habits, or behavioral drift.\n"
+        f"3. Notable ambient discussions, decisions, topics, or commitments heard in the room.\n"
+        f"4. Any notable focus sessions, habits, or behavioral drift.\n"
         f"Do not include meta commentary or introductory chatter."
     )
 

@@ -10,10 +10,11 @@ owning its own context-assembly pipeline and deterministic cloud-delegation trig
 
 from __future__ import annotations
 
+import os
 import re
 import time
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from loguru import logger
 
@@ -1662,6 +1663,106 @@ Output JSON format:
 
         threading.Thread(target=_extract, daemon=True, name="ProfileInsightExtractor").start()
 
+    # --- Room listening (Phase 2c) -------------------------------------------
+
+    _ROOM_RESUME_RE = re.compile(r"\b(?:start|resume|restart)\s+(?:the\s+)?(?:room\s+)?listening\b")
+    _ROOM_PAUSE_RE = re.compile(r"\b(?:stop|pause)\s+(?:the\s+)?(?:room\s+)?listening\b")
+    _SPEECH_WORD_RE = re.compile(
+        r"\b(?:said|say|says|saying|told|tell|telling|mention\w*|talk\w*|discuss\w*|agree\w*|"
+        r"decide\w*|promis\w*|heard|hear|conversation|call|called)\b"
+    )
+    _PAST_MARKER_RE = re.compile(
+        r"\b(?:did|didn't|was|were|had|said|told|talked|discussed|mentioned|agreed|decided|promised|"
+        r"heard|called|earlier|yesterday|ago|last|today|tonight|this morning|this afternoon|"
+        r"on the call|on the phone|in the room)\b"
+    )
+    _WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    _TRANSCRIPT_QUERY_SKIP = frozenset(
+        "what when where which who whom how did didn was were had have has the that this these those "
+        "and for with from about into any are you your our ours his her him she they them their there "
+        "said say says saying told tell telling talk talked talking mention mentioned discuss discussed "
+        "agree agreed decide decided promise promised heard hear conversation call called room phone "
+        "remember remind earlier yesterday today tonight morning afternoon evening last week ago "
+        "monday tuesday wednesday thursday friday saturday sunday something anything thing things".split()
+    )
+
+    def _handle_room_listening_command(self, text: str) -> Optional[str]:
+        """'Start listening' / 'stop listening' said to ARCHER directly (chat or ARCHER's own mic)."""
+        clean = re.sub(r"[^\w\s']", " ", (text or "").lower())
+        words = clean.split()
+        if not words or len(words) > 7:
+            return None
+        clean = " ".join(words)
+        try:
+            if self._ROOM_RESUME_RE.search(clean):
+                self._store.set_listening_pause(duration_seconds=0)
+                return "Room listening is back on."
+            if self._ROOM_PAUSE_RE.search(clean):
+                self._store.set_listening_pause(duration_seconds=3600)
+                return "Room listening is paused for an hour. Tell me 'start listening' when you want it back."
+        except Exception as e:
+            logger.warning(f"Room listening command failed: {e}")
+        return None
+
+    def _transcript_day_window(self, clean: str) -> Optional[tuple[float, float]]:
+        """The day a question refers to ('yesterday', 'Tuesday', 'today', ...), as (start, end) epoch seconds."""
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        day = None
+        if "yesterday" in clean:
+            day = today - timedelta(days=1)
+        elif re.search(r"\b(?:today|tonight|this morning|this afternoon|this evening)\b", clean):
+            day = today
+        else:
+            for i, name in enumerate(self._WEEKDAYS):
+                if re.search(rf"\b{name}\b", clean):
+                    back = (today.weekday() - i) % 7 or 7  # the most recent past one
+                    day = today - timedelta(days=back)
+                    break
+        if day is None:
+            if re.search(r"\blast week\b", clean):
+                return (today - timedelta(days=7)).timestamp(), datetime.now().timestamp()
+            return None
+        return day.timestamp(), (day + timedelta(days=1)).timestamp()
+
+    def _room_transcripts_block(self, text: str) -> str:
+        """Matching room transcript lines, only when the question is about something said or heard earlier."""
+        clean = re.sub(r"[^\w\s']", " ", (text or "").lower())
+        clean = " ".join(clean.split())
+        if not (self._SPEECH_WORD_RE.search(clean) and self._PAST_MARKER_RE.search(clean)):
+            return ""
+        terms = [
+            w for w in re.findall(r"[a-z0-9']{3,}", clean)
+            if w not in self._TRANSCRIPT_QUERY_SKIP and not w.endswith("'s")
+        ]
+        if not terms:
+            return ""
+        query = " ".join(terms)
+        window = self._transcript_day_window(clean)
+        matched = []
+        if window:
+            matched = self._store.search_room_transcripts(
+                query, limit=8, since_timestamp=window[0], until_timestamp=window[1]
+            )
+        if not matched:
+            matched = self._store.search_room_transcripts(query, limit=8)
+        if not matched:
+            return ""
+        lines = []
+        for t in sorted(matched, key=lambda r: r.get("start_time") or 0):
+            voice = {
+                "col": "Col's voice",
+                "other": "another voice",
+                "unchecked": "voice not checked",
+            }.get(t.get("voice") or "", "voice not checked")
+            seen = ", ".join(t.get("people_in_view") or []) or "nobody identified"
+            lines.append(f'- [{t["start_datetime"]}] ({voice}; in view: {seen}) "{t["transcript"]}"')
+        return (
+            "\n\n## Room Transcripts (local-only — never sent to a cloud model)\n"
+            "Lines heard by the room microphone that may answer the user's question. "
+            "Always give the date and time in brackets when you use one:\n"
+            + "\n".join(lines)
+        )
+
     def build_context_system_prompt(self, text: str) -> tuple[str, Optional[str], Optional[str], str]:
         """
         Construct 7-step context assembly pipeline:
@@ -1697,6 +1798,13 @@ Output JSON format:
         safety_response = self.check_safety_override(text)
         if safety_response:
             return safety_response, "safety_override", None, ""
+
+        # Room listening commands said to ARCHER directly (Phase 2c). While room
+        # listening is paused the room mic hears nothing, so this is how Col
+        # resumes it by voice or chat.
+        listening_reply = self._handle_room_listening_command(text)
+        if listening_reply:
+            return listening_reply, "direct_reply", None, ""
 
         # 1. System Environment (Deterministic System Fact: Current Local Date & Time)
         now_dt = datetime.now()
@@ -1760,7 +1868,8 @@ Output JSON format:
             "how this specific user operates — motivation, executive function, how they respond to criticism, etc. Use it to shape HOW "
             "you phrase things across every kind of turn, not only reflective ones: how you word a task reminder or nudge, how you frame "
             "a Blindspot observation, how you motivate follow-through. Never quote it verbatim or announce that you're using it — let it "
-            "change your phrasing silently, the way a person who actually knows someone adjusts their delivery without narrating why."
+            "change your phrasing silently, the way a person who actually knows someone adjusts their delivery without narrating why.\n"
+            "14. ROOM TRANSCRIPTS (SECOND BRAIN): Lines heard by the room microphone appear under '## Room Transcripts' only when the user asks about something said or heard earlier. Use them to answer that question, and whenever you quote or answer from one, always state its date and time (e.g. 'Tue Oct 14, 3:42 PM'). Never bring up room transcripts otherwise. If none match, say you don't have that in what you heard."
         )
 
         # 3. Stance Tag Scoring & Register Assembly
@@ -1927,6 +2036,17 @@ Output JSON format:
         except Exception:
             pass
 
+        # 5c. Room transcripts (Phase 2c "second brain"). Searched ONLY when
+        # Col asks about something said or heard earlier, never otherwise, so
+        # overheard conversations don't surface in unrelated chats. The block
+        # is local-only, like the User Profile: it never goes to a cloud model
+        # (see the return below).
+        transcripts_block = ""
+        try:
+            transcripts_block = self._room_transcripts_block(text)
+        except Exception as e:
+            logger.debug(f"Room transcript retrieval failed: {e}")
+
         # 6. Activity Status Buffer — only surfaced when there's an actual
         # reason to reference ambient sensor status (a proactive blindspot
         # flag just fired). This used to be injected into EVERY turn
@@ -1982,6 +2102,17 @@ Output JSON format:
         token_est = len(full_system_prompt) // 4
         cloud_trigger = self.evaluate_cloud_delegation(text, token_est)
 
+        # Room transcripts ride with the local-only block and keep the turn
+        # local: nothing heard in the room is ever sent to a cloud model.
+        if transcripts_block:
+            profile_block = profile_block + transcripts_block
+            if cloud_trigger:
+                logger.info(
+                    f"CoreAgent: cloud delegation ({cloud_trigger}) skipped -- this turn uses room transcripts, "
+                    "which never leave the PC."
+                )
+                cloud_trigger = None
+
         self._last_user_turn_timestamp = time.time()
         return full_system_prompt, cloud_trigger, visual_image_b64, profile_block
 
@@ -2029,7 +2160,7 @@ Output JSON format:
         start_t = time.monotonic()
         system_prompt, cloud_trigger, visual_image_b64, profile_block = self.build_context_system_prompt(user_input)
 
-        if cloud_trigger == "safety_override":
+        if cloud_trigger in ("safety_override", "direct_reply"):
             with self._history_lock:
                 self._conversation_history.append({"role": "user", "content": user_input})
                 self._conversation_history.append({"role": "assistant", "content": system_prompt})
