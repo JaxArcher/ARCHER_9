@@ -24,7 +24,7 @@ class UniversalToolExecutor:
         self._inventory_tools = InventoryTools()
         self._store = get_sqlite_store()
         self._confirmation_required = {
-            'open_url', 'click', 'type_text', 'hotkey', 'focus_window',
+            'open_url', 'open_url_in_my_browser', 'click', 'type_text', 'hotkey', 'focus_window',
             'browser_click', 'browser_type', 'close_browser'
         }
     
@@ -76,6 +76,14 @@ class UniversalToolExecutor:
         
         elif tool_name == 'open_url':
             result = self._pc_controller.open_url(inp['url'])
+            return {'result': result}
+
+        elif tool_name == 'open_url_in_my_browser':
+            result = self._pc_controller.open_url_in_my_browser(inp['url'])
+            return {'result': result}
+
+        elif tool_name == 'play_youtube':
+            result = self._pc_controller.play_youtube(inp.get('query', ''))
             return {'result': result}
         
         elif tool_name == 'click':

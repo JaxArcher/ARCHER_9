@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from archer.config import get_config
+from archer.integrations.ollama_settings import main_model_request, prompt_was_cut, timing_summary
 from archer.core.event_bus import Event, EventType, get_event_bus
 from archer.core.toggle import get_toggle_service
 from archer.memory.sqlite_store import get_sqlite_store
@@ -76,6 +77,33 @@ _STANCE_KEYWORDS = {
 import json
 import httpx
 from collections.abc import Generator
+
+# Col's name in face recognition (the room listener uses "Col" too). A
+# recognized face with one of these names is the person talking to ARCHER.
+_OWNER_FACE_NAMES = {"col", "colby"}
+
+# A reply saying ARCHER is doing something one of its tools does ("I will open
+# YouTube for you now"). The local model sometimes says that and calls no tool
+# (2026-10-20 live test); _stream_local then asks it once more.
+_ACTION_VERBS = (
+    r"(?:open(?:ing)?|add(?:ing)?|creat(?:e|ing)|set(?:ting)?|search(?:ing)?|play(?:ing)?"
+    r"|pull(?:ing)?\s+up|bring(?:ing)?\s+up|launch(?:ing)?|go\s+to|navigat(?:e|ing)|clos(?:e|ing)"
+    r"|complet(?:e|ing)|delet(?:e|ing)|remov(?:e|ing)|log(?:ging)?|track(?:ing)?|switch(?:ing)?"
+    r"|click(?:ing)?|typ(?:e|ing)|mark(?:ing)?)"
+)
+_ACTION_PROMISE_RE = re.compile(
+    r"\b(?:i(?:'ll|\s+will|\s+am\s+going\s+to|'m\s+going\s+to)|let\s+me|i'm|i\s+am)\s+"
+    r"(?:now\s+|just\s+|go\s+ahead\s+and\s+)?" + _ACTION_VERBS + r"\b"
+    r"|^\W*(?:(?:okay|ok|sure|alright|right\s+away|got\s+it)\W+)*"
+    r"(?:opening|adding|creating|setting|searching|playing|pulling\s+up|bringing\s+up|launching"
+    r"|navigating|closing|completing|deleting|removing|logging|tracking|switching|clicking|typing|marking)\b",
+    re.IGNORECASE,
+)
+_ACTION_NUDGE = (
+    "(Note from ARCHER's own system, not from Colby: your reply says you're doing "
+    "this, but you didn't call a tool, so nothing has happened. If one of your tools "
+    "does it, call that tool now. If none does, reply with just the word NONE.)"
+)
 
 # Regex to split on sentence-ending punctuation followed by a space or end-of-string.
 _SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])\s+')
@@ -444,7 +472,10 @@ class CoreAgent:
         Evaluate deterministic cloud delegation triggers:
         1. Explicit user request ("ask claude", "use cloud")
         2. Complex task category heuristics (heavy code, multi-page doc analysis)
-        3. Context budget overflow (>2000 tokens)
+        3. Context budget overflow: more than a quarter of the local model's
+           context (ollama_num_ctx), leaving room for the tool list, the
+           conversation and the reply. Was a flat 2000 when the context was
+           4096; the system prompt alone is bigger than that now.
         """
         lower = text.lower()
         if "ask claude" in lower or "use cloud" in lower or "cloud mode" in lower:
@@ -454,7 +485,7 @@ class CoreAgent:
         if any(h in lower for h in code_heuristics):
             return "complex_task"
             
-        if total_tokens_est > 2000:
+        if total_tokens_est > max(2000, int(getattr(self._config, "ollama_num_ctx", 8192)) // 4):
             return "context_overflow"
             
         return None
@@ -615,7 +646,12 @@ class CoreAgent:
                 if identified:
                     parts = []
                     for p in identified:
-                        if p.get("is_known"):
+                        if p.get("is_known") and str(p.get("person_id", "")).strip().lower() in _OWNER_FACE_NAMES:
+                            parts.append(
+                                f"Colby, the person talking to you "
+                                f"({p.get('confidence', 0.0) * 100:.0f}% confidence)"
+                            )
+                        elif p.get("is_known"):
                             parts.append(
                                 f"{p['person_id']} (recognized, "
                                 f"{p.get('confidence', 0.0) * 100:.0f}% confidence)"
@@ -983,19 +1019,20 @@ Output JSON format:
                 url = f"{self._config.ollama_base_url}/api/generate"
                 r = httpx.post(
                     url,
-                    json={
+                    # Same context size and keep-alive as every other request to
+                    # this model, so Ollama never reloads it (ollama_settings).
+                    json=main_model_request({
                         "model": self.primary_model,
+                        "think": bool(getattr(self._config, "core_think", False)),  # Gemma 4 thinks by default: 15-70 s of hidden reasoning (2026-10-20)
                         "prompt": prompt,
                         "system": "Respond with raw JSON directly. Do not think or deliberate.",
                         "format": "json",
                         "stream": False,
-                        "keep_alive": "10m",
                         "options": {
                             "temperature": 0.0,
-                            "num_ctx": 4096,  # Item 3: match chat context to prevent model reload
                             "num_predict": 1024,  # Item 2: token budget for reasoning and clean JSON
                         },
-                    },
+                    }),
                     timeout=60.0,
                 )
                 if r.status_code == 200:
@@ -1622,8 +1659,9 @@ Output JSON format:
             try:
                 resp = httpx.post(
                     f"{self._config.ollama_base_url}/api/chat",
-                    json={
+                    json=main_model_request({
                         "model": self.primary_model,
+                        "think": bool(getattr(self._config, "core_think", False)),  # Gemma 4 thinks by default: 15-70 s of hidden reasoning (2026-10-20)
                         "messages": [
                             {
                                 "role": "system",
@@ -1646,7 +1684,7 @@ Output JSON format:
                         ],
                         "stream": False,
                         "options": {"num_predict": 120},
-                    },
+                    }),
                     timeout=30.0,
                 )
                 if resp.status_code != 200:
@@ -1703,6 +1741,120 @@ Output JSON format:
         except Exception as e:
             logger.warning(f"Room listening command failed: {e}")
         return None
+
+    # --- "Open YouTube" (Claude, 2026-10-20) ---------------------------------
+    # A whole request that only asks to open a well-known site or a web
+    # address. Anything more ("open YouTube and play ...") goes to the model.
+    _OPEN_SITE_RE = re.compile(
+        r"^(?:(?:hey\s+)?archer\s+)?"
+        r"(?:(?:can|could|would|will)\s+you\s+|please\s+|go\s+ahead\s+and\s+|just\s+)*"
+        r"(?:open(?:\s+up)?|pull\s+up|bring\s+up|go\s+to|take\s+me\s+to|launch|load(?:\s+up)?|navigate\s+to)\s+"
+        r"(?:the\s+)?(?P<target>.+?)"
+        r"(?:\s+(?:website|web\s+site|site|page|home\s*page))?"
+        r"(?P<mine>\s+in\s+(?:a\s+)?(?:separate|new|different|another)\s+(?:window|tab|browser)"
+        r"|\s+in\s+my\s+(?:own\s+)?browser|\s+in\s+(?:chrome|edge|firefox))?"
+        r"(?:\s+(?:for\s+me|please|now))*$"
+    )
+    # Spoken name -> (address, how ARCHER says it).
+    _KNOWN_SITES = {
+        "youtube": ("https://www.youtube.com", "YouTube"),
+        "google": ("https://www.google.com", "Google"),
+        "gmail": ("https://mail.google.com", "Gmail"),
+        "google maps": ("https://maps.google.com", "Google Maps"),
+        "maps": ("https://maps.google.com", "Google Maps"),
+        "google calendar": ("https://calendar.google.com", "Google Calendar"),
+        "google drive": ("https://drive.google.com", "Google Drive"),
+        "google docs": ("https://docs.google.com", "Google Docs"),
+        "netflix": ("https://www.netflix.com", "Netflix"),
+        "amazon": ("https://www.amazon.com", "Amazon"),
+        "reddit": ("https://www.reddit.com", "Reddit"),
+        "github": ("https://github.com", "GitHub"),
+        "wikipedia": ("https://www.wikipedia.org", "Wikipedia"),
+        "facebook": ("https://www.facebook.com", "Facebook"),
+        "instagram": ("https://www.instagram.com", "Instagram"),
+        "twitter": ("https://x.com", "X"),
+        "linkedin": ("https://www.linkedin.com", "LinkedIn"),
+        "spotify": ("https://open.spotify.com", "Spotify"),
+        "twitch": ("https://www.twitch.tv", "Twitch"),
+        "hulu": ("https://www.hulu.com", "Hulu"),
+        "disney plus": ("https://www.disneyplus.com", "Disney Plus"),
+        "disney+": ("https://www.disneyplus.com", "Disney Plus"),
+    }
+    _WEB_ADDRESS_RE = re.compile(r"^(?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?:/\S*)?$")
+
+    def _open_site_target(self, text: str) -> Optional[tuple[str, str, bool]]:
+        """(address, name, in Col's own browser) when `text` only asks to open a site, else None."""
+        clean = (text or "").lower().strip()
+        clean = re.sub(r"\s+dot\s+", ".", clean)
+        clean = re.sub(r"[^\w\s.:/+'-]", " ", clean)
+        clean = " ".join(clean.split()).strip(" .")
+        if not clean or len(clean.split()) > 12:
+            return None
+        m = self._OPEN_SITE_RE.match(clean)
+        if not m:
+            return None
+        target = m.group("target").strip(" .")
+        mine = bool(m.group("mine"))
+        if target in self._KNOWN_SITES:
+            url, name = self._KNOWN_SITES[target]
+            return url, name, mine
+        if self._WEB_ADDRESS_RE.match(target):
+            url = target if target.startswith("http") else f"https://{target}"
+            return url, target.split("://")[-1], mine
+        return None
+
+    def _handle_open_site_command(self, text: str) -> Optional[str]:
+        """Open a site for 'Open YouTube' and the like; the reply to speak, or None if it isn't one."""
+        found = self._open_site_target(text)
+        if not found:
+            return None
+        url, name, mine = found
+        tool = "open_url_in_my_browser" if mine else "open_url"
+        try:
+            result = self._tool_executor.execute(tool, {"url": url})
+        except Exception as e:
+            result = {"error": str(e)}
+        outcome = result.get("result", result) if isinstance(result, dict) else {}
+        if not isinstance(outcome, dict):
+            outcome = {"success": bool(outcome)}
+        logger.info(f"CoreAgent: opened {url} directly ({tool}): {json.dumps(outcome)[:160]}")
+        if "error" in result or not outcome.get("success", False):
+            why = outcome.get("reason") or outcome.get("error") or result.get("error") or "it didn't load"
+            return f"I couldn't open {name}: {why}."
+        if mine:
+            return f"{name} is open in your browser."
+        return f"{name} is open."
+
+    # "Play Black Parade on YouTube" (Claude, 2026-10-20). Longer or looser
+    # requests reach the model, which has the play_youtube tool.
+    _YOUTUBE_PLAY_RE = re.compile(
+        r"^(?:(?:hey\s+)?archer\s+)?"
+        r"(?:(?:can|could|would|will)\s+you\s+|please\s+|go\s+ahead\s+and\s+|just\s+)*"
+        r"(?:play|put\s+on|pull\s+up)\s+(?P<query>.+?)\s+(?:on|in|from)\s+youtube"
+        r"(?:\s+(?:for\s+me|please|now))*$"
+    )
+
+    def _handle_youtube_play_command(self, text: str) -> Optional[str]:
+        """Play something for 'Play X on YouTube'; the reply to speak, or None if it isn't that."""
+        clean = re.sub(r"[^\w\s'&-]", " ", (text or "").lower())
+        clean = " ".join(clean.split())
+        m = self._YOUTUBE_PLAY_RE.match(clean) if clean and len(clean.split()) <= 16 else None
+        if not m:
+            return None
+        query = m.group("query").strip()
+        try:
+            result = self._tool_executor.execute("play_youtube", {"query": query})
+        except Exception as e:
+            result = {"error": str(e)}
+        outcome = result.get("result", result) if isinstance(result, dict) else {}
+        if not isinstance(outcome, dict):
+            outcome = {}
+        logger.info(f"CoreAgent: played on YouTube directly: {json.dumps(outcome)[:160]}")
+        if "error" in result or not outcome.get("success"):
+            why = outcome.get("reason") or result.get("error") or "it didn't load"
+            return f"I couldn't play that on YouTube: {why}."
+        title = outcome.get("playing") or query
+        return f"Playing {title}."
 
     def _transcript_day_window(self, clean: str) -> Optional[tuple[float, float]]:
         """The day a question refers to ('yesterday', 'Tuesday', 'today', ...), as (start, end) epoch seconds."""
@@ -1805,6 +1957,13 @@ Output JSON format:
         listening_reply = self._handle_room_listening_command(text)
         if listening_reply:
             return listening_reply, "direct_reply", None, ""
+
+        # "Open YouTube" and the like, done directly rather than left to the
+        # model, which sometimes said "I will open YouTube for you now" and
+        # called no tool (2026-10-20 live test).
+        open_reply = self._handle_open_site_command(text) or self._handle_youtube_play_command(text)
+        if open_reply:
+            return open_reply, "direct_reply", None, ""
 
         # 1. System Environment (Deterministic System Fact: Current Local Date & Time)
         now_dt = datetime.now()
@@ -1994,7 +2153,17 @@ Output JSON format:
                 "specifically by naming the actual objects, furniture, and "
                 "colors you can identify -- a vague one-word category is not "
                 "an acceptable substitute for actually describing what is "
-                "there."
+                "there. "
+                # Col, 2026-10-20: when it's him in the picture, ARCHER should
+                # say "you", not "a person".
+                "Colby is the one asking you this, from the room this camera "
+                "sees. When he's in the picture, talk about him as 'you' (for "
+                "example, 'I can see you sitting on the couch'), never as 'a "
+                "person' or 'someone'. If face recognition didn't name anyone, "
+                "or found just one person it doesn't recognize, that person is "
+                "most likely Colby. Anyone face recognition names as someone "
+                "else, and any extra people, are other people: describe them "
+                "as such."
             ).strip()
 
         # 4b. Passive person-learning (2026-09-16, Col's call): runs on
@@ -2471,6 +2640,11 @@ Output JSON format:
         # happened. Same empty-response failure mode also hit plain visual
         # (webcam) turns with no tools involved at all.
         executed_tools_summary: list[str] = []
+        # Asked once per turn when a reply promises an action but calls no
+        # tool (_ACTION_PROMISE_RE). That follow-up round is "quiet": its own
+        # words aren't spoken, only a tool call counts.
+        nudged = False
+        quiet_round = False
 
         for _round in range(max_tool_rounds):
             # gemma4:e4b (Gemma 3n) 400s on Ollama's /api/chat whenever a
@@ -2487,13 +2661,15 @@ Output JSON format:
             image_in_turn = any("images" in m for m in messages)
             payload = {
                 "model": self.primary_model,
+                "think": bool(getattr(self._config, "core_think", False)),  # Gemma 4 thinks by default: 15-70 s of hidden reasoning (2026-10-20)
                 "messages": messages,
                 "stream": True,
-                "options": {
-                    "temperature": self._config.agent_temperature,
-                    "num_ctx": 4096
-                }
             }
+            # One context size and keep-alive for every request to this model
+            # (ollama_settings): at 4096 Ollama cut this prompt to its last
+            # ~2,000 tokens, and the mismatch with ARCHER's other requests
+            # reloaded the model twice a turn (Ollama's log, 2026-10-20).
+            main_model_request(payload, self._config, temperature=self._config.agent_temperature)
             if not image_in_turn:
                 payload["tools"] = tools
             else:
@@ -2529,10 +2705,24 @@ Output JSON format:
                             self._last_tokens_per_sec = data["eval_count"] / (data["eval_duration"] / 1e9)
                         except (ZeroDivisionError, TypeError):
                             pass
+                    if data.get("done"):
+                        # Where the time went this round (2026-10-20): a load of
+                        # more than a moment means Ollama reloaded the model.
+                        timing = timing_summary(data)
+                        if timing:
+                            logger.info(f"CoreAgent (local) Ollama round {_round + 1}: {timing}.")
+                        if prompt_was_cut(data, self._config):
+                            logger.warning(
+                                f"CoreAgent (local): the prompt reached Ollama's limit "
+                                f"({data.get('prompt_eval_count')} tokens; the context is "
+                                f"{self._config.ollama_num_ctx}), so its start was probably cut off."
+                            )
 
                     message = data.get("message", {}) or {}
                     token = message.get("content", "")
-                    if token:
+                    if token and quiet_round:
+                        round_content += token
+                    elif token:
                         round_content += token
                         buffer += token
                         full_response += token
@@ -2557,7 +2747,32 @@ Output JSON format:
                         round_tool_calls.extend(message["tool_calls"])
 
             if not round_tool_calls:
+                if quiet_round:
+                    # Asked again and still no tool: say so rather than leave
+                    # Colby thinking it was done.
+                    logger.info("CoreAgent (local): no tool for the promised action; telling Colby.")
+                    correction = "Sorry, I can't actually do that one myself yet."
+                    full_response += (" " if full_response else "") + correction
+                    if buffer.strip():
+                        yield buffer.strip()
+                        buffer = ""
+                    yield correction
+                    break
+                if not nudged and not image_in_turn and _ACTION_PROMISE_RE.search(round_content):
+                    nudged = True
+                    quiet_round = True
+                    logger.info(
+                        "CoreAgent (local): the reply promised an action but called no tool; "
+                        "asking the model once more."
+                    )
+                    if buffer.strip():
+                        yield buffer.strip()
+                        buffer = ""
+                    messages.append({"role": "assistant", "content": round_content})
+                    messages.append({"role": "user", "content": _ACTION_NUDGE})
+                    continue
                 break  # normal completion, no tool calls this round
+            quiet_round = False
 
             messages.append({
                 "role": "assistant",

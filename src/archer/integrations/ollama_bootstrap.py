@@ -237,17 +237,21 @@ def _model_placement(base_url: str, model: str) -> str | None:
             def gb(n: int) -> str:
                 return f"{n / 1024 ** 3:.1f} GB"
 
+            ctx = m.get("context_length")
+            ctx_text = f", context {ctx} tokens" if ctx else ""
             if vram <= 0:
-                return f"loaded on CPU/RAM ({gb(size)}, no VRAM)"
+                return f"loaded on CPU/RAM ({gb(size)}, no VRAM{ctx_text})"
             if vram >= size:
-                return f"loaded fully in VRAM ({gb(vram)})"
-            return f"loaded split: {gb(vram)} in VRAM, {gb(size - vram)} on CPU"
+                return f"loaded fully in VRAM ({gb(vram)}{ctx_text})"
+            return f"loaded split: {gb(vram)} in VRAM, {gb(size - vram)} on CPU{ctx_text}"
     except Exception:
         return None
     return None
 
 
-def _warm_up_model(label: str, base_url: str, model: str, force_cpu: bool = False) -> None:
+def _warm_up_model(
+    label: str, base_url: str, model: str, force_cpu: bool = False, main_settings: bool = False,
+) -> None:
     """Force `model` into VRAM (or RAM, if force_cpu) now, in the
     background, instead of letting the user's first real question eat the
     cold-load cost.
@@ -275,11 +279,20 @@ def _warm_up_model(label: str, base_url: str, model: str, force_cpu: bool = Fals
     however the server process itself detects hardware -- passing 0 here
     is a second, more direct way of pinning this model to CPU that doesn't
     depend on the env var actually working.
+
+    main_settings (2026-10-20): load the main model with the same context
+    size and keep-alive as every other request to it (ollama_settings).
+    Without them the warm-up loaded it at Ollama's own default context
+    (262,144 on Col's PC), and ARCHER's first question reloaded it.
     """
     options = {"num_gpu": 0} if force_cpu else None
     payload = {"model": model}
     if options:
         payload["options"] = options
+    if main_settings:
+        from archer.integrations.ollama_settings import main_model_request
+
+        main_model_request(payload)
     try:
         resp = httpx.post(f"{base_url}/api/generate", json=payload, timeout=120.0)
         if resp.status_code == 200:
@@ -311,7 +324,9 @@ def start_ollama_instances() -> None:
         # real question / the observer's first analysis cycle -- see
         # _warm_up_model. Sequential on this same background thread is
         # fine; nothing else is waiting on it.
-        _warm_up_model("main / gemma4:e4b", config.ollama_base_url, config.core_primary_model)
+        _warm_up_model(
+            "main / gemma4:e4b", config.ollama_base_url, config.core_primary_model, main_settings=True,
+        )
         _warm_up_model(
             "observer / moondream", config.observer_ollama_url, config.observer_model,
             force_cpu=True,

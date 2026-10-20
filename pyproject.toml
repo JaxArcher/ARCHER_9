@@ -29,6 +29,7 @@ dependencies = [
 
     # --- Voice Pipeline ---
     "openwakeword==0.6.0",
+    "sherpa-onnx==1.13.8",  # "Hey ARCHER" keyword spotter (voice/wake_word.py; model in data/models/kws). Approved by Col 2026-10-20.
     "webrtcvad==2.0.10",
     "faster-whisper==1.1.0",
     "sounddevice==0.5.1",

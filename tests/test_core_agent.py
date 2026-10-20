@@ -41,9 +41,11 @@ class TestCoreAgent:
         assert trigger == "complex_task"
 
     def test_cloud_delegation_context_overflow(self, core_agent):
-        """Context overflow triggers cloud delegation."""
-        trigger = core_agent.evaluate_cloud_delegation("Normal query", 2500)
-        assert trigger == "context_overflow"
+        """Context overflow triggers cloud delegation: above a quarter of the
+        local context (2026-10-20; was a flat 2000 with a 4096 context)."""
+        limit = core_agent._config.ollama_num_ctx // 4
+        assert core_agent.evaluate_cloud_delegation("Normal query", limit + 500) == "context_overflow"
+        assert core_agent.evaluate_cloud_delegation("Normal query", 2500) is None
 
     def test_build_context_system_prompt(self, core_agent):
         """System prompt should include identity, stance, and activity status."""

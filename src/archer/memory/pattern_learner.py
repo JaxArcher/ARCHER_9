@@ -160,14 +160,19 @@ class PatternLearner:
             user_text=user_text[:2000],
             assistant_text=assistant_text[:1000],
         )
+        from archer.integrations.ollama_settings import main_model_request
+
         resp = httpx.post(
             self._url,
-            json={
+            # Same context size as ARCHER's chat, so Ollama doesn't reload the
+            # model for this background job (2026-10-20).
+            json=main_model_request({
                 "model": self._model,
+                "think": bool(getattr(self._config, "core_think", False)),  # Gemma 4 thinks by default: 15-70 s of hidden reasoning (2026-10-20)
                 "prompt": prompt,
                 "stream": False,
                 "options": {"temperature": 0.1},
-            },
+            }, self._config),
             # Generous but bounded -- this runs after the user already has
             # their response, so it's not user-facing latency, just VRAM/
             # queue time behind it if the same Ollama instance is briefly

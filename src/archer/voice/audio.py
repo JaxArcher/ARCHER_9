@@ -443,7 +443,13 @@ class AudioManager:
             # request (soundcard's own documented caveat) — let it use the
             # device's native channel count; energy is summed across
             # whatever channels come back either way.
-            with loopback_mic.recorder(samplerate=rate, blocksize=block_frames) as rec:
+            # Windows' recording buffer: 0.5 s, not one 20 ms block -- with
+            # only 20 ms, any busy moment lost audio ("data discontinuity",
+            # live 2026-10-20), which broke the acoustic self-echo veto.
+            # Reads stay 20 ms each. Same fix as observer/pc_playback.py.
+            import warnings
+            warnings.filterwarnings("once", message="data discontinuity in recording")
+            with loopback_mic.recorder(samplerate=rate, blocksize=max(block_frames, rate // 2)) as rec:
                 self._loopback_available = True
                 logger.info(f"Loopback capture started on '{speaker_name}' (rate={rate})")
                 while not self._loopback_stop.is_set():
@@ -706,6 +712,16 @@ class AudioManager:
     def is_mic_muted(self) -> bool:
         """Check if microphone capture is muted."""
         return self._mic_muted.is_set()
+
+    def drain_input(self) -> int:
+        """Drop all queued mic audio; returns how many chunks were dropped."""
+        dropped = 0
+        while True:
+            try:
+                self._audio_queue.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                return dropped
 
     def get_audio_chunk(self, timeout: float = 0.1) -> bytes | None:
         """Get the next audio chunk from the capture queue. Returns None on timeout or when muted."""

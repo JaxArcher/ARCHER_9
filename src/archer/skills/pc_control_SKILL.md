@@ -40,12 +40,32 @@ open_url in the same conversation. Errors if no such page exists yet.
 ## Action Tools (Require confirmation)
 
 ### open_url
-Open URL in Playwright-managed Chromium browser. Resolve the url yourself
+Open URL in ARCHER's own browser (Playwright-managed Chromium, mirrored in
+ARCHER's page). This is the default for opening any site. Resolve the url yourself
 from what the user named (e.g. "YouTube" -> "https://youtube.com") -- never
 reuse a placeholder/example URL (like example.com) that appeared earlier in
 the conversation just because it's the only concrete URL around. If the
 user's request doesn't clearly name a site, ask which site instead of
 guessing.
+
+**Parameters:**
+- url: string - URL to open
+
+### play_youtube
+Search YouTube for a song, video or topic and play the first video, in
+ARCHER's own browser (shown in ARCHER's page). Use this for any request to
+play, find or put on something on YouTube, including "search YouTube for X"
+and "play X". Don't use open_url plus clicks for that.
+
+**Parameters:**
+- query: string - What to search for, e.g. "Beyonce Black Parade"
+
+### open_url_in_my_browser
+Open URL in Col's own web browser (his usual browser, with his sign-ins) as a
+separate window. Use this ONLY when Col asks for a separate window, a new
+window, or his own/normal browser; otherwise use open_url. ARCHER cannot see
+or control that window afterwards (browser_screenshot and browser_click don't
+work on it), so tell Col it's open and leave it to him.
 
 **Parameters:**
 - url: string - URL to open

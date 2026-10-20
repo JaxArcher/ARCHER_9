@@ -278,9 +278,33 @@ class PCController:
             from playwright.sync_api import sync_playwright
 
             self._playwright = sync_playwright().start()
+            # ARCHER's browser is shown inside ARCHER's page (the in-page view
+            # mirrors it), so by default its own window opens off-screen
+            # instead of popping up on the desktop (Col, 2026-10-20). It stays
+            # a real window, not a headless browser: Google and YouTube block
+            # headless browsers more often, and video sound still plays.
+            # ARCHER_BROWSER_ON_SCREEN=1 in .env puts it back on the desktop.
+            from archer.config import get_config
+
+            self._browser_off_screen = not getattr(get_config(), "browser_on_screen", False)
+            self._screenshot_failures = 0
+            if not self._browser_off_screen:
+                args = ["--start-maximized"]
+            else:
+                # Windows stops drawing a window it thinks nobody can see,
+                # and an off-screen one counts: the in-page view's
+                # screenshots then timed out (2026-10-20, 16:18). These keep
+                # it drawing; _browser_screenshot_impl moves the window on
+                # screen if it still doesn't.
+                args = [
+                    "--window-position=12000,12000", "--window-size=1600,900",
+                    "--disable-features=CalculateNativeWinOcclusion",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding",
+                ]
             self._browser = self._playwright.chromium.launch(
                 headless=False,
-                args=["--start-maximized"],
+                args=args,
             )
             self._browser_context = self._browser.new_context(
                 viewport=None,  # Use full window size
@@ -339,8 +363,88 @@ class PCController:
         """
         if self._check_halt():
             return {"success": False, "reason": "HALT"}
-        result = self._run_on_pw_thread(self._open_url_impl, url)
+        # The browser's first start takes ~50 s on Col's PC (2026-10-20 log:
+        # the 30 s limit said "failed", the page opened 3 s later, and the
+        # model then answered about something else). Allow 90 s for that.
+        timeout = 30.0 if self._browser is not None else 90.0
+        result = self._run_on_pw_thread(self._open_url_impl, url, timeout=timeout)
         return result if result is not None else {"success": False, "reason": "Playwright call failed/timed out"}
+
+    def play_youtube(self, query: str) -> dict[str, Any]:
+        """
+        Search YouTube for `query` in ARCHER's own browser and play the first
+        video (Col, 2026-10-20: "search for Beyonce Black Parade and play the
+        first video"; the model couldn't string open_url and browser_click
+        together). Reuses the browser's current tab.
+        """
+        if self._check_halt():
+            return {"success": False, "reason": "HALT"}
+        query = " ".join((query or "").split())
+        if not query:
+            return {"success": False, "reason": "Nothing to search for"}
+        timeout = 45.0 if self._browser is not None else 105.0
+        result = self._run_on_pw_thread(self._play_youtube_impl, query, timeout=timeout)
+        return result if result is not None else {"success": False, "reason": "Playwright call failed/timed out"}
+
+    # The first real video in YouTube's results (ads and Shorts use other
+    # elements), then any link to a video, in case YouTube renames things.
+    _YOUTUBE_FIRST_VIDEO = ("ytd-video-renderer a#video-title", "a[href^='/watch?v=']")
+
+    def _play_youtube_impl(self, query: str) -> dict[str, Any]:
+        from urllib.parse import quote_plus
+
+        if not self._ensure_browser():
+            return {"success": False, "reason": "Browser not available"}
+        try:
+            pages = self._browser_context.pages
+            page = pages[-1] if pages else self._browser_context.new_page()
+            page.bring_to_front()
+            page.goto(
+                f"https://www.youtube.com/results?search_query={quote_plus(query)}",
+                wait_until="domcontentloaded", timeout=20000,
+            )
+            first = None
+            for selector, wait_ms in zip(self._YOUTUBE_FIRST_VIDEO, (12000, 5000)):
+                candidate = page.locator(selector).first
+                try:
+                    candidate.wait_for(state="visible", timeout=wait_ms)
+                    first = candidate
+                    break
+                except Exception:
+                    continue
+            if first is None:
+                return {"success": False, "reason": "no videos found in YouTube's results"}
+            title = (first.get_attribute("title") or first.inner_text() or "").strip()
+            first.click()
+            page.wait_for_url("**/watch**", timeout=15000)
+            logger.info(f"Playing on YouTube: '{title}' ({page.url})")
+            return {"success": True, "playing": title, "url": page.url}
+        except Exception as e:
+            logger.error(f"YouTube search/play failed: {e}")
+            return {"success": False, "reason": str(e).splitlines()[0]}
+
+    def open_url_in_my_browser(self, url: str) -> dict[str, Any]:
+        """
+        Open a URL in Col's own default browser, as a separate window (Col,
+        2026-10-20: only when he asks for a separate window). ARCHER can't
+        see or control that window. Only http(s) addresses are opened.
+        """
+        if self._check_halt():
+            return {"success": False, "reason": "HALT"}
+        url = (url or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            if "://" in url or url.lower().startswith(("file:", "javascript:")):
+                return {"success": False, "reason": "Only web (http/https) addresses can be opened."}
+            url = "https://" + url
+        try:
+            import webbrowser
+
+            opened = webbrowser.open(url, new=2)
+        except Exception as e:
+            logger.error(f"Opening in Col's browser failed: {e}")
+            return {"success": False, "reason": str(e)}
+        logger.info(f"Opened in Col's own browser: {url}")
+        return {"success": bool(opened), "url": url, "where": "Col's own browser (ARCHER can't see or control it)"}
 
     def _open_url_impl(self, url: str) -> dict[str, Any]:
         if not self._ensure_browser():
@@ -387,11 +491,37 @@ class PCController:
             # that's 30s of dead air in the middle of a conversation turn.
             # Fail fast instead; the caller already handles a None result.
             screenshot_bytes = page.screenshot(timeout=8000)
+            self._screenshot_failures = 0
             return base64.b64encode(screenshot_bytes).decode("utf-8")
 
         except Exception as e:
             logger.error(f"Browser screenshot failed: {e}")
+            self._screenshot_failures = getattr(self, "_screenshot_failures", 0) + 1
+            if getattr(self, "_browser_off_screen", False) and self._screenshot_failures >= 2:
+                self._move_browser_on_screen()
             return None
+
+    def _move_browser_on_screen(self) -> None:
+        """
+        Bring ARCHER's off-screen browser window onto the screen, so its
+        picture updates again. Used when screenshots keep failing while it's
+        off-screen; it stays on screen until ARCHER restarts.
+        """
+        self._browser_off_screen = False
+        try:
+            page = self._browser_context.pages[-1]
+            cdp = self._browser_context.new_cdp_session(page)
+            window = cdp.send("Browser.getWindowForTarget")
+            cdp.send("Browser.setWindowBounds", {
+                "windowId": window["windowId"],
+                "bounds": {"left": 40, "top": 40, "width": 1600, "height": 900, "windowState": "normal"},
+            })
+            logger.warning(
+                "ARCHER's browser window was moved on screen: its picture stopped updating while it "
+                "was off-screen. Set ARCHER_BROWSER_ON_SCREEN=1 in .env to always start it on screen."
+            )
+        except Exception as e:
+            logger.warning(f"Couldn't move ARCHER's browser window on screen: {type(e).__name__}: {e}")
 
     def browser_click(self, selector: str) -> bool:
         """

@@ -1,24 +1,53 @@
 """
 ARCHER Wake Word Detection.
 
-Configured for 'hey_archer'. Currently uses openWakeWord running all available
-built-in models simultaneously (alexa, hey_jarvis, hey_mycroft, hey_rhasspy)
-pending custom 'hey_archer' model training. Runs on CPU continuously.
+"Hey ARCHER" and "ARCHER" (Claude, 2026-10-20; Col approved the add-on):
+sherpa-onnx's open-vocabulary keyword spotter, a small streaming speech model
+(zipformer, GigaSpeech, ~3.3M parameters, Apache 2.0) that spots any phrase
+without training. Model files live in data/models/kws (int8 encoder, decoder,
+joiner and tokens.txt). In synthetic-voice tests (Piper, 4 voices) "Hey
+ARCHER" was caught 8/8 with no false wakes; bare "ARCHER" 11/12, and it also
+wakes when "archer" is really said (e.g. on TV). Switch the bare word off
+with ARCHER_WAKE_BARE_ARCHER=false.
 
-Wake word detection runs in its own thread, consuming audio from the
-AudioManager queue and publishing WAKE_WORD_DETECTED events.
+openWakeWord's stock "Hey Jarvis" stays as a backup (ARCHER_WAKE_STOCK_MODELS;
+"Alexa", "Hey Mycroft" and "Hey Rhasspy" are no longer loaded by default).
+
+Runs on CPU continuously. process_audio() is fed every 30 ms chunk by the
+voice pipeline and publishes WAKE_WORD_DETECTED events.
 """
 
 from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 from loguru import logger
 
 from archer.config import get_config
 from archer.core.event_bus import Event, EventType, get_event_bus
+
+KWS_MODEL_DIR = Path(__file__).resolve().parents[3] / "data" / "models" / "kws"
+_KWS_FILES = {
+    "tokens": "tokens.txt",
+    "encoder": "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+    "decoder": "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+    "joiner": "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+}
+# The phrases as the model's sub-word pieces (sherpa_onnx.text2token with the
+# model's bpe.model, 2026-10-20), so no tokenizer is needed at run time.
+_KWS_HEY_ARCHER = "\u2581HE Y \u2581A R CH ER @HEY_ARCHER"
+_KWS_ARCHER = "\u2581A R CH ER @ARCHER"
+# Heard within this long after ARCHER's own audio stopped, the name is ARCHER
+# hearing itself ("ARCHER online"), not Col.
+_OWN_AUDIO_GRACE_S = 1.5
+
+
+def kws_keywords(bare_archer: bool) -> list[str]:
+    """Keyword lines for the spotter: "Hey ARCHER", plus bare "ARCHER" if enabled."""
+    return [_KWS_HEY_ARCHER] + ([_KWS_ARCHER] if bare_archer else [])
 
 
 class WakeWordDetector:
@@ -35,32 +64,60 @@ class WakeWordDetector:
         self._threshold = self._config.wake_word_threshold
         self._running = threading.Event()
         self._model = None
+        self._kws = None
+        self._kws_stream = None
+        self._own_audio_at = 0.0  # last time ARCHER itself was playing audio
 
     def initialize(self) -> None:
-        """Load the wake word model. Must be called before start()."""
+        """Load the wake word models. Must be called before start()."""
+        self._init_kws()
+        stock = [m.strip() for m in str(getattr(self._config, "wake_stock_models", "hey_jarvis")).split(",") if m.strip()]
+        if stock:
+            try:
+                import openwakeword
+                from openwakeword.model import Model
+
+                # Download default models if not present
+                openwakeword.utils.download_models()
+                self._model = Model(wakeword_models=stock, inference_framework="onnx")
+                logger.info(f"Backup wake words (openWakeWord): {stock}.")
+            except Exception as e:
+                logger.error(f"Failed to initialize openWakeWord: {e}")
+                if self._kws is None:
+                    raise
+        if self._kws is None and self._model is None:
+            raise RuntimeError("No wake word detector could be loaded.")
+
+    def _init_kws(self) -> None:
+        """Load the "Hey ARCHER" keyword spotter; best-effort (the backup words still work)."""
         try:
-            import openwakeword
-            from openwakeword.model import Model
+            import sherpa_onnx
 
-            # Download default models if not present
-            openwakeword.utils.download_models()
-
-            # Run ALL available built-in models simultaneously.
-            # Since there's no "hey_archer" model, any of these phrases will
-            # trigger ARCHER: "Alexa", "Hey Jarvis", "Hey Mycroft", "Hey Rhasspy".
-            _all_models = ["alexa", "hey_jarvis", "hey_mycroft", "hey_rhasspy"]
-
-            self._model = Model(
-                wakeword_models=_all_models,
-                inference_framework="onnx",
+            files = {k: KWS_MODEL_DIR / v for k, v in _KWS_FILES.items()}
+            missing = [str(p.name) for p in files.values() if not p.exists()]
+            if missing:
+                logger.warning(f"'Hey ARCHER' unavailable: model files missing in {KWS_MODEL_DIR} ({missing}).")
+                return
+            bare = bool(getattr(self._config, "wake_bare_archer", True))
+            keywords_file = KWS_MODEL_DIR / "archer_keywords.txt"
+            keywords_file.write_text("\n".join(kws_keywords(bare)) + "\n", encoding="utf-8")
+            self._kws = sherpa_onnx.KeywordSpotter(
+                tokens=str(files["tokens"]),
+                encoder=str(files["encoder"]),
+                decoder=str(files["decoder"]),
+                joiner=str(files["joiner"]),
+                keywords_file=str(keywords_file),
+                num_threads=1,
+                keywords_threshold=float(getattr(self._config, "wake_kws_threshold", 0.25)),
+                keywords_score=1.0,
             )
-            logger.info(
-                f"Wake word models loaded: {_all_models}. "
-                "Say 'Alexa', 'Hey Jarvis', 'Hey Mycroft', or 'Hey Rhasspy' to wake ARCHER."
-            )
+            self._kws_stream = self._kws.create_stream()
+            words = "'Hey ARCHER'" + (" and 'ARCHER'" if bare else "")
+            logger.info(f"Wake words: {words} (sherpa-onnx keyword spotter).")
         except Exception as e:
-            logger.error(f"Failed to initialize wake word detector: {e}")
-            raise
+            self._kws = None
+            self._kws_stream = None
+            logger.warning(f"'Hey ARCHER' unavailable ({type(e).__name__}: {e}); backup wake words only.")
 
     def process_audio(self, audio_chunk: bytes) -> bool:
         """
@@ -72,15 +129,18 @@ class WakeWordDetector:
         Returns:
             True if wake word was detected above threshold.
         """
-        if self._model is None:
+        if self._model is None and self._kws is None:
             return False
 
-        from archer.voice.audio import AudioManager
-        # Bypass wake word processing if mic is muted
+        # Bypass wake word processing if mic is muted; note when ARCHER itself
+        # is playing audio (its own "ARCHER online" mustn't wake it).
         try:
             from archer.voice import get_audio_manager
-            if get_audio_manager().is_mic_muted():
+            manager = get_audio_manager()
+            if manager.is_mic_muted():
                 return False
+            if manager.is_playing:
+                self._own_audio_at = time.monotonic()
         except Exception:
             pass
 
@@ -105,6 +165,11 @@ class WakeWordDetector:
         # frames with nothing since to refresh or clear it. Feeding every
         # chunk (silence included) is the model's normal, designed usage
         # -- it has its own internal smoothing and doesn't need this gate.
+        if self._kws is not None and self._spot_archer(audio_array):
+            return True
+        if self._model is None:
+            return False
+
         self._model.predict(audio_array)
 
         # Check all wake word scores
@@ -126,7 +191,35 @@ class WakeWordDetector:
 
         return False
 
+    def _spot_archer(self, audio_array: np.ndarray) -> bool:
+        """Feed the keyword spotter; publish and return True when "Hey ARCHER" / "ARCHER" is heard."""
+        stream = self._kws_stream
+        stream.accept_waveform(16000, audio_array.astype(np.float32) / 32768.0)
+        while self._kws.is_ready(stream):
+            self._kws.decode_stream(stream)
+            keyword = self._kws.get_result(stream)
+            if keyword:
+                # A fresh stream rather than reset_stream(): resetting a
+                # stream mid-way cost about a third of detections in tests.
+                self._kws_stream = self._kws.create_stream()
+                name = str(keyword).lower()
+                if time.monotonic() - self._own_audio_at < _OWN_AUDIO_GRACE_S:
+                    logger.debug(f"Wake word '{name}' ignored: ARCHER itself was speaking.")
+                    return False
+                if self._model is not None:
+                    self._model.reset()
+                logger.info(f"Wake word detected! (model={name}, sherpa-onnx)")
+                self._bus.publish(Event(
+                    type=EventType.WAKE_WORD_DETECTED,
+                    source="wake_word",
+                    data={"model": name, "confidence": 1.0},
+                ))
+                return True
+        return False
+
     def reset(self) -> None:
         """Reset the wake word detection buffer."""
         if self._model is not None:
             self._model.reset()
+        if self._kws is not None:
+            self._kws_stream = self._kws.create_stream()

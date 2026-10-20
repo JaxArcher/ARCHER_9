@@ -120,14 +120,19 @@ def _run_pass() -> None:
     prompt = _PROMPT.format(hours=lookback_hours, observations="\n".join(lines))
 
     try:
+        from archer.integrations.ollama_settings import main_model_request
+
         resp = httpx.post(
             f"{config.ollama_base_url}/api/generate",
-            json={
+            # Same context size as ARCHER's chat, so Ollama doesn't reload the
+            # model for this background job (2026-10-20).
+            json=main_model_request({
                 "model": config.core_primary_model,
+                "think": bool(getattr(config, "core_think", False)),  # Gemma 4 thinks by default: 15-70 s of hidden reasoning (2026-10-20)
                 "prompt": prompt,
                 "stream": False,
                 "options": {"temperature": 0.2},
-            },
+            }, config),
             # This can be a genuinely long prompt (hours of observations) --
             # generous timeout, off any user-facing critical path anyway.
             timeout=120.0,

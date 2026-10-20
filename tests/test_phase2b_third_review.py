@@ -72,7 +72,8 @@ class TestPhase2bThirdReview:
             assert classified_name.get("name") is None
 
     def test_item3_classify_uses_num_ctx_4096(self, agent_with_store):
-        """Item 3: Reply reader must use num_ctx: 4096 matching chat to prevent model reloading."""
+        """Item 3: Reply reader must use the same num_ctx as the chat to prevent model reloading.
+        (2026-10-20: the shared size is config.ollama_num_ctx, no longer 4096.)"""
         with patch("httpx.post") as mock_post:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
@@ -84,7 +85,8 @@ class TestPhase2bThirdReview:
             call_kwargs = mock_post.call_args[1]
             payload = call_kwargs.get("json", {})
             options = payload.get("options", {})
-            assert options.get("num_ctx") == 4096
+            assert options.get("num_ctx") == agent_with_store._config.ollama_num_ctx
+            assert payload.get("keep_alive") == agent_with_store._config.ollama_keep_alive
             assert options.get("num_predict") == 1024
 
     def test_item4_correction_undoes_previous_name_save(self, agent_with_store, temp_store):

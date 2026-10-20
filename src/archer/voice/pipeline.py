@@ -41,6 +41,26 @@ from archer.voice.halt import HaltListener
 from archer.voice.auth import VoiceAuthenticator
 
 
+
+# How long one of ARCHER's own short lines (a filler, an announcement) stays
+# something the mic may be hearing back (VoicePipeline._recent_own_lines).
+_OWN_LINE_SECONDS = 90.0
+
+
+def _mostly_in_order(snippet: list[str], spoken: list[str], min_words: int = 4, share: float = 0.6) -> bool:
+    """
+    True when at least `min_words` of the snippet's words, and `share` of
+    them, appear in `spoken` in the same order (difflib's matching blocks):
+    a partial, slightly garbled echo of what ARCHER is saying.
+    """
+    if len(snippet) < min_words or not spoken:
+        return False
+    import difflib
+
+    matcher = difflib.SequenceMatcher(None, snippet, spoken, autojunk=False)
+    matched = sum(block.size for block in matcher.get_matching_blocks())
+    return matched >= min_words and matched / len(snippet) >= share
+
 class VoicePipelineState:
     """Tracks the current state of the voice pipeline."""
     IDLE = "idle"
@@ -134,6 +154,12 @@ class VoicePipeline:
         # snippets to reject self-hearing.
         self._current_speaking_text: str = ""
         self._last_spoken_text: str = ""
+        # ARCHER's own recent short lines (fillers, including the model-made
+        # contextual ones, and announcements) with when they were said. Also
+        # compared against what the mic hears: a contextual filler isn't in
+        # the fixed filler list, and its echo cut three of four answers off
+        # on 2026-10-20 ("analyzing the visual input now").
+        self._recent_own_lines: collections.deque[tuple[float, str]] = collections.deque(maxlen=6)
 
         # Audio collection buffer (for collecting speech frames)
         self._speech_buffer: list[bytes] = []
@@ -141,6 +167,11 @@ class VoicePipeline:
         # Rolling buffer discarded on wake word detection (prevents wake word
         # phrase from leaking into the speech buffer and triggering early STT).
         self._pre_buffer: collections.deque[bytes] = collections.deque(maxlen=33)
+        # The last ~0.45 s heard while listening, before speech started. The
+        # VAD needs several voiced frames before it says "speech", so the
+        # utterance starts with these; without them the first syllable was
+        # lost ("pen YouTube", "up in YouTube", 2026-10-20).
+        self._listen_preroll: collections.deque[bytes] = collections.deque(maxlen=15)
         self._heard_speech: bool = False
         self._silence_frames: int = 0
         self._listen_start: float = 0.0
@@ -223,6 +254,12 @@ class VoicePipeline:
             self._auth.initialize()
         except Exception as e:
             logger.warning(f"Voice auth initialization failed (non-fatal): {e}")
+
+        # Load the speech model and run it once now, in the background, so
+        # the first question doesn't wait for it (49 s on 2026-10-20).
+        warm_up = getattr(self._stt, "warm_up", None)
+        if callable(warm_up):
+            threading.Thread(target=warm_up, daemon=True, name="STTWarmUp").start()
 
         logger.info("Voice pipeline initialized.")
 
@@ -307,6 +344,7 @@ class VoicePipeline:
                         self._silence_frames = 0    # Consecutive silent frames after speech
                         self._listen_start = time.monotonic()
                         self._pre_buffer.clear()    # Discard wake word audio
+                        self._listen_preroll.clear()
                         logger.info("🎤 Wake word detected — listening...")
                         self._play_wake_ack()
 
@@ -323,6 +361,7 @@ class VoicePipeline:
                             self._play_wake_ack()
                             self._vad.reset()
                             self._speech_buffer.clear()
+                            self._listen_preroll.clear()
                             self._heard_speech = False
                             self._silence_frames = 0
                             self._listen_start = time.monotonic()
@@ -364,6 +403,7 @@ class VoicePipeline:
                     # the only thing making noise.
                     if self._wake_ack_playing.is_set() or self._audio.is_playing:
                         self._listen_start = time.monotonic()
+                        self._listen_preroll.clear()  # never ARCHER's own audio
                         continue
 
                     # Collect ALL audio while listening (speech + pauses).
@@ -373,10 +413,18 @@ class VoicePipeline:
 
                     # Use the RAW per-frame result to track speech/silence.
                     if is_speech:
+                        if not self._heard_speech:
+                            # Start with the moments before the VAD noticed
+                            # speech (see _listen_preroll).
+                            self._speech_buffer.extend(self._listen_preroll)
+                            self._listen_preroll.clear()
                         self._heard_speech = True
                         self._silence_frames = 0
                     elif self._heard_speech:
                         self._silence_frames += 1
+
+                    if not self._heard_speech:
+                        self._listen_preroll.append(audio_chunk)
 
                     if self._heard_speech:
                         # Always buffer audio once speech has started
@@ -767,6 +815,7 @@ class VoicePipeline:
             filler_text = contextual_filler.get("text") or self._tts.get_filler_text()
             is_contextual = "text" in contextual_filler
             logger.info(f"Playing filler ({'contextual' if is_contextual else 'generic'}): '{filler_text}'")
+            self._remember_own_line(filler_text)
 
             self._bus.publish(Event(
                 type=EventType.FILLER_PLAY,
@@ -844,6 +893,21 @@ class VoicePipeline:
         # The text-input path (_call_agent_with_filler) already runs on its
         # own thread via _on_text_input, so this brings voice-triggered
         # responses in line with it.
+        # Drop the mic audio queued while this thread was busy (transcribing,
+        # waiting for the reply, playing the filler). It's mostly ARCHER's
+        # own filler: the barge-in check below read it as Col talking and
+        # cut the answer off (2026-10-20: "What time is it?", "Open
+        # YouTube" and "What do you see?" were all shown but not spoken).
+        drain = getattr(self._audio, "drain_input", None)
+        if callable(drain):
+            dropped = drain()
+            if dropped:
+                logger.debug(f"Dropped {dropped} queued mic chunks heard before the answer started.")
+        self._barge_check_buffer.clear()
+        self._barge_check_heard_speech = False
+        self._barge_check_silence_frames = 0
+        self._vad.reset()
+
         threading.Thread(
             target=self._speak_response_streaming,
             args=(sentence_stream(),),
@@ -851,6 +915,11 @@ class VoicePipeline:
             daemon=True,
             name="SpeakResponse",
         ).start()
+
+    def _remember_own_line(self, text: str) -> None:
+        """Note a short line ARCHER is about to say (filler, announcement) for _is_self_echo."""
+        if text:
+            self._recent_own_lines.append((time.monotonic(), text))
 
     def _is_self_echo(self, text: str, include_recent_response: bool = True) -> bool:
         """
@@ -896,7 +965,9 @@ class VoicePipeline:
         if not snippet_words:
             return True  # nothing meaningful transcribed — don't act on it
 
-        candidates = list(FILLER_PHRASES) + list(WAKE_ACK_PHRASES)
+        cutoff = time.monotonic() - _OWN_LINE_SECONDS
+        own_lines = [line for t, line in list(getattr(self, "_recent_own_lines", ())) if t >= cutoff]
+        candidates = own_lines + list(FILLER_PHRASES) + list(WAKE_ACK_PHRASES)
         if include_recent_response:
             candidates = [self._current_speaking_text, self._last_spoken_text] + candidates
 
@@ -923,6 +994,26 @@ class VoicePipeline:
             overlap = len(snippet_words & candidate_words)
             if (overlap / len(snippet_words) >= 0.6
                     and overlap / len(candidate_words) >= 0.6):
+                return True
+
+        # 2026-10-20 (Claude): a barge-in snippet is usually only PART of
+        # what ARCHER is saying, and the transcriber garbles a word or two
+        # ("brown sofa" -> "ground so"), so neither rule above caught it
+        # live: ARCHER cut itself off twice and once answered its own words
+        # ("specific information."). Against ARCHER's OWN current/last
+        # response, it's an echo when most of the snippet's words (at least
+        # 4) appear in ARCHER's text in the same order. Short interruptions
+        # ("stop", "hold on", "wait, no") stay genuine.
+        if include_recent_response:
+            for own in (self._current_speaking_text, self._last_spoken_text):
+                if own and _mostly_in_order(snippet_seq, _seq(own)):
+                    return True
+        # The same for ARCHER's recent fillers and announcements, garbled the
+        # same way ("taking the current time through now" for "Checking the
+        # current time for you now", 2026-10-20). They're never questions,
+        # so this is safe on the listening path too.
+        for own in own_lines:
+            if _mostly_in_order(snippet_seq, _seq(own)):
                 return True
 
         return False
@@ -1087,6 +1178,7 @@ class VoicePipeline:
         if first is None:
             filler_text = self._tts.get_filler_text()
             logger.info(f"Playing filler: '{filler_text}'")
+            self._remember_own_line(filler_text)
 
             self._bus.publish(Event(
                 type=EventType.FILLER_PLAY,
@@ -1141,10 +1233,15 @@ class VoicePipeline:
         static bank rather than leaving the user in silence.
         """
         try:
+            from archer.integrations.ollama_settings import main_model_request
+
             resp = httpx.post(
                 f"{self._config.ollama_base_url}/api/chat",
-                json={
+                # Same context size as ARCHER's main chat, or Ollama reloads
+                # the model between the two (~13 s each way, 2026-10-20).
+                json=main_model_request({
                     "model": self._config.core_primary_model,
+                    "think": bool(getattr(self._config, "core_think", False)),  # Gemma 4 thinks by default: 15-70 s of hidden reasoning (2026-10-20)
                     "messages": [
                         {
                             "role": "system",
@@ -1161,7 +1258,7 @@ class VoicePipeline:
                     ],
                     "stream": False,
                     "options": {"num_predict": 24},
-                },
+                }, self._config),
                 timeout=2.5,
             )
             if resp.status_code != 200:
@@ -1224,6 +1321,8 @@ class VoicePipeline:
         page like the wake acknowledgement, honours the speaker mute, and is
         logged as ARCHER's speech so the room listener marks it as ARCHER's.
         """
+        self._remember_own_line(text)
+
         def _speak():
             try:
                 self._bus.publish(Event(

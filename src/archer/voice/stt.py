@@ -97,6 +97,26 @@ class LocalSTT(STTBackend):
                     logger.info(f"Faster-Whisper model loaded: {self._config.stt_model}")
         return self._whisper
 
+    def warm_up(self) -> None:
+        """
+        Load Whisper and run it once on a second of faint noise, so the first
+        real question doesn't wait for the model to load and the GPU's
+        first-use setup. On 2026-10-20 Col's first question took 49 s to
+        transcribe, and every later one under a second. Best-effort.
+        """
+        try:
+            start = time.monotonic()
+            model = self._get_whisper_model()
+            noise = (np.random.default_rng(0).standard_normal(16000) * 0.003).astype(np.float32)
+            segments, _info = model.transcribe(
+                noise, beam_size=5, language="en", vad_filter=False,
+                temperature=0.0, condition_on_previous_text=False,
+            )
+            list(segments)
+            logger.info(f"Faster-Whisper warmed up in {time.monotonic() - start:.1f} s.")
+        except Exception as e:
+            logger.warning(f"Faster-Whisper warm-up failed (non-fatal): {type(e).__name__}: {e}")
+
     def transcribe(self, audio_data: bytes, sample_rate: int = 16000) -> str:
         """Transcribe using selected provider (Whisper or Parakeet)."""
         if getattr(self._config, "stt_provider", "whisper") == "parakeet" and self._parakeet.is_available():
@@ -184,6 +204,10 @@ class STTService:
     def __init__(self) -> None:
         self._local = LocalSTT()
         self._bus = get_event_bus()
+
+    def warm_up(self) -> None:
+        """Load the speech model and run it once (see LocalSTT.warm_up)."""
+        self._local.warm_up()
 
     def transcribe(
         self, audio_data: bytes, sample_rate: int = 16000, publish_event: bool = True

@@ -204,6 +204,14 @@ class ArcherConfig(BaseSettings):
     # room (or the observer started): the people detector misses Col lying
     # still on the couch (2026-10-20).
     room_linger_minutes: float = Field(default=120.0, alias="ARCHER_ROOM_LINGER_MINUTES")
+
+    # --- Wake words (2026-10-20) ---
+    # "Hey ARCHER" via sherpa-onnx's keyword spotter (voice/wake_word.py).
+    # Bare "ARCHER" too unless switched off (it also wakes when "archer" is
+    # really said, e.g. on TV). Stock openWakeWord backups, comma-separated.
+    wake_bare_archer: bool = Field(default=True, alias="ARCHER_WAKE_BARE_ARCHER")
+    wake_kws_threshold: float = Field(default=0.25, alias="ARCHER_WAKE_KWS_THRESHOLD")
+    wake_stock_models: str = Field(default="hey_jarvis", alias="ARCHER_WAKE_STOCK_MODELS")
     # TV check (2026-10-20): videos play from the PC, so a room line that
     # would be kept but repeats the PC's words (this share of its words or
     # more, common words aside) is the TV and isn't saved. From the TV test
@@ -266,6 +274,24 @@ class ArcherConfig(BaseSettings):
     core_primary_model: str = Field(
         default="gemma4:e4b-it-qat", alias="ARCHER_CORE_PRIMARY_MODEL"
     )
+    # Gemma 4 "thinks" (hidden reasoning) before answering unless told not
+    # to: 27-84 s before ARCHER's first words on 2026-10-20. Off by default;
+    # sent as Ollama's "think" on every call to the primary model.
+    core_think: bool = Field(default=False, alias="ARCHER_MODEL_THINKING")
+    # One context size for every request to the main Ollama instance
+    # (integrations/ollama_settings.py). Ollama reloads the model (~13 s on
+    # Col's PC) whenever a request asks for a different size than the one
+    # it's loaded with, and keeps a prompt to about half of it: at 4096 it
+    # cut ARCHER's ~4,700-token prompt to its last 2,051 tokens (Ollama's
+    # log, 2026-10-20).
+    ollama_num_ctx: int = Field(default=32768, alias="ARCHER_OLLAMA_NUM_CTX")
+    # How long Ollama keeps the main model loaded after ARCHER's last
+    # request. Ollama's own default is 5 minutes, after which the next
+    # question waits for a reload.
+    ollama_keep_alive: str = Field(default="60m", alias="ARCHER_OLLAMA_KEEP_ALIVE")
+    # ARCHER's own browser (tools/pc_control.py) opens its window off-screen
+    # and is seen through ARCHER's page; true puts the window on the desktop.
+    browser_on_screen: bool = Field(default=False, alias="ARCHER_BROWSER_ON_SCREEN")
 
     # --- Nightly Maintenance (2026-09-16) ---
     # memory/maintenance.py's run_maintenance() (daily consolidation +

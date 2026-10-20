@@ -24,6 +24,20 @@ from pathlib import Path
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+# Faster-Whisper's GPU library (CTranslate2 4.8.1) carries no code built for
+# the RTX 5080, so the NVIDIA driver compiles it on first use: 49-62 s on
+# 2026-10-20, while ARCHER's other GPU work (Kokoro's voice) waited too. The
+# driver keeps compiled code in a shared 256 MB cache that other programs can
+# push it out of. ARCHER gets its own, larger cache, so it's compiled once.
+# Set before anything starts CUDA in this process.
+_CUDA_CACHE = Path(__file__).resolve().parents[2] / "data" / "cuda_cache"
+try:
+    _CUDA_CACHE.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("CUDA_CACHE_PATH", str(_CUDA_CACHE))
+    os.environ.setdefault("CUDA_CACHE_MAXSIZE", str(4 * 1024 ** 3))  # the driver's maximum
+except OSError:
+    pass
+
 from dotenv import load_dotenv
 from loguru import logger
 

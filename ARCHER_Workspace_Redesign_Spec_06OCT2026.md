@@ -1141,6 +1141,7 @@ May be added to ARCHER's own `.venv` / `web/vendor/` without asking again:
 | `pypdf`, `PyMuPDF`, `pdfplumber`, `ReportLab`, `OCRmyPDF` | 5 | PDF starter set — into a separate document-tools environment, not `.venv` |
 | One person-detector model file, permissively licensed (e.g. SSD-MobileNet via OpenCV, or YOLOX-Nano via onnxruntime; not Ultralytics/AGPL). Pinned source and checksum, recorded in the worklog. Approved by Col 2026-10-12. | 2b | Following people on the room camera |
 | Roboflow `trackers` (ByteTrack; Apache 2.0) and its `supervision` dependency, pinned version. Replaces the hand-written track matching. Approved by Col 2026-10-12. | 2b | Following people on the room camera |
+| `sherpa-onnx` 1.13.8 (+ `sherpa-onnx-core`; Apache 2.0) and its GigaSpeech keyword-spotting model (`sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01`, int8 files, Apache 2.0) in `data/models/kws`. Approved by Col 2026-10-20. | Next stage | "Hey ARCHER" / "ARCHER" wake words |
 
 Everything else — including LibreOffice, Tesseract, Ghostscript and the
 virtual display driver — needs Col's explicit approval (git-repo tools go
