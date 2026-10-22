@@ -304,6 +304,60 @@ async def uninstall_tool_endpoint(data: dict):
     return res
 
 
+# --- Phase 7 Chromium inside the pane (Spec Section 10) ---
+
+@app.get("/api/browser/state")
+async def get_browser_state_endpoint():
+    """Return browser status, tabs, title, and current URL (Spec Section 10)."""
+    from archer.tools.pc_control import get_pc_controller
+    return get_pc_controller().get_browser_status()
+
+
+@app.post("/api/browser/navigate")
+async def browser_navigate_endpoint(data: dict):
+    """Navigate browser to URL."""
+    from archer.tools.pc_control import get_pc_controller
+    url = data.get("url", "")
+    res = await asyncio.to_thread(get_pc_controller().browser_navigate, url)
+    return res
+
+
+@app.post("/api/browser/tab/new")
+async def browser_new_tab_endpoint(data: dict):
+    """Open new browser tab."""
+    from archer.tools.pc_control import get_pc_controller
+    url = data.get("url", "about:blank")
+    res = await asyncio.to_thread(get_pc_controller().browser_new_tab, url)
+    return res
+
+
+@app.post("/api/browser/tab/switch")
+async def browser_switch_tab_endpoint(data: dict):
+    """Switch active browser tab."""
+    from archer.tools.pc_control import get_pc_controller
+    idx = int(data.get("index", 0))
+    res = await asyncio.to_thread(get_pc_controller().browser_switch_tab, idx)
+    return res
+
+
+@app.post("/api/browser/tab/close")
+async def browser_close_tab_endpoint(data: dict):
+    """Close browser tab."""
+    from archer.tools.pc_control import get_pc_controller
+    idx = int(data.get("index", 0))
+    res = await asyncio.to_thread(get_pc_controller().browser_close_tab, idx)
+    return res
+
+
+@app.post("/api/browser/restart")
+async def browser_restart_endpoint():
+    """Restart browser context."""
+    from archer.tools.pc_control import get_pc_controller
+    ok = await asyncio.to_thread(get_pc_controller().restart_browser)
+    return {"success": ok}
+
+
+
 @app.get("/mobile/health")
 async def health_check():
     """Detailed health check - no authentication required."""
@@ -611,6 +665,25 @@ def _register_event_bridge() -> None:
         term_mgr.set_broadcast_callback(_broadcast_term_output)
     except Exception as e:
         logger.debug(f"Failed to wire terminal broadcast callback: {e}")
+
+    try:
+        from archer.tools.pc_control import get_pc_controller
+        pc = get_pc_controller()
+
+        def _broadcast_browser_frame(data_b64: str, metadata: dict, session_id: int) -> None:
+            if _ws_clients and _ws_loop is not None and _ws_loop.is_running():
+                msg = {
+                    "type": "browser_screencast_frame",
+                    "data": data_b64,
+                    "metadata": metadata,
+                    "sessionId": session_id,
+                }
+                _ws_loop.call_soon_threadsafe(_broadcast_ws, msg)
+
+        pc.register_screencast_callback(_broadcast_browser_frame)
+    except Exception as e:
+        logger.debug(f"Failed to wire browser screencast callback: {e}")
+
 
 
 _register_event_bridge()
@@ -1468,6 +1541,93 @@ async def ws_voice(websocket: WebSocket):
                     agent.primary_model = model
                     logger.info(f"Local 'brain' model switched to '{model}' from browser SYSTEM tab.")
                     _broadcast_ws(await _build_system_snapshot())
+            elif msg_type == "browser_start":
+                from archer.tools.pc_control import get_pc_controller
+                pc = get_pc_controller()
+                await asyncio.to_thread(pc.start_screencast)
+                status = pc.get_browser_status()
+                await _ws_send_safe(websocket, json.dumps({
+                    "type": "browser_state",
+                    **status,
+                }))
+            elif msg_type == "browser_get_state":
+                from archer.tools.pc_control import get_pc_controller
+                status = get_pc_controller().get_browser_status()
+                await _ws_send_safe(websocket, json.dumps({
+                    "type": "browser_state",
+                    **status,
+                }))
+            elif msg_type == "browser_navigate":
+                url = msg.get("url", "")
+                from archer.tools.pc_control import get_pc_controller
+                pc = get_pc_controller()
+                await asyncio.to_thread(pc.browser_navigate, url)
+                _broadcast_ws({"type": "browser_state", **pc.get_browser_status()})
+            elif msg_type == "browser_back":
+                from archer.tools.pc_control import get_pc_controller
+                pc = get_pc_controller()
+                await asyncio.to_thread(pc.browser_back)
+                _broadcast_ws({"type": "browser_state", **pc.get_browser_status()})
+            elif msg_type == "browser_forward":
+                from archer.tools.pc_control import get_pc_controller
+                pc = get_pc_controller()
+                await asyncio.to_thread(pc.browser_forward)
+                _broadcast_ws({"type": "browser_state", **pc.get_browser_status()})
+            elif msg_type == "browser_reload":
+                from archer.tools.pc_control import get_pc_controller
+                pc = get_pc_controller()
+                await asyncio.to_thread(pc.browser_reload)
+                _broadcast_ws({"type": "browser_state", **pc.get_browser_status()})
+            elif msg_type == "browser_new_tab":
+                url = msg.get("url", "about:blank")
+                from archer.tools.pc_control import get_pc_controller
+                pc = get_pc_controller()
+                await asyncio.to_thread(pc.browser_new_tab, url)
+                _broadcast_ws({"type": "browser_state", **pc.get_browser_status()})
+            elif msg_type == "browser_switch_tab":
+                idx = int(msg.get("index", 0))
+                from archer.tools.pc_control import get_pc_controller
+                pc = get_pc_controller()
+                await asyncio.to_thread(pc.browser_switch_tab, idx)
+                _broadcast_ws({"type": "browser_state", **pc.get_browser_status()})
+            elif msg_type == "browser_close_tab":
+                idx = int(msg.get("index", 0))
+                from archer.tools.pc_control import get_pc_controller
+                pc = get_pc_controller()
+                await asyncio.to_thread(pc.browser_close_tab, idx)
+                _broadcast_ws({"type": "browser_state", **pc.get_browser_status()})
+            elif msg_type == "browser_mouse_event":
+                from archer.tools.pc_control import get_pc_controller
+                get_pc_controller().dispatch_mouse_event(
+                    event_type=msg.get("eventType", "mousePressed"),
+                    x=int(msg.get("x", 0)),
+                    y=int(msg.get("y", 0)),
+                    button=msg.get("button", "left"),
+                    click_count=int(msg.get("clickCount", 1)),
+                    delta_x=float(msg.get("deltaX", 0.0)),
+                    delta_y=float(msg.get("deltaY", 0.0)),
+                )
+            elif msg_type == "browser_key_event":
+                from archer.tools.pc_control import get_pc_controller
+                get_pc_controller().dispatch_key_event(
+                    event_type=msg.get("eventType", "rawKeyDown"),
+                    key=msg.get("key", ""),
+                    code=msg.get("code", ""),
+                    text=msg.get("text", ""),
+                    windows_virtual_key_code=int(msg.get("windowsVirtualKeyCode", 0)),
+                )
+            elif msg_type == "browser_insert_text":
+                from archer.tools.pc_control import get_pc_controller
+                get_pc_controller().insert_text(msg.get("text", ""))
+            elif msg_type == "browser_screencast_visibility":
+                vis = bool(msg.get("visible", True))
+                from archer.tools.pc_control import get_pc_controller
+                get_pc_controller().set_screencast_visible(vis)
+            elif msg_type == "browser_restart":
+                from archer.tools.pc_control import get_pc_controller
+                pc = get_pc_controller()
+                await asyncio.to_thread(pc.restart_browser)
+                _broadcast_ws({"type": "browser_state", **pc.get_browser_status()})
             elif msg_type == "browser_get_screenshot":
                 # Mirrors the SAME Playwright browser ARCHER's own
                 # browser-control tools already drive (tools/pc_control.py)

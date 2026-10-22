@@ -58,6 +58,8 @@ const ArcherClient = (() => {
     toolsRegistryList: [],
     toolsProposeResult: [],
     toolsUninstallResult: [],
+    browserScreencastFrame: [],
+    browserState: [],
     connected: [],
     disconnected: [],
   };
@@ -279,6 +281,12 @@ const ArcherClient = (() => {
         break;
       case "tools_uninstall_result":
         emit("toolsUninstallResult", msg.result || {});
+        break;
+      case "browser_screencast_frame":
+        emit("browserScreencastFrame", msg);
+        break;
+      case "browser_state":
+        emit("browserState", msg);
         break;
       default:
         console.warn("[ArcherClient] unknown message type:", msg.type);
@@ -502,6 +510,48 @@ const ArcherClient = (() => {
     },
     sendToolsUninstall(name) {
       send({ type: "tools_uninstall", name });
+    },
+    sendBrowserStart() {
+      send({ type: "browser_start" });
+    },
+    sendBrowserGetState() {
+      send({ type: "browser_get_state" });
+    },
+    sendBrowserNavigate(url) {
+      send({ type: "browser_navigate", url });
+    },
+    sendBrowserBack() {
+      send({ type: "browser_back" });
+    },
+    sendBrowserForward() {
+      send({ type: "browser_forward" });
+    },
+    sendBrowserReload() {
+      send({ type: "browser_reload" });
+    },
+    sendBrowserNewTab(url) {
+      send({ type: "browser_new_tab", url: url || "about:blank" });
+    },
+    sendBrowserSwitchTab(index) {
+      send({ type: "browser_switch_tab", index });
+    },
+    sendBrowserCloseTab(index) {
+      send({ type: "browser_close_tab", index });
+    },
+    sendBrowserMouseEvent(payload) {
+      send({ type: "browser_mouse_event", ...payload });
+    },
+    sendBrowserKeyEvent(payload) {
+      send({ type: "browser_key_event", ...payload });
+    },
+    sendBrowserInsertText(text) {
+      send({ type: "browser_insert_text", text });
+    },
+    sendBrowserScreencastVisibility(visible) {
+      send({ type: "browser_screencast_visibility", visible });
+    },
+    sendBrowserRestart() {
+      send({ type: "browser_restart" });
     },
     connect,
   };

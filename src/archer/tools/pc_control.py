@@ -5,13 +5,13 @@ Provides desktop automation tools for the Assistant agent:
 - Mouse and keyboard control via pyautogui
 - Window management via pygetwindow
 - Screen capture via mss
-- Browser automation via Playwright
+- Browser automation via Playwright Chromium in the workspace pane (Phase 7, Spec Section 10)
 
 CRITICAL SAFETY RULES:
 1. All non-read-only actions require user confirmation before execution.
 2. HALT immediately cancels all queued actions and active automation.
 3. Screen capture (read-only) does NOT require confirmation.
-4. The Agent describes the intended action and waits for verbal "yes" before executing.
+4. Navigation is free; submit/post/purchase/send actions go through Phase 3 approval gate.
 """
 
 from __future__ import annotations
@@ -19,66 +19,79 @@ from __future__ import annotations
 import base64
 import concurrent.futures
 import io
+import os
+import queue
 import time
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
 from archer.core.event_bus import Event, EventType, get_event_bus
 
+_PC_CONTROLLER_INSTANCE: PCController | None = None
+
+
+def get_pc_controller() -> PCController:
+    """Get the singleton PCController instance."""
+    global _PC_CONTROLLER_INSTANCE
+    if _PC_CONTROLLER_INSTANCE is None:
+        _PC_CONTROLLER_INSTANCE = PCController()
+    return _PC_CONTROLLER_INSTANCE
+
 
 class PCController:
     """
-    Desktop automation controller.
+    Desktop and Browser automation controller.
 
-    All methods check the halted flag before executing — if HALT
-    is triggered mid-action, execution stops immediately.
+    Reuses a single persistent Playwright Chromium instance inside the ARCHER pane
+    with CDP screencast streaming, bidirectional mouse/keyboard forwarding, tab
+    management, and pinned Google Messages for web.
     """
 
+    def __new__(cls, *args, **kwargs):
+        global _PC_CONTROLLER_INSTANCE
+        if _PC_CONTROLLER_INSTANCE is None:
+            _PC_CONTROLLER_INSTANCE = super().__new__(cls)
+        return _PC_CONTROLLER_INSTANCE
+
     def __init__(self) -> None:
+        if getattr(self, "_initialized", False):
+            return
+        self._initialized = True
+
         self._bus = get_event_bus()
         self._halted = threading.Event()
         self._bus.subscribe_halt(self._on_halt)
 
-        # Playwright browser instance (lazy init)
-        self._browser = None
+        # Playwright persistent browser instance state
         self._playwright = None
+        self._browser = None
         self._browser_context = None
+        self._active_page = None
+        self._active_page_idx = 0
+        self._cdp_session = None
 
-        # Playwright's sync API pins every browser/context/page object to
-        # the exact OS thread (specifically the greenlet) that created it --
-        # calling into it from any other thread raises "Cannot switch to a
-        # different thread" (or, once that original thread has been
-        # recycled/destroyed, "...which happens to have exited"). Found
-        # 2026-09-19: _ensure_browser() used to run on whatever thread
-        # happened to call open_url() first (a per-turn CoreAgent thread),
-        # while browser_screenshot() was called both from that same kind of
-        # per-turn thread AND from server.py's periodic GUI browser-mirror
-        # poll (`asyncio.to_thread`, which pulls from Python's shared,
-        # multi-threaded default pool) -- neither of those is guaranteed to
-        # land on the thread that created the browser, so screenshots failed
-        # essentially every time except by chance. Fix: every Playwright
-        # call, including the lazy browser launch itself, now runs on this
-        # one dedicated single-worker thread, so they're always on the same
-        # thread/greenlet regardless of which caller's thread invoked them.
-        self._pw_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="archer-playwright"
+        # Screencasting & interaction state
+        self._screencast_active = False
+        self._screencast_visible = False
+        self._screencast_callbacks: list[Callable[[str, dict, int], None]] = []
+
+        # Dedicated Playwright worker thread & command queue
+        self._pw_queue = queue.Queue()
+        self._pw_thread_stop = threading.Event()
+        self._pw_thread = threading.Thread(
+            target=self._pw_worker_loop,
+            daemon=True,
+            name="archer-playwright-worker",
         )
+        self._pw_thread.start()
 
     def _on_halt(self, event: Event) -> None:
-        """HALT handler — stop all active automation."""
+        """HALT handler — cancel active automation."""
         self._halted.set()
-        # Fire-and-forget onto the Playwright thread (see _pw_executor's
-        # docstring) rather than calling _close_browser() directly here --
-        # halt can be triggered from any thread, and close() needs the same
-        # thread-affinity as every other Playwright call.
-        try:
-            self._pw_executor.submit(self._close_browser)
-        except RuntimeError:
-            pass  # executor already shut down
-        logger.warning("PC Control: HALT — all automation stopped.")
+        logger.warning("PC Control: HALT — automation stopped.")
 
     def _check_halt(self) -> bool:
         """Check if HALT was triggered. Returns True if halted."""
@@ -95,13 +108,6 @@ class PCController:
     def take_screenshot(self, region: dict | None = None) -> str | None:
         """
         Capture the screen and return as base64-encoded PNG.
-
-        Args:
-            region: Optional dict with keys 'left', 'top', 'width', 'height'
-                   for capturing a specific region. None = full screen.
-
-        Returns:
-            Base64-encoded PNG string, or None on failure.
         """
         try:
             import mss
@@ -119,7 +125,6 @@ class PCController:
 
                 screenshot = sct.grab(monitor)
 
-                # Convert to PNG bytes
                 from PIL import Image
                 img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
                 buffer = io.BytesIO()
@@ -137,12 +142,7 @@ class PCController:
             return None
 
     def get_active_window(self) -> dict[str, Any]:
-        """
-        Get information about the currently active window.
-
-        Returns dict with 'title', 'left', 'top', 'width', 'height'.
-        Read-only — no confirmation needed.
-        """
+        """Get information about the currently active window."""
         try:
             import pygetwindow as gw
             win = gw.getActiveWindow()
@@ -160,11 +160,7 @@ class PCController:
             return {"title": "Unknown"}
 
     def list_windows(self) -> list[dict[str, Any]]:
-        """
-        List all visible windows.
-
-        Read-only — no confirmation needed.
-        """
+        """List all visible windows."""
         try:
             import pygetwindow as gw
             windows = gw.getAllWindows()
@@ -189,11 +185,7 @@ class PCController:
     # ------------------------------------------------------------------
 
     def click(self, x: int, y: int, button: str = "left") -> bool:
-        """
-        Click at screen coordinates.
-
-        REQUIRES user confirmation before calling.
-        """
+        """Click at desktop screen coordinates."""
         if self._check_halt():
             return False
 
@@ -207,11 +199,7 @@ class PCController:
             return False
 
     def type_text(self, text: str, interval: float = 0.02) -> bool:
-        """
-        Type text using keyboard simulation.
-
-        REQUIRES user confirmation before calling.
-        """
+        """Type text using keyboard simulation."""
         if self._check_halt():
             return False
 
@@ -225,11 +213,7 @@ class PCController:
             return False
 
     def hotkey(self, *keys: str) -> bool:
-        """
-        Press a keyboard shortcut (e.g., hotkey('ctrl', 'c')).
-
-        REQUIRES user confirmation before calling.
-        """
+        """Press a keyboard shortcut (e.g. hotkey('ctrl', 'c'))."""
         if self._check_halt():
             return False
 
@@ -243,11 +227,7 @@ class PCController:
             return False
 
     def focus_window(self, title: str) -> bool:
-        """
-        Focus a window by title (partial match).
-
-        REQUIRES user confirmation before calling.
-        """
+        """Focus a desktop window by title."""
         if self._check_halt():
             return False
 
@@ -266,107 +246,533 @@ class PCController:
             return False
 
     # ------------------------------------------------------------------
-    # Browser Automation (requires confirmation)
+    # Playwright Thread Worker Loop & Helpers
     # ------------------------------------------------------------------
 
-    def _ensure_browser(self) -> bool:
-        """Ensure a Playwright browser instance is running."""
-        if self._browser is not None:
-            return True
-
-        try:
-            from playwright.sync_api import sync_playwright
-
-            self._playwright = sync_playwright().start()
-            # ARCHER's browser is shown inside ARCHER's page (the in-page view
-            # mirrors it), so by default its own window opens off-screen
-            # instead of popping up on the desktop (Col, 2026-10-20). It stays
-            # a real window, not a headless browser: Google and YouTube block
-            # headless browsers more often, and video sound still plays.
-            # ARCHER_BROWSER_ON_SCREEN=1 in .env puts it back on the desktop.
-            from archer.config import get_config
-
-            self._browser_off_screen = not getattr(get_config(), "browser_on_screen", False)
-            self._screenshot_failures = 0
-            if not self._browser_off_screen:
-                args = ["--start-maximized"]
-            else:
-                # Windows stops drawing a window it thinks nobody can see,
-                # and an off-screen one counts: the in-page view's
-                # screenshots then timed out (2026-10-20, 16:18). These keep
-                # it drawing; _browser_screenshot_impl moves the window on
-                # screen if it still doesn't.
-                args = [
-                    "--window-position=12000,12000", "--window-size=1600,900",
-                    "--disable-features=CalculateNativeWinOcclusion",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-renderer-backgrounding",
-                ]
-            self._browser = self._playwright.chromium.launch(
-                headless=False,
-                args=args,
-            )
-            self._browser_context = self._browser.new_context(
-                viewport=None,  # Use full window size
-            )
-            logger.info("Playwright browser launched.")
-            return True
-
-        except ImportError:
-            logger.warning(
-                "Playwright not installed. Install with: pip install playwright && playwright install chromium"
-            )
-            return False
-        except Exception as e:
-            logger.error(f"Browser launch failed: {e}")
-            return False
-
-    def _close_browser(self) -> None:
-        """Close the Playwright browser."""
-        try:
-            if self._browser_context:
-                self._browser_context.close()
-            if self._browser:
-                self._browser.close()
-            if self._playwright:
-                self._playwright.stop()
-        except Exception:
-            pass
-        finally:
-            self._browser = None
-            self._browser_context = None
-            self._playwright = None
-
     def _run_on_pw_thread(self, fn, *args, timeout: float = 30.0, **kwargs):
-        """Submit fn to the dedicated Playwright thread and block for the
-        result (see _pw_executor's docstring in __init__ for why this
-        exists). fn is expected to already catch its own exceptions and
-        return a safe fallback value -- this only guards against the
-        submission itself failing or genuinely hanging."""
+        """Submit fn to the dedicated Playwright thread and block for result."""
+        if self._pw_thread_stop.is_set():
+            return None
+        future = concurrent.futures.Future()
+        self._pw_queue.put((fn, args, kwargs, future))
         try:
-            future = self._pw_executor.submit(fn, *args, **kwargs)
             return future.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
             logger.error(f"Playwright call '{fn.__name__}' timed out after {timeout}s.")
             return None
-        except RuntimeError as e:
-            logger.error(f"Playwright thread unavailable for '{fn.__name__}': {e}")
+        except Exception as e:
+            logger.error(f"Playwright execution error for '{fn.__name__}': {e}")
             return None
+
+    def _pw_worker_loop(self) -> None:
+        """Worker loop running on the dedicated Playwright thread."""
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as p:
+                self._playwright = p
+                while not self._pw_thread_stop.is_set():
+                    # If screencasting is actively visible, pump event loop frequently (~25 FPS)
+                    timeout = 0.035 if (self._screencast_active and self._screencast_visible) else 0.2
+                    try:
+                        item = self._pw_queue.get(timeout=timeout)
+                        fn, args, kwargs, future = item
+                        try:
+                            res = fn(*args, **kwargs)
+                            future.set_result(res)
+                        except Exception as exc:
+                            future.set_exception(exc)
+                    except queue.Empty:
+                        if self._screencast_active and self._screencast_visible and self._active_page:
+                            try:
+                                self._active_page.wait_for_timeout(35)
+                            except Exception:
+                                pass
+                self._close_browser_impl()
+        except Exception as e:
+            logger.error(f"Playwright worker loop exited: {e}")
+
+    # ------------------------------------------------------------------
+    # Browser Automation & Screencast Streaming (Phase 7, Spec Section 10)
+    # ------------------------------------------------------------------
+
+    def _ensure_browser_impl(self) -> bool:
+        """Ensure Playwright persistent browser context is launched."""
+        if self._browser_context is not None:
+            return True
+        if self._playwright is None:
+            return False
+
+        try:
+            from archer.config import get_config
+            cfg = get_config()
+
+            profile_dir = Path(os.environ.get("ARCHER_BROWSER_PROFILE_DIR", str(cfg.data_dir / "browser_profile"))).resolve()
+            profile_dir.mkdir(parents=True, exist_ok=True)
+
+            self._browser_off_screen = not getattr(cfg, "browser_on_screen", False)
+            if not self._browser_off_screen:
+                args = ["--start-maximized"]
+            else:
+                args = [
+                    "--window-position=12000,12000",
+                    "--window-size=1280,800",
+                    "--disable-features=CalculateNativeWinOcclusion",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding",
+                ]
+
+            self._browser_context = self._playwright.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=False,
+                args=args,
+                viewport={"width": 1280, "height": 800},
+            )
+            self._browser = getattr(self._browser_context, "browser", self._browser_context)
+
+            pages = self._browser_context.pages
+            if not pages:
+                page = self._browser_context.new_page()
+            else:
+                page = pages[0]
+            self._active_page_idx = 0
+            self._active_page = page
+
+            # Pinned Google Messages: navigate if currently blank
+            if page.url in ("", "about:blank"):
+                try:
+                    page.goto("https://messages.google.com/web", timeout=12000, wait_until="domcontentloaded")
+                except Exception as e:
+                    logger.debug(f"Initial navigation to Messages: {e}")
+
+            self._attach_cdp_impl(page)
+            logger.info(f"Playwright persistent browser launched (profile: {profile_dir}).")
+            return True
+        except Exception as e:
+            logger.error(f"Browser launch failed: {e}")
+            return False
+
+    def _attach_cdp_impl(self, page) -> None:
+        """Attach CDP session to the active page for screencast and input."""
+        if self._cdp_session:
+            try:
+                self._cdp_session.send("Page.stopScreencast")
+                self._cdp_session.detach()
+            except Exception:
+                pass
+            self._cdp_session = None
+
+        self._active_page = page
+        try:
+            self._cdp_session = self._browser_context.new_cdp_session(page)
+
+            def _on_screencast_frame(params):
+                sid = params.get("sessionId")
+                data_b64 = params.get("data")
+                metadata = params.get("metadata", {})
+                try:
+                    if self._cdp_session:
+                        self._cdp_session.send("Page.screencastFrameAck", {"sessionId": sid})
+                except Exception:
+                    pass
+                for cb in list(self._screencast_callbacks):
+                    try:
+                        cb(data_b64, metadata, sid)
+                    except Exception as err:
+                        logger.debug(f"Screencast callback error: {err}")
+
+            self._cdp_session.on("Page.screencastFrame", _on_screencast_frame)
+            if self._screencast_active:
+                self._cdp_session.send("Page.startScreencast", {
+                    "format": "jpeg",
+                    "quality": 70,
+                    "maxWidth": 1280,
+                    "maxHeight": 800,
+                    "everyNthFrame": 1,
+                })
+        except Exception as e:
+            logger.error(f"CDP attach failed: {e}")
+
+    def _close_browser_impl(self) -> None:
+        """Close browser context and cleanup CDP."""
+        if self._cdp_session:
+            try:
+                self._cdp_session.send("Page.stopScreencast")
+                self._cdp_session.detach()
+            except Exception:
+                pass
+            self._cdp_session = None
+        if self._browser_context:
+            try:
+                self._browser_context.close()
+            except Exception:
+                pass
+            self._browser_context = None
+        self._browser = None
+        self._active_page = None
+
+    # ------------------------------------------------------------------
+    # Public Browser Controls & CDP Screencast API
+    # ------------------------------------------------------------------
+
+    def ensure_browser(self) -> bool:
+        """Ensure browser is open and running."""
+        return bool(self._run_on_pw_thread(self._ensure_browser_impl))
+
+    def start_screencast(self) -> bool:
+        """Start screencast streaming on the active page."""
+        def _start():
+            if not self._ensure_browser_impl():
+                return False
+            self._screencast_active = True
+            self._screencast_visible = True
+            if self._cdp_session:
+                try:
+                    self._cdp_session.send("Page.startScreencast", {
+                        "format": "jpeg",
+                        "quality": 70,
+                        "maxWidth": 1280,
+                        "maxHeight": 800,
+                        "everyNthFrame": 1,
+                    })
+                except Exception as e:
+                    logger.debug(f"Start screencast CDP error: {e}")
+            return True
+        return bool(self._run_on_pw_thread(_start))
+
+    def stop_screencast(self) -> bool:
+        """Stop screencast streaming."""
+        def _stop():
+            self._screencast_active = False
+            if self._cdp_session:
+                try:
+                    self._cdp_session.send("Page.stopScreencast")
+                except Exception:
+                    pass
+            return True
+        return bool(self._run_on_pw_thread(_stop))
+
+    def set_screencast_visible(self, visible: bool) -> None:
+        """Pause or resume screencast frame pumping based on tab visibility."""
+        def _set():
+            self._screencast_visible = visible
+            if visible and not self._screencast_active:
+                self._start_screencast_impl()
+            return True
+        self._run_on_pw_thread(_set)
+
+    def _start_screencast_impl(self):
+        self._screencast_active = True
+        self._screencast_visible = True
+        if self._cdp_session:
+            try:
+                self._cdp_session.send("Page.startScreencast", {
+                    "format": "jpeg",
+                    "quality": 70,
+                    "maxWidth": 1280,
+                    "maxHeight": 800,
+                    "everyNthFrame": 1,
+                })
+            except Exception:
+                pass
+
+    def register_screencast_callback(self, cb: Callable[[str, dict, int], None]) -> None:
+        """Register callback for screencast frame events."""
+        if cb not in self._screencast_callbacks:
+            self._screencast_callbacks.append(cb)
+
+    def unregister_screencast_callback(self, cb: Callable[[str, dict, int], None]) -> None:
+        """Unregister screencast callback."""
+        if cb in self._screencast_callbacks:
+            self._screencast_callbacks.remove(cb)
+
+    # ------------------------------------------------------------------
+    # Input Forwarding (Mouse, Wheel, Keyboard, Text)
+    # ------------------------------------------------------------------
+
+    def dispatch_mouse_event(
+        self,
+        event_type: str,
+        x: int,
+        y: int,
+        button: str = "left",
+        click_count: int = 1,
+        delta_x: float = 0.0,
+        delta_y: float = 0.0,
+    ) -> bool:
+        """Dispatch mouse or wheel event via CDP."""
+        def _impl():
+            if not self._cdp_session:
+                return False
+            try:
+                params: dict[str, Any] = {
+                    "type": event_type,
+                    "x": int(x),
+                    "y": int(y),
+                }
+                if event_type in ("mousePressed", "mouseReleased"):
+                    params["button"] = button
+                    params["clickCount"] = click_count
+                elif event_type == "mouseMoved":
+                    if button and button != "none":
+                        params["button"] = button
+                elif event_type == "wheel":
+                    params["deltaX"] = float(delta_x)
+                    params["deltaY"] = float(delta_y)
+
+                self._cdp_session.send("Input.dispatchMouseEvent", params)
+                return True
+            except Exception as e:
+                logger.debug(f"CDP mouse dispatch error: {e}")
+                return False
+        return bool(self._run_on_pw_thread(_impl, timeout=5.0))
+
+    def dispatch_key_event(
+        self,
+        event_type: str,
+        key: str = "",
+        code: str = "",
+        text: str = "",
+        windows_virtual_key_code: int = 0,
+    ) -> bool:
+        """Dispatch keyboard key event via CDP."""
+        def _impl():
+            if not self._cdp_session:
+                return False
+            try:
+                params: dict[str, Any] = {"type": event_type}
+                if key:
+                    params["key"] = key
+                if code:
+                    params["code"] = code
+                if text:
+                    params["text"] = text
+                if windows_virtual_key_code:
+                    params["windowsVirtualKeyCode"] = int(windows_virtual_key_code)
+
+                self._cdp_session.send("Input.dispatchKeyEvent", params)
+                return True
+            except Exception as e:
+                logger.debug(f"CDP key dispatch error: {e}")
+                return False
+        return bool(self._run_on_pw_thread(_impl, timeout=5.0))
+
+    def insert_text(self, text: str) -> bool:
+        """Insert text string directly into active element via CDP."""
+        def _impl():
+            if not self._cdp_session:
+                return False
+            try:
+                self._cdp_session.send("Input.insertText", {"text": text})
+                return True
+            except Exception as e:
+                logger.debug(f"CDP insertText error: {e}")
+                return False
+        return bool(self._run_on_pw_thread(_impl, timeout=5.0))
+
+    # ------------------------------------------------------------------
+    # Tab Management & Chrome Navigation
+    # ------------------------------------------------------------------
+
+    def _get_tabs_impl(self) -> list[dict[str, Any]]:
+        if not self._browser_context:
+            return []
+        tabs = []
+        for i, page in enumerate(self._browser_context.pages):
+            try:
+                title = page.title() or "New Tab"
+                url = page.url or "about:blank"
+            except Exception:
+                title, url = "Tab", ""
+            is_pinned = (i == 0 and "messages.google.com" in url)
+            tabs.append({
+                "index": i,
+                "title": title,
+                "url": url,
+                "active": (i == self._active_page_idx),
+                "pinned": is_pinned,
+            })
+        return tabs
+
+    def get_browser_tabs(self) -> list[dict[str, Any]]:
+        """Return list of open tabs with title, url, active, and pinned flags."""
+        res = self._run_on_pw_thread(self._get_tabs_impl, timeout=5.0)
+        return res if res is not None else []
+
+
+    def browser_new_tab(self, url: str = "about:blank") -> dict[str, Any]:
+        """Open a new tab in the persistent browser context."""
+        def _impl():
+            if not self._ensure_browser_impl():
+                return {"success": False, "reason": "Browser unavailable"}
+            page = self._browser_context.new_page()
+            if url and url != "about:blank":
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                except Exception as e:
+                    logger.debug(f"Tab navigation: {e}")
+            self._active_page_idx = len(self._browser_context.pages) - 1
+            self._attach_cdp_impl(page)
+            return {
+                "success": True,
+                "index": self._active_page_idx,
+                "title": page.title(),
+                "url": page.url,
+            }
+        res = self._run_on_pw_thread(_impl, timeout=20.0)
+        return res if res is not None else {"success": False}
+
+    def browser_switch_tab(self, index: int) -> dict[str, Any]:
+        """Switch active tab by index."""
+        def _impl():
+            if not self._browser_context:
+                return {"success": False, "reason": "No browser"}
+            pages = self._browser_context.pages
+            if 0 <= index < len(pages):
+                self._active_page_idx = index
+                page = pages[index]
+                try:
+                    page.bring_to_front()
+                except Exception:
+                    pass
+                self._attach_cdp_impl(page)
+                return {
+                    "success": True,
+                    "index": index,
+                    "title": page.title(),
+                    "url": page.url,
+                }
+            return {"success": False, "reason": "Index out of range"}
+        res = self._run_on_pw_thread(_impl, timeout=5.0)
+        return res if res is not None else {"success": False}
+
+    def browser_close_tab(self, index: int) -> dict[str, Any]:
+        """Close tab by index."""
+        def _impl():
+            if not self._browser_context:
+                return {"success": False, "reason": "No browser"}
+            pages = self._browser_context.pages
+            if 0 <= index < len(pages):
+                if len(pages) == 1:
+                    return {"success": False, "reason": "Cannot close last tab"}
+                target_page = pages[index]
+                try:
+                    target_page.close()
+                except Exception as e:
+                    logger.debug(f"Close page error: {e}")
+                pages = self._browser_context.pages
+                new_idx = min(self._active_page_idx, len(pages) - 1)
+                self._active_page_idx = new_idx
+                self._attach_cdp_impl(pages[new_idx])
+                return {"success": True, "index": new_idx}
+            return {"success": False, "reason": "Index out of range"}
+        res = self._run_on_pw_thread(_impl, timeout=5.0)
+        return res if res is not None else {"success": False}
+
+    def browser_navigate(self, url: str) -> dict[str, Any]:
+        """Navigate active tab to a URL."""
+        def _impl():
+            if not self._ensure_browser_impl():
+                return {"success": False, "reason": "Browser unavailable"}
+            target = (url or "").strip()
+            if not target.lower().startswith(("http://", "https://", "data:", "about:")):
+                target = "https://" + target
+            try:
+                self._active_page.goto(target, wait_until="domcontentloaded", timeout=15000)
+                return {
+                    "success": True,
+                    "title": self._active_page.title(),
+                    "url": self._active_page.url,
+                }
+            except Exception as e:
+                return {"success": False, "reason": str(e)}
+        res = self._run_on_pw_thread(_impl, timeout=20.0)
+        return res if res is not None else {"success": False}
+
+    def browser_back(self) -> dict[str, Any]:
+        """Navigate back in history."""
+        def _impl():
+            if not self._active_page:
+                return {"success": False, "reason": "No active page"}
+            try:
+                self._active_page.go_back(timeout=10000)
+                return {"success": True, "title": self._active_page.title(), "url": self._active_page.url}
+            except Exception as e:
+                return {"success": False, "reason": str(e)}
+        res = self._run_on_pw_thread(_impl, timeout=10.0)
+        return res if res is not None else {"success": False}
+
+    def browser_forward(self) -> dict[str, Any]:
+        """Navigate forward in history."""
+        def _impl():
+            if not self._active_page:
+                return {"success": False, "reason": "No active page"}
+            try:
+                self._active_page.go_forward(timeout=10000)
+                return {"success": True, "title": self._active_page.title(), "url": self._active_page.url}
+            except Exception as e:
+                return {"success": False, "reason": str(e)}
+        res = self._run_on_pw_thread(_impl, timeout=10.0)
+        return res if res is not None else {"success": False}
+
+    def browser_reload(self) -> dict[str, Any]:
+        """Reload active page."""
+        def _impl():
+            if not self._active_page:
+                return {"success": False, "reason": "No active page"}
+            try:
+                self._active_page.reload(timeout=10000)
+                return {"success": True, "title": self._active_page.title(), "url": self._active_page.url}
+            except Exception as e:
+                return {"success": False, "reason": str(e)}
+        res = self._run_on_pw_thread(_impl, timeout=10.0)
+        return res if res is not None else {"success": False}
+
+    def restart_browser(self) -> bool:
+        """Restart Playwright persistent context and re-attach CDP."""
+        def _restart():
+            self._close_browser_impl()
+            ok = self._ensure_browser_impl()
+            if ok and self._screencast_active:
+                self._start_screencast_impl()
+            return ok
+        return bool(self._run_on_pw_thread(_restart, timeout=30.0))
+
+    def get_browser_status(self) -> dict[str, Any]:
+        """Return whether ARCHER's browser is open, tabs, and current title."""
+        res = self._run_on_pw_thread(self._get_browser_status_impl, timeout=5.0)
+        return res if res is not None else {"open": False, "title": "Closed", "tabs": [], "url": ""}
+
+    def _get_browser_status_impl(self) -> dict[str, Any]:
+        if self._browser_context is None or self._active_page is None:
+            return {"open": False, "title": "Closed", "tabs": [], "url": ""}
+        try:
+            tabs = self._get_tabs_impl()
+            title = self._active_page.title() if self._active_page else ""
+            url = self._active_page.url if self._active_page else ""
+            return {
+                "open": True,
+                "title": title or url or "Open",
+                "url": url,
+                "tabs": tabs,
+                "canGoBack": True,
+                "canGoForward": True,
+            }
+        except Exception as e:
+            logger.debug(f"Error in _get_browser_status_impl: {e}")
+            return {"open": True, "title": "Open", "tabs": [], "url": ""}
+
+    # ------------------------------------------------------------------
+    # Agent Tools Compatibility (UniversalToolExecutor)
+    # ------------------------------------------------------------------
 
     def open_url(self, url: str) -> dict[str, Any]:
         """
-        Open a URL in the browser.
-
-        REQUIRES user confirmation before calling.
-
-        Returns dict with 'success', 'title', 'url'.
+        Open a URL in ARCHER's browser pane.
+        Free navigation under Phase 3.
         """
         if self._check_halt():
             return {"success": False, "reason": "HALT"}
-        # The browser's first start takes ~50 s on Col's PC (2026-10-20 log:
-        # the 30 s limit said "failed", the page opened 3 s later, and the
-        # model then answered about something else). Allow 90 s for that.
-        timeout = 30.0 if self._browser is not None else 90.0
+        timeout = 30.0 if self._browser_context is not None else 90.0
         result = self._run_on_pw_thread(self._open_url_impl, url, timeout=timeout)
         if result and result.get("success"):
             self._bus.publish(Event(
@@ -376,19 +782,56 @@ class PCController:
             ))
         return result if result is not None else {"success": False, "reason": "Playwright call failed/timed out"}
 
+    def _open_url_impl(self, url: str) -> dict[str, Any]:
+        if not self._ensure_browser_impl():
+            return {"success": False, "reason": "Browser not available"}
+        try:
+            target = (url or "").strip()
+            if not target.lower().startswith(("http://", "https://", "data:", "about:")):
+                target = "https://" + target
+            self._active_page.goto(target, wait_until="domcontentloaded", timeout=15000)
+            result = {
+                "success": True,
+                "title": self._active_page.title(),
+                "url": self._active_page.url,
+            }
+            logger.info(f"Opened URL: {target} — Title: '{result['title']}'")
+            return result
+        except Exception as e:
+            logger.error(f"Browser navigation failed: {e}")
+            return {"success": False, "reason": str(e)}
+
+    def open_url_in_my_browser(self, url: str) -> dict[str, Any]:
+        """
+        Open a URL in Col's own default browser outside ARCHER.
+        """
+        if self._check_halt():
+            return {"success": False, "reason": "HALT"}
+        url = (url or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            if "://" in url or url.lower().startswith(("file:", "javascript:")):
+                return {"success": False, "reason": "Only web (http/https) addresses can be opened."}
+            url = "https://" + url
+        try:
+            import webbrowser
+            opened = webbrowser.open(url, new=2)
+        except Exception as e:
+            logger.error(f"Opening in Col's browser failed: {e}")
+            return {"success": False, "reason": str(e)}
+        logger.info(f"Opened in Col's own browser: {url}")
+        return {"success": bool(opened), "url": url, "where": "Col's own browser (ARCHER can't see or control it)"}
+
+    # The first real video in YouTube's results
+    _YOUTUBE_FIRST_VIDEO = ("ytd-video-renderer a#video-title", "a[href^='/watch?v=']")
+
     def play_youtube(self, query: str) -> dict[str, Any]:
-        """
-        Search YouTube for `query` in ARCHER's own browser and play the first
-        video (Col, 2026-10-20: "search for Beyonce Black Parade and play the
-        first video"; the model couldn't string open_url and browser_click
-        together). Reuses the browser's current tab.
-        """
+        """Search YouTube for query in ARCHER's browser and play the first video."""
         if self._check_halt():
             return {"success": False, "reason": "HALT"}
         query = " ".join((query or "").split())
         if not query:
             return {"success": False, "reason": "Nothing to search for"}
-        timeout = 45.0 if self._browser is not None else 105.0
+        timeout = 45.0 if self._browser_context is not None else 105.0
         result = self._run_on_pw_thread(self._play_youtube_impl, query, timeout=timeout)
         if result and result.get("success"):
             self._bus.publish(Event(
@@ -398,19 +841,13 @@ class PCController:
             ))
         return result if result is not None else {"success": False, "reason": "Playwright call failed/timed out"}
 
-    # The first real video in YouTube's results (ads and Shorts use other
-    # elements), then any link to a video, in case YouTube renames things.
-    _YOUTUBE_FIRST_VIDEO = ("ytd-video-renderer a#video-title", "a[href^='/watch?v=']")
-
     def _play_youtube_impl(self, query: str) -> dict[str, Any]:
         from urllib.parse import quote_plus
 
-        if not self._ensure_browser():
+        if not self._ensure_browser_impl():
             return {"success": False, "reason": "Browser not available"}
         try:
-            pages = self._browser_context.pages
-            page = pages[-1] if pages else self._browser_context.new_page()
-            page.bring_to_front()
+            page = self._active_page
             page.goto(
                 f"https://www.youtube.com/results?search_query={quote_plus(query)}",
                 wait_until="domcontentloaded", timeout=20000,
@@ -435,208 +872,76 @@ class PCController:
             logger.error(f"YouTube search/play failed: {e}")
             return {"success": False, "reason": str(e).splitlines()[0]}
 
-    def open_url_in_my_browser(self, url: str) -> dict[str, Any]:
-        """
-        Open a URL in Col's own default browser, as a separate window (Col,
-        2026-10-20: only when he asks for a separate window). ARCHER can't
-        see or control that window. Only http(s) addresses are opened.
-        """
-        if self._check_halt():
-            return {"success": False, "reason": "HALT"}
-        url = (url or "").strip()
-        if not url.lower().startswith(("http://", "https://")):
-            if "://" in url or url.lower().startswith(("file:", "javascript:")):
-                return {"success": False, "reason": "Only web (http/https) addresses can be opened."}
-            url = "https://" + url
-        try:
-            import webbrowser
-
-            opened = webbrowser.open(url, new=2)
-        except Exception as e:
-            logger.error(f"Opening in Col's browser failed: {e}")
-            return {"success": False, "reason": str(e)}
-        logger.info(f"Opened in Col's own browser: {url}")
-        return {"success": bool(opened), "url": url, "where": "Col's own browser (ARCHER can't see or control it)"}
-
-    def _open_url_impl(self, url: str) -> dict[str, Any]:
-        if not self._ensure_browser():
-            return {"success": False, "reason": "Browser not available"}
-
-        try:
-            page = self._browser_context.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=15000)
-
-            result = {
-                "success": True,
-                "title": page.title(),
-                "url": page.url,
-            }
-            logger.info(f"Opened URL: {url} — Title: '{result['title']}'")
-            return result
-
-        except Exception as e:
-            logger.error(f"Browser navigation failed: {e}")
-            return {"success": False, "reason": str(e)}
-
     def browser_screenshot(self) -> str | None:
-        """
-        Take a screenshot of the active browser page.
-
-        Read-only — no confirmation needed.
-        """
+        """Take a screenshot of the active browser page. Read-only."""
         return self._run_on_pw_thread(self._browser_screenshot_impl)
 
     def _browser_screenshot_impl(self) -> str | None:
-        if not self._browser_context:
+        if not self._active_page:
             return None
-
         try:
-            pages = self._browser_context.pages
-            if not pages:
-                return None
-
-            page = pages[-1]  # Most recent page
-            # Explicit shorter timeout (2026-09-19 finding): Playwright's
-            # screenshot default timeout is 30s, and a live/animated page
-            # (autoplaying YouTube, in particular) can genuinely stall on
-            # "waiting for fonts to load" for the full 30s before failing --
-            # that's 30s of dead air in the middle of a conversation turn.
-            # Fail fast instead; the caller already handles a None result.
-            screenshot_bytes = page.screenshot(timeout=8000)
-            self._screenshot_failures = 0
+            screenshot_bytes = self._active_page.screenshot(timeout=8000)
             return base64.b64encode(screenshot_bytes).decode("utf-8")
-
         except Exception as e:
             logger.error(f"Browser screenshot failed: {e}")
-            self._screenshot_failures = getattr(self, "_screenshot_failures", 0) + 1
-            if getattr(self, "_browser_off_screen", False) and self._screenshot_failures >= 2:
-                self._move_browser_on_screen()
             return None
 
-    def _move_browser_on_screen(self) -> None:
-        """
-        Bring ARCHER's off-screen browser window onto the screen, so its
-        picture updates again. Used when screenshots keep failing while it's
-        off-screen; it stays on screen until ARCHER restarts.
-        """
-        self._browser_off_screen = False
-        try:
-            page = self._browser_context.pages[-1]
-            cdp = self._browser_context.new_cdp_session(page)
-            window = cdp.send("Browser.getWindowForTarget")
-            cdp.send("Browser.setWindowBounds", {
-                "windowId": window["windowId"],
-                "bounds": {"left": 40, "top": 40, "width": 1600, "height": 900, "windowState": "normal"},
-            })
-            logger.warning(
-                "ARCHER's browser window was moved on screen: its picture stopped updating while it "
-                "was off-screen. Set ARCHER_BROWSER_ON_SCREEN=1 in .env to always start it on screen."
-            )
-        except Exception as e:
-            logger.warning(f"Couldn't move ARCHER's browser window on screen: {type(e).__name__}: {e}")
-
     def browser_click(self, selector: str) -> bool:
-        """
-        Click an element in the browser by CSS selector.
-
-        REQUIRES user confirmation before calling.
-        """
+        """Click an element in the browser by CSS selector. Requires confirmation."""
         if self._check_halt():
             return False
         return bool(self._run_on_pw_thread(self._browser_click_impl, selector))
 
     def _browser_click_impl(self, selector: str) -> bool:
-        if not self._browser_context:
+        if not self._active_page:
             return False
-
         try:
-            pages = self._browser_context.pages
-            if not pages:
-                return False
-
-            page = pages[-1]
-            page.click(selector, timeout=5000)
+            self._active_page.click(selector, timeout=5000)
             logger.info(f"Browser click: '{selector}'")
             return True
-
         except Exception as e:
             logger.error(f"Browser click failed: {e}")
             return False
 
     def browser_type(self, selector: str, text: str) -> bool:
-        """
-        Type text into a browser element.
-
-        REQUIRES user confirmation before calling.
-        """
+        """Type text into a browser element. Requires confirmation."""
         if self._check_halt():
             return False
         return bool(self._run_on_pw_thread(self._browser_type_impl, selector, text))
 
     def _browser_type_impl(self, selector: str, text: str) -> bool:
-        if not self._browser_context:
+        if not self._active_page:
             return False
-
         try:
-            pages = self._browser_context.pages
-            if not pages:
-                return False
-
-            page = pages[-1]
-            page.fill(selector, text, timeout=5000)
+            self._active_page.fill(selector, text, timeout=5000)
             logger.info(f"Browser type into '{selector}': '{text[:50]}'")
             return True
-
         except Exception as e:
             logger.error(f"Browser type failed: {e}")
             return False
 
     def browser_get_text(self, selector: str = "body") -> str:
-        """
-        Get text content from a browser element.
-
-        Read-only — no confirmation needed.
-        """
+        """Get text content from a browser element. Read-only."""
         result = self._run_on_pw_thread(self._browser_get_text_impl, selector)
         return result if result is not None else ""
 
     def _browser_get_text_impl(self, selector: str = "body") -> str:
-        if not self._browser_context:
+        if not self._active_page:
             return ""
-
         try:
-            pages = self._browser_context.pages
-            if not pages:
-                return ""
-
-            page = pages[-1]
-            return page.inner_text(selector, timeout=5000)
-
+            return self._active_page.inner_text(selector, timeout=5000)
         except Exception as e:
             logger.error(f"Browser get text failed: {e}")
             return ""
 
     def close_browser(self) -> None:
-        """Close the browser. REQUIRES user confirmation."""
+        """Close the browser context. Requires confirmation."""
         if self._check_halt():
             return
-        self._run_on_pw_thread(self._close_browser)
+        self._run_on_pw_thread(self._close_browser_impl)
         self._bus.publish(Event(
             type=EventType.BROWSER_ACTION,
             source="pc_control",
             data={"action": "close", "title": "Closed"},
         ))
         logger.info("Browser closed by user request.")
-
-    def get_browser_status(self) -> dict[str, Any]:
-        """Return whether ARCHER's browser is open and its current page title."""
-        if self._browser is None or self._browser_context is None:
-            return {"open": False, "title": "Closed"}
-        try:
-            pages = self._browser_context.pages
-            if pages:
-                title = pages[-1].title()
-                return {"open": True, "title": title or pages[-1].url}
-        except Exception:
-            pass
-        return {"open": True, "title": "Open"}

@@ -175,6 +175,8 @@ doesn't require starting it by hand in a separate window.
 | `tools_registry_list`  | `tools`                         | Phase 4 (Spec 7): Candidate tool pool entries from tools_registry table |
 | `tools_propose_result` | `result`                        | Phase 4 (Spec 7): Result of candidate tool proposal and review |
 | `tools_uninstall_result`| `result`                       | Phase 4 (Spec 7): Result of candidate tool uninstallation |
+| `browser_screencast_frame`| `data`, `metadata`, `sessionId` | Phase 7 (Spec 10): Live CDP screencast frame (base64 JPEG) |
+| `browser_state`         | `open`, `title`, `url`, `tabs`, `canGoBack`, `canGoForward` | Phase 7 (Spec 10): Browser session state and tabs list |
 
 ### Dedicated Binary Stream WebSocket (`/ws/android`)
 
@@ -231,6 +233,21 @@ To guarantee that high-framerate video frames never delay chat, voice state, or 
 {"type": "tools_get_registry"}                     // Phase 4: fetch candidate tools registry
 {"type": "tools_propose", "repo_url": "https://github.com/...", "commit_hash": null, "name": "my_tool"} // Phase 4
 {"type": "tools_uninstall", "name": "my_tool"}      // Phase 4: uninstall tool
+{"type": "browser_start"}                           // Phase 7: start persistent browser session & screencast
+{"type": "browser_get_state"}                       // Phase 7: fetch current browser state and tabs
+{"type": "browser_navigate", "url": "https://..."}  // Phase 7: navigate active tab
+{"type": "browser_back"}                            // Phase 7: history back
+{"type": "browser_forward"}                         // Phase 7: history forward
+{"type": "browser_reload"}                          // Phase 7: reload active tab
+{"type": "browser_new_tab", "url": "about:blank"}   // Phase 7: open new tab
+{"type": "browser_switch_tab", "index": 0}          // Phase 7: switch active tab
+{"type": "browser_close_tab", "index": 1}           // Phase 7: close tab by index
+{"type": "browser_mouse_event", "eventType": "mousePressed", "x": 100, "y": 200, "button": "left"} // Phase 7
+{"type": "browser_key_event", "eventType": "rawKeyDown", "key": "Enter", "code": "Enter"} // Phase 7
+{"type": "browser_insert_text", "text": "hello"}    // Phase 7: insert text
+{"type": "browser_screencast_visibility", "visible": true} // Phase 7: pause/resume screencast
+{"type": "browser_restart"}                         // Phase 7: restart browser session
+
 ```
 
 `text_input` bypasses voice entirely and goes straight to the active
