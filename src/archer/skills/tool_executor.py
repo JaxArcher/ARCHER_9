@@ -87,6 +87,8 @@ class UniversalToolExecutor:
                 res = self._exec_pool_tool(tool_name, tool_input)
             elif category == 'rnd':
                 res = self._exec_rnd_tool(tool_name, tool_input)
+            elif category == 'lenny':
+                res = self._exec_lenny_tool(tool_name, tool_input)
             else:
                 res = {'error': f'Unknown tool category: {category}'}
             duration = round(time.time() - start_t, 2)
@@ -431,5 +433,68 @@ class UniversalToolExecutor:
             return {'proposal': prop} if prop else {'error': f"Proposal '{inp.get('job_id')}' not found"}
         else:
             return {'error': f'Unknown R&D tool: {tool_name}'}
+
+    def _exec_lenny_tool(self, tool_name: str, inp: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute LENNY workstation tools (Spec Section 11)."""
+        from archer.lenny.lenny_client import get_lenny_client
+        from archer.lenny.app_operator import AppOperator
+
+        client = get_lenny_client()
+        operator = AppOperator(client)
+
+        if tool_name in ('lenny_status', 'lenny_get_status'):
+            return client.get_status()
+
+        elif tool_name == 'lenny_open_app':
+            name = inp.get('name', '').strip()
+            return client.open_app(name)
+
+        elif tool_name == 'lenny_word_document':
+            title = inp.get('title', 'Untitled Document')
+            content = inp.get('content', '')
+            filename = inp.get('filename')
+            return operator.create_word_document(title=title, paragraphs=content, filename=filename)
+
+        elif tool_name == 'lenny_excel_sheet':
+            sheet_name = inp.get('sheet_name', 'Sheet1')
+            rows = inp.get('rows', [])
+            filename = inp.get('filename')
+            return operator.create_excel_sheet(sheet_name=sheet_name, rows=rows, filename=filename)
+
+        elif tool_name in ('lenny_list_controls', 'lenny_get_controls'):
+            win = inp.get('window_title')
+            controls = client.get_uia_controls(window_title=win)
+            return {'controls': controls, 'count': len(controls)}
+
+        elif tool_name == 'lenny_invoke_control':
+            identifier = inp.get('identifier', '')
+            win = inp.get('window_title')
+            success = operator.click_uia_control(identifier=identifier, window_title=win)
+            return {'success': success, 'identifier': identifier}
+
+        elif tool_name == 'lenny_type_text':
+            text = inp.get('text', '')
+            success = client.send_keyboard(text=text)
+            return {'success': success, 'text': text}
+
+        elif tool_name == 'lenny_press_keys':
+            keys = inp.get('keys', '')
+            success = client.send_keyboard(event='press', key=keys)
+            return {'success': success, 'keys': keys}
+
+        elif tool_name == 'lenny_look_and_click':
+            description = inp.get('description', '')
+            action = inp.get('action', 'click')
+            success = operator.look_and_click(target_description=description, action=action)
+            return {'success': success, 'description': description, 'action': action}
+
+        elif tool_name in ('lenny_describe_screen', 'lenny_screenshot'):
+            focus_area = inp.get('focus_area')
+            description = client.describe_screen(focus_area=focus_area)
+            return {'description': description}
+
+        else:
+            return {'error': f'Unknown LENNY tool: {tool_name}'}
+
 
 

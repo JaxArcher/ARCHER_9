@@ -10,4 +10,8 @@ if %ERRORLEVEL% NEQ 0 (
     echo.
     echo [ERROR] ARCHER exited with code %ERRORLEVEL%
     pause
+) else (
+    echo.
+    echo ARCHER session closed.
+    pause
 )

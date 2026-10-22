@@ -54,8 +54,11 @@ READ_ONLY_TOOLS = {
     "list_artifacts",
     "list_rnd_proposals",
     "get_rnd_status",
+    "lenny_status",
     "lenny_get_status",
+    "lenny_list_controls",
     "lenny_get_controls",
+    "lenny_describe_screen",
     "lenny_screenshot",
 }
 
@@ -76,6 +79,8 @@ SELF_RECORD_TOOLS = {
     "create_spreadsheet",
     "create_pdf",
     "merge_pdfs",
+    "lenny_word_document",
+    "lenny_excel_sheet",
     "propose_improvement",
     "undo_last_update",
 }

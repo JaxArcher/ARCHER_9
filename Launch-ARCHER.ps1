@@ -222,20 +222,36 @@ function Invoke-ARCHER {
     else {
         & $VenvPython -m archer
     }
+    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Show-Fail ("ARCHER exited with error code " + $LASTEXITCODE)
+        Write-Host "Press Enter to close this window..."
+        [Console]::ReadLine() | Out-Null
+        exit $LASTEXITCODE
+    }
 }
 
 # MAIN
-Show-Header
-Invoke-ObserverServiceCheck
-Write-Host ''
-Invoke-DockerCheck
-Write-Host ''
-Invoke-DockerServices
-Write-Host ''
-Invoke-Ollama
-Write-Host ''
-Invoke-LMStudio
-Write-Host ''
-Invoke-Barehands
-Write-Host ''
-Invoke-ARCHER -WebOnly:$WebOnly
+try {
+    Show-Header
+    Invoke-ObserverServiceCheck
+    Write-Host ''
+    Invoke-DockerCheck
+    Write-Host ''
+    Invoke-DockerServices
+    Write-Host ''
+    Invoke-Ollama
+    Write-Host ''
+    Invoke-LMStudio
+    Write-Host ''
+    Invoke-Barehands
+    Write-Host ''
+    Invoke-ARCHER -WebOnly:$WebOnly
+}
+catch {
+    Write-Host ""
+    Show-Fail ("Startup error: " + $_.Exception.Message)
+    Write-Host "Press Enter to close this window..."
+    [Console]::ReadLine() | Out-Null
+    exit 1
+}

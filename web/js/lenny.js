@@ -42,6 +42,12 @@
         <span class="takeover-text">Physical user takeover active on LENNY &mdash; ARCHER paused</span>
       </div>
 
+      <!-- UIPI Block Alert Banner -->
+      <div id="lenny-uipi-banner" class="lenny-uipi-banner" style="display:none;">
+        <span class="uipi-icon">&#x26A0;</span>
+        <span id="lenny-uipi-text" class="uipi-text">LENNY is showing an administrator window that ARCHER can't control</span>
+      </div>
+
       <!-- Main Screen Viewport -->
       <div class="lenny-viewport-wrapper">
         <canvas id="lenny-screen-canvas" class="lenny-canvas" tabindex="0" title="Click and type to interact with LENNY"></canvas>
@@ -96,6 +102,8 @@
   const fpsBadge = document.getElementById("lenny-fps-badge");
   const latencyBadge = document.getElementById("lenny-latency-badge");
   const takeoverBanner = document.getElementById("lenny-takeover-banner");
+  const uipiBanner = document.getElementById("lenny-uipi-banner");
+  const uipiText = document.getElementById("lenny-uipi-text");
   const browserHostLabel = document.getElementById("lenny-browser-host-label");
   const mouseCoords = document.getElementById("lenny-mouse-coords");
   const artifactsContainer = document.getElementById("lenny-synced-artifacts");
@@ -133,6 +141,29 @@
   });
 
   // --- 2. Live Stream Management ---
+  const viewportWrapper = document.querySelector(".lenny-viewport-wrapper");
+
+  function sendViewportSize() {
+    if (ws && ws.readyState === WebSocket.OPEN && viewportWrapper) {
+      const rect = viewportWrapper.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.round(rect.width * dpr);
+      const h = Math.round(rect.height * dpr);
+      if (w > 0 && h > 0) {
+        ws.send(JSON.stringify({ type: "resize", width: w, height: h }));
+      }
+    }
+  }
+
+  const resizeObserver = new ResizeObserver(() => {
+    if (isTabVisible) {
+      sendViewportSize();
+    }
+  });
+  if (viewportWrapper) {
+    resizeObserver.observe(viewportWrapper);
+  }
+
   function getWsUrl() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     return `${proto}//${location.host}/ws/lenny_stream`;
@@ -154,6 +185,7 @@
     ws.onopen = () => {
       console.log("[LENNY] Live screen stream connected");
       startPingLoop();
+      sendViewportSize();
     };
 
     ws.onmessage = (event) => {
@@ -266,6 +298,8 @@
           latencyBadge.style.color = "#4dffb8";
         }
       }
+    } else if (msg.type === "uipi_blocked") {
+      setUipiBlocked(Boolean(msg.blocked), msg.message, msg.window);
     } else if (msg.type === "status") {
       if (msg.status === "unpaired" || msg.status === "offline") {
         placeholder.style.display = "flex";
@@ -281,11 +315,32 @@
   // --- 4. Interactive Takeover (Bidirectional Input Forwarding) ---
   function getNormalizedCoords(e) {
     const rect = canvas.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
+    const cw = canvas.width || 1280;
+    const ch = canvas.height || 720;
+    const canvasAspect = cw / ch;
+    const elementAspect = rect.width / rect.height;
+
+    let renderW, renderH, offsetX, offsetY;
+    if (elementAspect > canvasAspect) {
+      // Pillarboxed (letterbox on left/right)
+      renderH = rect.height;
+      renderW = renderH * canvasAspect;
+      offsetX = (rect.width - renderW) / 2;
+      offsetY = 0;
+    } else {
+      // Letterboxed (bars on top/bottom)
+      renderW = rect.width;
+      renderH = renderW / canvasAspect;
+      offsetX = 0;
+      offsetY = (rect.height - renderH) / 2;
+    }
+
+    const clickX = e.clientX - rect.left - offsetX;
+    const clickY = e.clientY - rect.top - offsetY;
+
     return {
-      norm_x: Math.max(0.0, Math.min(1.0, x)),
-      norm_y: Math.max(0.0, Math.min(1.0, y)),
+      norm_x: Math.max(0.0, Math.min(1.0, clickX / renderW)),
+      norm_y: Math.max(0.0, Math.min(1.0, clickY / renderH)),
     };
   }
 
@@ -352,15 +407,38 @@
 
   canvas.addEventListener("keydown", (e) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
-      // Prevent browser default on standard editing keys (Tab, Backspace, arrows)
-      if (["Tab", "Backspace", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.key)) {
+      const isEditingNav = ["Tab", "Backspace", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "Enter", "Escape", "Delete"].includes(e.key);
+      if (isEditingNav || e.ctrlKey || e.altKey) {
         e.preventDefault();
       }
       ws.send(JSON.stringify({
         type: "key",
-        event: "press",
+        event: "keydown",
         key: e.key,
+        code: e.code,
         char_code: e.key.length === 1 ? e.key.charCodeAt(0) : null,
+        ctrl: e.ctrlKey,
+        alt: e.altKey,
+        shift: e.shiftKey,
+        meta: e.metaKey,
+      }));
+    }
+  });
+
+  canvas.addEventListener("keyup", (e) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      if (["Tab", "Backspace", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "Enter", "Escape", "Delete"].includes(e.key) || e.ctrlKey || e.altKey) {
+        e.preventDefault();
+      }
+      ws.send(JSON.stringify({
+        type: "key",
+        event: "keyup",
+        key: e.key,
+        code: e.code,
+        ctrl: e.ctrlKey,
+        alt: e.altKey,
+        shift: e.shiftKey,
+        meta: e.metaKey,
       }));
     }
   });
@@ -399,6 +477,21 @@
       updateStatusPill("paused");
     } else {
       takeoverBanner.style.display = "none";
+    }
+  }
+
+  function setUipiBlocked(blocked, message, windowTitle) {
+    if (blocked) {
+      uipiBanner.style.display = "flex";
+      if (message) {
+        uipiText.textContent = message;
+      } else if (windowTitle) {
+        uipiText.textContent = `LENNY is showing an administrator window (${windowTitle}) that ARCHER can't control. Switch windows or close Administrator PowerShell on LENNY.`;
+      } else {
+        uipiText.textContent = "LENNY is showing an administrator window that ARCHER can't control. Switch windows or close Administrator PowerShell on LENNY.";
+      }
+    } else {
+      uipiBanner.style.display = "none";
     }
   }
 

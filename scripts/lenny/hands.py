@@ -135,6 +135,10 @@ class HandsState:
         self.current_task: str = ""
         self.takeover_active: bool = False
         self.last_autonomous_action_time: float = 0.0
+        self.last_injected_input_time: float = 0.0
+        self.target_width: int = 1280
+        self.target_height: int = 720
+        self.uipi_blocked: bool = False
 
         self.browser_process: Optional[subprocess.Popen] = None
         self._subscriber_websockets: set[WebSocket] = set()
@@ -169,7 +173,7 @@ class HandsState:
         return secrets.compare_digest(req_token, self.token)
 
     # -------------------------------------------------------------------------
-    # Physical User Takeover Detection (GetLastInputInfo)
+    # Physical User Takeover Detection (GetLastInputInfo) & UIPI Inspection
     # -------------------------------------------------------------------------
 
     def _get_idle_ms(self) -> int:
@@ -180,6 +184,93 @@ class HandsState:
             return max(0, curr_ticks - lii.dwTime)
         return 999999
 
+    def is_foreground_elevated(self) -> Tuple[bool, str]:
+        """
+        Check if the current foreground window belongs to an elevated process (UIPI blocker).
+        Returns (is_elevated, window_title).
+        """
+        try:
+            hwnd = self.user32.GetForegroundWindow()
+            if not hwnd:
+                return False, ""
+
+            length = self.user32.GetWindowTextLengthW(hwnd)
+            buff = ctypes.create_unicode_buffer(length + 1)
+            self.user32.GetWindowTextW(hwnd, buff, length + 1)
+            title = buff.value or "Administrator Window"
+
+            pid = wintypes.DWORD()
+            self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == 0:
+                return False, title
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            h_proc = self.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+            if not h_proc:
+                err = self.kernel32.GetLastError()
+                # Access denied opening process from limited user usually indicates elevation
+                if err == 5:
+                    return True, title
+                return False, title
+
+            try:
+                TOKEN_QUERY = 0x0008
+                TokenElevation = 20
+                advapi32 = ctypes.windll.advapi32
+                h_token = wintypes.HANDLE()
+
+                if advapi32.OpenProcessToken(h_proc, TOKEN_QUERY, ctypes.byref(h_token)):
+                    try:
+                        class TOKEN_ELEVATION(ctypes.Structure):
+                            _fields_ = [("TokenIsElevated", wintypes.DWORD)]
+
+                        elevation = TOKEN_ELEVATION()
+                        ret_len = wintypes.DWORD()
+                        if advapi32.GetTokenInformation(
+                            h_token,
+                            TokenElevation,
+                            ctypes.byref(elevation),
+                            ctypes.sizeof(TOKEN_ELEVATION),
+                            ctypes.byref(ret_len),
+                        ):
+                            return bool(elevation.TokenIsElevated != 0), title
+                    finally:
+                        self.kernel32.CloseHandle(h_token)
+            finally:
+                self.kernel32.CloseHandle(h_proc)
+
+            lower_title = title.lower()
+            if "administrator" in lower_title or "task manager" in lower_title or "elevated" in lower_title:
+                return True, title
+
+            return False, title
+        except Exception as e:
+            logger.debug(f"[Hands] Elevation check error: {e}")
+            return False, ""
+
+    def open_app(self, name: str) -> Dict[str, Any]:
+        """Launch an application on LENNY."""
+        self.last_injected_input_time = time.time()
+        self.last_autonomous_action_time = time.time()
+        alias_map = {
+            "word": "winword",
+            "excel": "excel",
+            "powerpoint": "powerpnt",
+            "notepad": "notepad",
+            "calculator": "calc",
+            "paint": "mspaint",
+            "chrome": "chrome",
+            "edge": "msedge",
+        }
+        clean = alias_map.get(name.lower().strip(), name.strip())
+        logger.info(f"[Hands] Launching application '{clean}' on LENNY")
+        try:
+            proc = subprocess.Popen(clean, shell=True)
+            return {"status": "launched", "name": clean, "pid": proc.pid}
+        except Exception as e:
+            logger.error(f"[Hands] Failed to launch application '{clean}': {e}")
+            return {"status": "error", "error": str(e)}
+
     def _watchdog_loop(self) -> None:
         """Monitors physical keyboard & mouse activity on LENNY's console."""
         while True:
@@ -187,14 +278,15 @@ class HandsState:
             idle_ms = self._get_idle_ms()
             now = time.time()
 
-            # If input happened in last 1.2s and it wasn't triggered by Hands autonomous execution
-            if idle_ms < 1200 and (now - self.last_autonomous_action_time > 1.5):
+            # Physical takeover only triggers if input happened in last 1.2s AND
+            # at least 2.5s have elapsed since ANY injected/remote input was received.
+            if idle_ms < 1200 and (now - self.last_injected_input_time > 2.5) and (now - self.last_autonomous_action_time > 2.5):
                 if not self.takeover_active:
                     with self._lock:
                         self.takeover_active = True
                         if self.status == "working":
                             self.status = "paused"
-                    logger.info("[HandsWatchdog] User touched physical controls on LENNY. Takeover active.")
+                    logger.info("[HandsWatchdog] User touched physical controls on LENNY. Physical takeover active.")
                     self._broadcast_event({
                         "type": "takeover",
                         "active": True,
@@ -227,9 +319,10 @@ class HandsState:
     # Desktop Screen Capture
     # -------------------------------------------------------------------------
 
-    def capture_screen_jpeg(self, quality: int = 75, max_width: int = 1280) -> Tuple[bytes, float, int, int]:
+    def capture_screen_jpeg(self, quality: int = 75, max_width: Optional[int] = None) -> Tuple[bytes, float, int, int]:
         """Capture LENNY desktop and return (jpeg_bytes, capture_ms, width, height)."""
         start_t = time.perf_counter()
+        target_w = max_width or self.target_width or 1280
 
         import mss
         with mss.mss() as sct:
@@ -238,9 +331,9 @@ class HandsState:
             w, h = sct_img.size
             img = Image.frombytes("RGB", (w, h), sct_img.bgra, "raw", "BGRX")
 
-            if w > max_width:
+            if w > target_w:
                 aspect = h / w
-                new_w = max_width
+                new_w = target_w
                 new_h = int(new_w * aspect)
                 img = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
                 w, h = new_w, new_h
@@ -258,9 +351,17 @@ class HandsState:
 
     def send_mouse_input(self, event_type: str, norm_x: float, norm_y: float, button: str = "left") -> bool:
         """Inject physical mouse input on LENNY using normalized coordinates (0.0 to 1.0)."""
-        self.last_autonomous_action_time = time.time()
+        now = time.time()
+        self.last_injected_input_time = now
+        self.last_autonomous_action_time = now
+
         screen_w = self.user32.GetSystemMetrics(0)
         screen_h = self.user32.GetSystemMetrics(1)
+
+        # Convert to screen pixels and set cursor position explicitly
+        px = max(0, min(screen_w - 1, int(norm_x * screen_w)))
+        py = max(0, min(screen_h - 1, int(norm_y * screen_h)))
+        self.user32.SetCursorPos(px, py)
 
         # Convert to absolute normalized 0..65535 coordinates for SendInput
         abs_x = int(norm_x * 65535)
@@ -274,92 +375,181 @@ class HandsState:
         inp.u.mi.mouseData = 0
         inp.u.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE
 
+        ret = 0
         if ev == "mousemove":
-            self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-            return True
+            ret = self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
         elif ev in ("mousedown", "click"):
             flag_down = MOUSEEVENTF_LEFTDOWN if button == "left" else MOUSEEVENTF_RIGHTDOWN
             flag_up = MOUSEEVENTF_LEFTUP if button == "left" else MOUSEEVENTF_RIGHTUP
 
             inp.u.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | flag_down
-            self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+            ret = self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
             if ev == "click":
-                time.sleep(0.03)
+                time.sleep(0.025)
                 inp.u.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | flag_up
-                self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-            return True
+                ret_up = self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+                ret = ret and ret_up
         elif ev == "mouseup":
             flag_up = MOUSEEVENTF_LEFTUP if button == "left" else MOUSEEVENTF_RIGHTUP
             inp.u.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | flag_up
-            self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-            return True
+            ret = self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
         elif ev == "wheel":
             inp.u.mi.dwFlags = MOUSEEVENTF_WHEEL
             inp.u.mi.mouseData = int(norm_y)  # wheel delta
-            self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-            return True
+            ret = self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
-        return False
+        # Check for UIPI block
+        is_elevated, fg_title = self.is_foreground_elevated()
+        if ret == 0 or is_elevated:
+            err = self.kernel32.GetLastError()
+            logger.warning(
+                f"[Hands] SendInput mouse blocked/failed! ret={ret}, GetLastError={err}, elevated={is_elevated}, window='{fg_title}'"
+            )
+            self.uipi_blocked = True
+            self._broadcast_event({
+                "type": "uipi_blocked",
+                "blocked": True,
+                "window": fg_title,
+                "message": f"LENNY is showing an administrator window ({fg_title}) that ARCHER can't control. Switch windows or close Administrator PowerShell on LENNY.",
+            })
+        elif self.uipi_blocked:
+            self.uipi_blocked = False
+            self._broadcast_event({
+                "type": "uipi_blocked",
+                "blocked": False,
+            })
 
-    def send_keyboard_input(self, event_type: str, key: str, char_code: Optional[int] = None) -> bool:
-        """Inject physical keyboard input on LENNY."""
-        self.last_autonomous_action_time = time.time()
+        logger.info(f"[Hands] send_mouse_input: ev={ev} ({norm_x:.3f}, {norm_y:.3f}) px=({px}, {py}) btn={button} -> ret={ret}")
+        return ret > 0
+
+    def send_keyboard_input(
+        self,
+        event_type: str,
+        key: str,
+        char_code: Optional[int] = None,
+        ctrl: bool = False,
+        alt: bool = False,
+        shift: bool = False,
+        code: Optional[str] = None,
+    ) -> bool:
+        """Inject physical keyboard input on LENNY with complete VK and modifier support."""
+        now = time.time()
+        self.last_injected_input_time = now
+        self.last_autonomous_action_time = now
         ev = event_type.lower()
 
-        # Direct Unicode character injection
-        if char_code and char_code >= 32:
-            inp_down = INPUT()
-            inp_down.type = INPUT_KEYBOARD
-            inp_down.u.ki.wScan = char_code
-            inp_down.u.ki.dwFlags = KEYEVENTF_UNICODE
-            self.user32.SendInput(1, ctypes.byref(inp_down), ctypes.sizeof(INPUT))
-
-            inp_up = INPUT()
-            inp_up.type = INPUT_KEYBOARD
-            inp_up.u.ki.wScan = char_code
-            inp_up.u.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
-            self.user32.SendInput(1, ctypes.byref(inp_up), ctypes.sizeof(INPUT))
-            return True
-
-        # Special key mappings
-        vk_map = {
-            "enter": 0x0D, "return": 0x0D, "backspace": 0x08, "tab": 0x09,
-            "space": 0x20, "escape": 0x1B, "arrowleft": 0x25, "arrowup": 0x26,
-            "arrowright": 0x27, "arrowdown": 0x28, "delete": 0x2E,
-        }
-        vk = vk_map.get(key.lower())
-        if vk:
+        def _send_vk(vk_code: int, down: bool) -> int:
             inp = INPUT()
             inp.type = INPUT_KEYBOARD
-            inp.u.ki.wVk = vk
-            inp.u.ki.dwFlags = 0 if ev in ("keydown", "press") else KEYEVENTF_KEYUP
-            self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-            if ev == "press":
-                time.sleep(0.02)
-                inp.u.ki.dwFlags = KEYEVENTF_KEYUP
-                self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-            return True
+            inp.u.ki.wVk = vk_code
+            inp.u.ki.dwFlags = 0 if down else KEYEVENTF_KEYUP
+            return self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
-        if len(key) == 1:
-            code = ord(key)
-            inp_down = INPUT()
-            inp_down.type = INPUT_KEYBOARD
-            inp_down.u.ki.wScan = code
-            inp_down.u.ki.dwFlags = KEYEVENTF_UNICODE
-            self.user32.SendInput(1, ctypes.byref(inp_down), ctypes.sizeof(INPUT))
+        def _send_unicode(scan_code: int) -> int:
+            inp_d = INPUT()
+            inp_d.type = INPUT_KEYBOARD
+            inp_d.u.ki.wScan = scan_code
+            inp_d.u.ki.dwFlags = KEYEVENTF_UNICODE
+            r1 = self.user32.SendInput(1, ctypes.byref(inp_d), ctypes.sizeof(INPUT))
 
-            inp_up = INPUT()
-            inp_up.type = INPUT_KEYBOARD
-            inp_up.u.ki.wScan = code
-            inp_up.u.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
-            self.user32.SendInput(1, ctypes.byref(inp_up), ctypes.sizeof(INPUT))
-            return True
+            time.sleep(0.02)
+            inp_u = INPUT()
+            inp_u.type = INPUT_KEYBOARD
+            inp_u.u.ki.wScan = scan_code
+            inp_u.u.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+            r2 = self.user32.SendInput(1, ctypes.byref(inp_u), ctypes.sizeof(INPUT))
+            return r1 and r2
 
-        return False
+        # Virtual-Key map
+        vk_map: Dict[str, int] = {
+            # Standard editing / nav
+            "enter": 0x0D, "return": 0x0D, "backspace": 0x08, "tab": 0x09,
+            "space": 0x20, "escape": 0x1B, "esc": 0x1B,
+            "delete": 0x2E, "del": 0x2E, "insert": 0x2D, "ins": 0x2D,
+            "home": 0x24, "end": 0x23, "pageup": 0x21, "pagedown": 0x22,
+            "arrowleft": 0x25, "arrowup": 0x26, "arrowright": 0x27, "arrowdown": 0x28,
+            "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28,
+            # Modifiers
+            "shift": 0x10, "control": 0x11, "ctrl": 0x11, "alt": 0x12, "menu": 0x12,
+        }
+        # Function keys F1-F12
+        for i in range(1, 13):
+            vk_map[f"f{i}"] = 0x70 + (i - 1)
+        # Digits 0-9
+        for i in range(10):
+            vk_map[str(i)] = 0x30 + i
+        # Letters a-z
+        for c in range(ord('a'), ord('z') + 1):
+            vk_map[chr(c)] = 0x41 + (c - ord('a'))
+
+        ret = 0
+        key_lower = key.lower().strip()
+        vk = vk_map.get(key_lower)
+
+        # Check if code (e.g. 'KeyA', 'Enter') gives VK if key is special
+        if not vk and code:
+            code_lower = code.lower().replace("key", "").replace("digit", "")
+            vk = vk_map.get(code_lower)
+
+        # Modifiers down if press or keydown
+        if ctrl and ev in ("press", "keydown"):
+            _send_vk(0x11, True)
+        if shift and ev in ("press", "keydown"):
+            _send_vk(0x10, True)
+        if alt and ev in ("press", "keydown"):
+            _send_vk(0x12, True)
+
+        if vk:
+            if ev in ("keydown", "press"):
+                ret = _send_vk(vk, True)
+                if ev == "press":
+                    time.sleep(0.025)
+                    _send_vk(vk, False)
+            elif ev == "keyup":
+                ret = _send_vk(vk, False)
+        elif char_code and char_code >= 32:
+            ret = _send_unicode(char_code)
+        elif len(key) == 1:
+            ret = _send_unicode(ord(key))
+
+        # Modifiers up
+        if alt and ev in ("press", "keyup"):
+            _send_vk(0x12, False)
+        if shift and ev in ("press", "keyup"):
+            _send_vk(0x10, False)
+        if ctrl and ev in ("press", "keyup"):
+            _send_vk(0x11, False)
+
+        # Check for UIPI block
+        is_elevated, fg_title = self.is_foreground_elevated()
+        if ret == 0 or is_elevated:
+            err = self.kernel32.GetLastError()
+            logger.warning(
+                f"[Hands] SendInput keyboard blocked/failed! ret={ret}, GetLastError={err}, elevated={is_elevated}, window='{fg_title}'"
+            )
+            self.uipi_blocked = True
+            self._broadcast_event({
+                "type": "uipi_blocked",
+                "blocked": True,
+                "window": fg_title,
+                "message": f"LENNY is showing an administrator window ({fg_title}) that ARCHER can't control. Switch windows or close Administrator PowerShell on LENNY.",
+            })
+        elif self.uipi_blocked:
+            self.uipi_blocked = False
+            self._broadcast_event({
+                "type": "uipi_blocked",
+                "blocked": False,
+            })
+
+        logger.info(f"[Hands] send_keyboard_input: key='{key}' ev={ev} ctrl={ctrl} alt={alt} shift={shift} -> ret={ret}")
+        return ret > 0
 
     def send_text_string(self, text: str) -> bool:
         """Inject a sequence of text characters on LENNY."""
-        self.last_autonomous_action_time = time.time()
+        now = time.time()
+        self.last_injected_input_time = now
+        self.last_autonomous_action_time = now
+        logger.info(f"[Hands] send_text_string: length={len(text)}")
         for ch in text:
             self.send_keyboard_input("press", key=ch, char_code=ord(ch))
         return True
@@ -743,6 +933,14 @@ async def set_task(payload: dict, x_lenny_token: Optional[str] = Header(None)):
     return {"status": hands_state.status, "task": hands_state.current_task}
 
 
+@app.post("/api/app/open")
+async def open_app_endpoint(payload: dict, x_lenny_token: Optional[str] = Header(None)):
+    if not hands_state.verify_auth(x_lenny_token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    app_name = payload.get("name", "").strip()
+    return hands_state.open_app(app_name)
+
+
 # =============================================================================
 # WebSocket Live Stream & Input Channel (~30 FPS)
 # =============================================================================
@@ -771,7 +969,15 @@ async def ws_stream(websocket: WebSocket, token: Optional[str] = Query(None)):
                         "client_time": msg.get("time"),
                         "server_time": time.time(),
                     }))
+                elif mtype == "resize":
+                    req_w = int(msg.get("width", 1280))
+                    req_h = int(msg.get("height", 720))
+                    screen_w = hands_state.user32.GetSystemMetrics(0)
+                    hands_state.target_width = min(screen_w, max(640, req_w))
+                    hands_state.target_height = max(360, req_h)
+                    logger.info(f"[HandsWS] Resize requested: {req_w}x{req_h} -> target {hands_state.target_width}x{hands_state.target_height}")
                 elif mtype == "mouse":
+                    logger.info(f"[HandsWS] Mouse input: {msg.get('event')} ({msg.get('norm_x')}, {msg.get('norm_y')}) btn={msg.get('button')}")
                     hands_state.send_mouse_input(
                         event_type=msg.get("event", "click"),
                         norm_x=float(msg.get("norm_x", 0.0)),
@@ -779,12 +985,18 @@ async def ws_stream(websocket: WebSocket, token: Optional[str] = Query(None)):
                         button=msg.get("button", "left"),
                     )
                 elif mtype == "key":
+                    logger.info(f"[HandsWS] Key input: {msg.get('event')} key='{msg.get('key')}' code='{msg.get('code')}' ctrl={msg.get('ctrl')} alt={msg.get('alt')} shift={msg.get('shift')}")
                     hands_state.send_keyboard_input(
                         event_type=msg.get("event", "keydown"),
                         key=msg.get("key", ""),
                         char_code=msg.get("char_code"),
+                        ctrl=bool(msg.get("ctrl")),
+                        alt=bool(msg.get("alt")),
+                        shift=bool(msg.get("shift")),
+                        code=msg.get("code"),
                     )
                 elif mtype == "text":
+                    logger.info(f"[HandsWS] Text input: length={len(msg.get('text', ''))}")
                     hands_state.send_text_string(text=msg.get("text", ""))
         except (WebSocketDisconnect, asyncio.CancelledError):
             active = False
@@ -797,7 +1009,7 @@ async def ws_stream(websocket: WebSocket, token: Optional[str] = Query(None)):
     try:
         while active:
             loop_start = time.perf_counter()
-            jpeg_bytes, cap_ms, w, h = hands_state.capture_screen_jpeg(quality=70, max_width=1280)
+            jpeg_bytes, cap_ms, w, h = hands_state.capture_screen_jpeg(quality=70, max_width=hands_state.target_width)
 
             if jpeg_bytes:
                 b64_frame = base64.b64encode(jpeg_bytes).decode("ascii")

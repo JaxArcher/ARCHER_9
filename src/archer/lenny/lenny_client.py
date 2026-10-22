@@ -342,7 +342,7 @@ class LennyClient:
     def create_word_document(
         self,
         title: str,
-        paragraphs: List[str],
+        paragraphs: Any,
         filename: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create Word document via Office COM on LENNY and pull to ARCHER artifacts."""
@@ -350,13 +350,22 @@ class LennyClient:
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"LennyWord_{ts}.docx"
 
+        if isinstance(paragraphs, str):
+            # Split lines or treat as single paragraph
+            lines = [p.strip() for p in paragraphs.split("\n") if p.strip()]
+            para_list = lines if lines else [paragraphs]
+        elif isinstance(paragraphs, list):
+            para_list = [str(p) for p in paragraphs]
+        else:
+            para_list = [str(paragraphs)]
+
         self.set_task(f"Creating Word document '{filename}'", status="working")
 
         try:
             with httpx.Client(timeout=30.0) as client:
                 resp = client.post(
                     f"{self.get_base_url()}/api/office/create_word",
-                    json={"title": title, "paragraphs": paragraphs, "filename": filename},
+                    json={"title": title, "paragraphs": para_list, "filename": filename},
                     headers=self.get_headers(),
                 )
                 if resp.status_code == 200:
@@ -379,7 +388,7 @@ class LennyClient:
     def create_excel_sheet(
         self,
         sheet_name: str,
-        rows: List[List[Any]],
+        rows: Any,
         filename: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create Excel sheet via Office COM on LENNY and pull to ARCHER artifacts."""
@@ -387,13 +396,24 @@ class LennyClient:
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"LennySheet_{ts}.xlsx"
 
+        import json
+        if isinstance(rows, str):
+            try:
+                parsed_rows = json.loads(rows)
+            except Exception:
+                parsed_rows = [[cell.strip() for cell in line.split(",")] for line in rows.split("\n") if line.strip()]
+        elif isinstance(rows, list):
+            parsed_rows = rows
+        else:
+            parsed_rows = [[str(rows)]]
+
         self.set_task(f"Creating Excel sheet '{filename}'", status="working")
 
         try:
             with httpx.Client(timeout=30.0) as client:
                 resp = client.post(
                     f"{self.get_base_url()}/api/office/create_excel",
-                    json={"sheet_name": sheet_name, "rows": rows, "filename": filename},
+                    json={"sheet_name": sheet_name, "rows": parsed_rows, "filename": filename},
                     headers=self.get_headers(),
                 )
                 if resp.status_code == 200:
@@ -411,6 +431,64 @@ class LennyClient:
             self.set_task("", status="idle")
             logger.error(f"[LennyClient] create_excel_sheet error: {e}")
             raise
+
+    def open_app(self, name: str) -> Dict[str, Any]:
+        """Launch an application on LENNY."""
+        self.set_task(f"Opening {name}", status="working")
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.post(
+                    f"{self.get_base_url()}/api/app/open",
+                    json={"name": name},
+                    headers=self.get_headers(),
+                )
+                if resp.status_code == 200:
+                    self.set_task("", status="idle")
+                    return resp.json()
+                raise RuntimeError(f"Open app failed on LENNY: {resp.text}")
+        except Exception as e:
+            self.set_task("", status="idle")
+            logger.error(f"[LennyClient] open_app error: {e}")
+            raise
+
+    def describe_screen(self, focus_area: Optional[str] = None) -> str:
+        """Capture screenshot from LENNY and describe it using local VLM on Main PC."""
+        self.set_task("Inspecting LENNY screen", status="working")
+        try:
+            screenshot_bytes = self.get_screenshot()
+            import base64
+            b64_img = base64.b64encode(screenshot_bytes).decode("ascii")
+
+            ollama_url = f"{self._cfg.ollama_base_url}/api/generate"
+            prompt = (
+                "You are an assistant viewing the desktop screen of LENNY, ARCHER's dedicated PC. "
+                "Describe concisely in 2-3 plain sentences what is currently visible on the screen, "
+                "including any open applications, windows, or documents."
+            )
+            if focus_area:
+                prompt += f" Pay special attention to {focus_area}."
+
+            payload = {
+                "model": "qwen2.5vl:7b",
+                "prompt": prompt,
+                "images": [b64_img],
+                "stream": False,
+                "keep_alive": 0,
+            }
+
+            with httpx.Client(timeout=45.0) as client:
+                resp = client.post(ollama_url, json=payload)
+                if resp.status_code == 200:
+                    res_text = resp.json().get("response", "").strip()
+                    self.set_task("", status="idle")
+                    return res_text
+                else:
+                    self.set_task("", status="idle")
+                    return f"VLM returned status {resp.status_code}"
+        except Exception as e:
+            self.set_task("", status="idle")
+            logger.warning(f"[LennyClient] describe_screen error: {e}")
+            return f"Could not describe screen: {e}"
 
     # -------------------------------------------------------------------------
     # File Synchronization & Artifacts

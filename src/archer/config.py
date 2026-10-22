@@ -349,6 +349,11 @@ class ArcherConfig(BaseSettings):
     lenny_browser_port: int = Field(default=9222, alias="ARCHER_LENNY_BROWSER_PORT")
     lenny_enabled: bool = Field(default=True, alias="ARCHER_LENNY_ENABLED")
 
+    # barehands bridge folder (restored 2026-10-22 by Claude: dropped by the
+    # Phase 7c commit d1bd68c, which crashed ARCHER at startup). Empty string
+    # (default) disables the bridge entirely, silently.
+    barehands_dir: str = Field(default="", alias="ARCHER_BAREHANDS_DIR")
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
