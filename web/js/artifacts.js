@@ -32,12 +32,13 @@
     if (ext === "xlsx" || ext === "xls" || ext === "csv") return "badge-xlsx";
     if (ext === "pdf") return "badge-pdf";
     if (["png", "jpg", "jpeg", "webp", "gif", "svg"].includes(ext)) return "badge-image";
+    if (ext === "diff" || ext === "patch") return "badge-diff";
     return "badge-other";
   }
 
   function isPreviewableDirectly(ext) {
     ext = (ext || "").toLowerCase();
-    return ["png", "jpg", "jpeg", "webp", "gif", "svg", "md", "txt", "json", "csv"].includes(ext);
+    return ["png", "jpg", "jpeg", "webp", "gif", "svg", "md", "txt", "json", "csv", "diff", "patch", "py"].includes(ext);
   }
 
   function isImage(ext) {
@@ -45,7 +46,7 @@
   }
 
   function isText(ext) {
-    return ["md", "txt", "json", "csv", "log"].includes((ext || "").toLowerCase());
+    return ["md", "txt", "json", "csv", "log", "diff", "patch", "py"].includes((ext || "").toLowerCase());
   }
 
   function renderLayout() {

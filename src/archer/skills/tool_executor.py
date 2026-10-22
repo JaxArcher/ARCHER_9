@@ -85,6 +85,8 @@ class UniversalToolExecutor:
                 res = self._exec_terminal_tool(tool_name, tool_input)
             elif category == 'pool_tools':
                 res = self._exec_pool_tool(tool_name, tool_input)
+            elif category == 'rnd':
+                res = self._exec_rnd_tool(tool_name, tool_input)
             else:
                 res = {'error': f'Unknown tool category: {category}'}
             duration = round(time.time() - start_t, 2)
@@ -399,5 +401,35 @@ class UniversalToolExecutor:
             clean_name = clean_name[4:]
         cmd = inp.get("command", "")
         return get_tool_pool_manager().execute_tool(clean_name, command=cmd)
+
+    def _exec_rnd_tool(self, tool_name: str, inp: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute Phase 9 R&D self-development tools (Spec Section 11b)."""
+        from archer.tools.self_dev import get_self_dev_manager
+        mgr = get_self_dev_manager()
+
+        if tool_name == 'propose_improvement':
+            return mgr.propose(
+                title=inp.get('title', ''),
+                description=inp.get('description', ''),
+                source=inp.get('source', 'user')
+            )
+        elif tool_name == 'run_rnd_job':
+            return mgr.run_job(
+                job_id=inp.get('job_id', ''),
+                writer_model=inp.get('writer_model'),
+                checker_model=inp.get('checker_model'),
+                run_async=inp.get('run_async', True)
+            )
+        elif tool_name == 'apply_rnd_update':
+            return mgr.apply_update(job_id=inp.get('job_id', ''))
+        elif tool_name == 'undo_last_update':
+            return mgr.undo_last_update(job_id=inp.get('job_id'))
+        elif tool_name == 'list_rnd_proposals':
+            return {'proposals': mgr.list_proposals(status=inp.get('status'), limit=int(inp.get('limit', 50)))}
+        elif tool_name == 'get_rnd_status':
+            prop = mgr.get_proposal(inp.get('job_id', ''))
+            return {'proposal': prop} if prop else {'error': f"Proposal '{inp.get('job_id')}' not found"}
+        else:
+            return {'error': f'Unknown R&D tool: {tool_name}'}
 
 

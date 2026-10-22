@@ -536,6 +536,73 @@ async def search_memory(
         raise HTTPException(status_code=500, detail="Search failed.")
 
 
+# --- Phase 9: Self-Development & R&D Endpoints (Spec Section 11b) ---
+
+@app.get("/api/rnd/proposals")
+async def list_rnd_proposals_endpoint(status: Optional[str] = None):
+    """List R&D proposals with optional status filter."""
+    from archer.tools.self_dev import get_self_dev_manager
+    mgr = get_self_dev_manager()
+    return {"proposals": mgr.list_proposals(status=status)}
+
+
+@app.post("/api/rnd/propose")
+async def create_rnd_proposal_endpoint(payload: dict):
+    """Record a new plain-language improvement proposal."""
+    from archer.tools.self_dev import get_self_dev_manager
+    mgr = get_self_dev_manager()
+    title = (payload.get("title") or "").strip()
+    desc = (payload.get("description") or "").strip()
+    source = payload.get("source", "user")
+    if not title:
+        raise HTTPException(status_code=400, detail="Title is required")
+    prop = mgr.propose(title=title, description=desc, source=source)
+    _broadcast_ws({"type": "rnd_proposal_created", "proposal": prop})
+    return prop
+
+
+@app.post("/api/rnd/run")
+async def run_rnd_job_endpoint(payload: dict):
+    """Run R&D job in isolated worktree with dual models (writer & checker)."""
+    from archer.tools.self_dev import get_self_dev_manager
+    mgr = get_self_dev_manager()
+    job_id = payload.get("job_id")
+    if not job_id:
+        raise HTTPException(status_code=400, detail="job_id is required")
+    res = mgr.run_job(
+        job_id=job_id,
+        writer_model=payload.get("writer_model"),
+        checker_model=payload.get("checker_model"),
+        run_async=payload.get("run_async", True),
+    )
+    _broadcast_ws({"type": "rnd_job_started", "job_id": job_id})
+    return res
+
+
+@app.post("/api/rnd/apply")
+async def apply_rnd_update_endpoint(payload: dict):
+    """Apply tested R&D update through Phase 3 approval gate with backup."""
+    from archer.tools.self_dev import get_self_dev_manager
+    mgr = get_self_dev_manager()
+    job_id = payload.get("job_id")
+    if not job_id:
+        raise HTTPException(status_code=400, detail="job_id is required")
+    res = mgr.apply_update(job_id=job_id)
+    _broadcast_ws({"type": "rnd_update_applied", **res})
+    return res
+
+
+@app.post("/api/rnd/undo")
+async def undo_rnd_update_endpoint(payload: dict = None):
+    """Restore previous state from backup ('ARCHER, undo the last update')."""
+    from archer.tools.self_dev import get_self_dev_manager
+    mgr = get_self_dev_manager()
+    job_id = (payload or {}).get("job_id")
+    res = mgr.undo_last_update(job_id=job_id)
+    _broadcast_ws({"type": "rnd_update_undone", **res})
+    return res
+
+
 # --- Browser client event bridge ---
 # Forwards the internal event bus (archer.core.event_bus — the same one
 # the PyQt6 ConversationPanel subscribes to, see gui/conversation.py) to
@@ -673,6 +740,16 @@ def _register_event_bridge() -> None:
     bus.subscribe(EventType.ARTIFACT_DISPLAY, lambda e: _on_bus_event(
         "artifact_display", filename=e.data.get("filename"),
         filepath=e.data.get("filepath"), action=e.data.get("action")))
+    bus.subscribe(EventType.RND_PROPOSAL_CREATED, lambda e: _on_bus_event(
+        "rnd_proposal_created", proposal=e.data))
+    bus.subscribe(EventType.RND_JOB_STARTED, lambda e: _on_bus_event(
+        "rnd_job_started", **e.data))
+    bus.subscribe(EventType.RND_JOB_COMPLETED, lambda e: _on_bus_event(
+        "rnd_job_completed", **e.data))
+    bus.subscribe(EventType.RND_UPDATE_APPLIED, lambda e: _on_bus_event(
+        "rnd_update_applied", **e.data))
+    bus.subscribe(EventType.RND_UPDATE_UNDONE, lambda e: _on_bus_event(
+        "rnd_update_undone", **e.data))
     bus.subscribe_halt(lambda e: _on_bus_event("halt"))
     try:
         from archer.android_manager import get_android_manager
@@ -1814,6 +1891,38 @@ async def ws_voice(websocket: WebSocket):
                     }))
                 else:
                     _technical_subscribers.discard(websocket)
+            elif msg_type == "rnd_get_proposals":
+                from archer.tools.self_dev import get_self_dev_manager
+                proposals = get_self_dev_manager().list_proposals(status=msg.get("status"))
+                await _ws_send_safe(websocket, json.dumps({
+                    "type": "rnd_proposals_list",
+                    "proposals": proposals,
+                }))
+            elif msg_type == "rnd_propose":
+                from archer.tools.self_dev import get_self_dev_manager
+                prop = get_self_dev_manager().propose(
+                    title=msg.get("title", ""),
+                    description=msg.get("description", ""),
+                    source=msg.get("source", "user"),
+                )
+                _broadcast_ws({"type": "rnd_proposal_created", "proposal": prop})
+            elif msg_type == "rnd_run":
+                from archer.tools.self_dev import get_self_dev_manager
+                res = get_self_dev_manager().run_job(
+                    job_id=msg.get("job_id", ""),
+                    writer_model=msg.get("writer_model"),
+                    checker_model=msg.get("checker_model"),
+                    run_async=msg.get("run_async", True),
+                )
+                _broadcast_ws({"type": "rnd_job_started", "job_id": msg.get("job_id")})
+            elif msg_type == "rnd_apply":
+                from archer.tools.self_dev import get_self_dev_manager
+                res = get_self_dev_manager().apply_update(job_id=msg.get("job_id", ""))
+                _broadcast_ws({"type": "rnd_update_applied", **res})
+            elif msg_type == "rnd_undo":
+                from archer.tools.self_dev import get_self_dev_manager
+                res = get_self_dev_manager().undo_last_update(job_id=msg.get("job_id"))
+                _broadcast_ws({"type": "rnd_update_undone", **res})
     except WebSocketDisconnect:
         pass
     finally:

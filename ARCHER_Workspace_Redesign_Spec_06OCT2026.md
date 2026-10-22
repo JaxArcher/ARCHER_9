@@ -1623,7 +1623,7 @@ May be added to ARCHER's own `.venv` / `web/vendor/` without asking again:
 | `openpyxl` (MIT), into the document-tools environment. Approved by Col 2026-10-21. | 5 | Excel files |
 | `aiogram` (MIT), pinned version. Approved by Col 2026-10-21. | 10d | Telegram line |
 | `gridstack` 14.0.0 (MIT), stored in `web/vendor/gridstack/`. Selected per Rule 11 check (preserves persistent DOM elements so `<video>` stream and `<iframe>`s never reload on move/resize). Approved by Col 2026-10-21. | 4c | Resizable panes |
-| Antigravity CLI (`agy`), using Col's own Antigravity login, no API keys. Approved in principle by Col 2026-10-21; check the install, licence and quota first. | 9 | ARCHER works on itself |
+| Antigravity CLI (`agy` v1.4.5 Windows x64 binary in `C:\Users\colby\AppData\Local\agy\bin\agy.exe`), headless mode with `--sandbox --output-format json`, using Col's cached Antigravity login (zero pay-per-use APIs). Approved by Col 2026-10-21, installed & verified 2026-10-22. | 9 | ARCHER works on itself |
 | Google's Android SDK command-line tools, Android Emulator, platform-tools (adb) and one Google Play x86_64 system image (Android SDK License; free, not open source), installed in `data/android/` (gitignored), not in `.venv`. Approved by Col 2026-10-20 ("proceed with building"). | 7b | Android tab |
 | Eclipse Temurin JRE 17 (GPLv2+CE, portable zip for Windows x64, pinned SHA-256: `bc21a93923103cdaac93ee337b0ae4365e739fde36df823dd456bc67c8a9d352`), extracted into `data/android/jdk/`, not in `.venv` or system PATH. Approved by Col 2026-10-21. | 7b | Android tab (sdkmanager / avdmanager) |
 

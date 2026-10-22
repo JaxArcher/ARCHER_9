@@ -52,6 +52,8 @@ READ_ONLY_TOOLS = {
     "open_document",
     "show_in_folder",
     "list_artifacts",
+    "list_rnd_proposals",
+    "get_rnd_status",
 }
 
 # ARCHER's internal record mutations and new artifact creations (Spec Section 6)
@@ -71,6 +73,8 @@ SELF_RECORD_TOOLS = {
     "create_spreadsheet",
     "create_pdf",
     "merge_pdfs",
+    "propose_improvement",
+    "undo_last_update",
 }
 
 # Tools that ALWAYS require explicit approval even when session approval is active
@@ -78,7 +82,28 @@ ALWAYS_ASK_TOOLS = {
     "install_tool_git",
     "install_venv",
     "install_package_venv",
+    "apply_rnd_update_security",
 }
+
+# Security and permission sensitive files that ALWAYS require individual approval (Spec Section 11b)
+SECURITY_SENSITIVE_FILES = [
+    "src/archer/core/approvals.py",       # The approval gate
+    "src/archer/core/security.py",        # Security rules
+    "src/archer/tools/tool_auditor.py",   # Tool auditor & security checks
+    "src/archer/agents/AGENTS.md",        # Agent behavioral boundaries & permissions
+    ".env",                               # Environment secrets & tokens
+    "settings.json",                      # Permissions configuration
+]
+
+
+def touches_security_sensitive_files(file_list: List[str]) -> bool:
+    """Check if any file in file_list touches security rules, approval gate, .env, or permissions."""
+    for f in file_list:
+        f_norm = str(f).replace("\\", "/").lower()
+        for sensitive in SECURITY_SENSITIVE_FILES:
+            if sensitive.lower() in f_norm or f_norm.endswith(".env"):
+                return True
+    return False
 
 
 class ApprovalManager:
@@ -130,6 +155,14 @@ class ApprovalManager:
 
         if tool_name in ALWAYS_ASK_TOOLS:
             return True, "always_ask"
+
+        if tool_name == "apply_rnd_update":
+            # Spec Section 11b: Changes to approval gate, security rules, .env, or permissions ALWAYS require individual approval
+            if tool_input.get("touches_security") or touches_security_sensitive_files(tool_input.get("files", [])):
+                return True, "always_ask_security"
+            if self.session_approval_active:
+                return False, "session_approved"
+            return True, "changes_state"
 
         if self.session_approval_active:
             return False, "session_approved"
@@ -198,6 +231,16 @@ class ApprovalManager:
         if tool_name == "switch_tab":
             tab = tool_input.get("tab_name", "")
             return "self_record", f"Switch to '{tab}' tab", f"Tab: {tab}"
+
+        if tool_name == "apply_rnd_update":
+            title = tool_input.get("title", "")
+            job_id = tool_input.get("job_id", "")
+            files = tool_input.get("files", [])
+            sec_warn = " [SECURITY: Individual approval required]" if tool_input.get("touches_security") or touches_security_sensitive_files(files) else ""
+            return "self_dev_apply", f"Apply R&D update: {title}{sec_warn}", f"Job: {job_id}, Files: {len(files)}"
+
+        if tool_name == "undo_last_update":
+            return "self_dev_undo", "Undo last R&D update", "Restores repository from pre-apply backup"
 
         return "changes_state", f"Execute action '{tool_name}'", str(tool_input)
 

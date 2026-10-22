@@ -702,6 +702,42 @@ class SQLiteStore:
                 CREATE INDEX IF NOT EXISTS idx_device_pairings_code ON device_pairings(pairing_code);
                 CREATE INDEX IF NOT EXISTS idx_device_pairings_token ON device_pairings(token);
                 CREATE INDEX IF NOT EXISTS idx_device_pairings_status ON device_pairings(status);
+
+                -- Phase 9: Self-Development & R&D (Spec Section 11b)
+                CREATE TABLE IF NOT EXISTS rnd_proposals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT UNIQUE NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'user', -- 'user', 'self_observation', 'research', 'tool_failure'
+                    status TEXT NOT NULL DEFAULT 'proposed', -- 'proposed', 'running', 'ready_for_review', 'applied', 'rejected', 'undone', 'failed'
+                    branch_name TEXT,
+                    worktree_path TEXT,
+                    writer_model TEXT,
+                    checker_model TEXT,
+                    checker_verdict TEXT DEFAULT 'pending', -- 'pending', 'clear', 'concerns', 'reject'
+                    checker_reason TEXT,
+                    diff_content TEXT,
+                    test_results TEXT,
+                    summary TEXT,
+                    artifact_path TEXT,
+                    backup_path TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    applied_at TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_rnd_proposals_job_id ON rnd_proposals(job_id);
+                CREATE INDEX IF NOT EXISTS idx_rnd_proposals_status ON rnd_proposals(status);
+
+                CREATE TABLE IF NOT EXISTS rnd_backups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    backup_path TEXT NOT NULL,
+                    files_json TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    restored_at TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_rnd_backups_job_id ON rnd_backups(job_id);
             """)
             try:
                 conn.execute(
@@ -4058,6 +4094,167 @@ class SQLiteStore:
                 cur = conn.execute(
                     "UPDATE device_pairings SET status = 'revoked' WHERE device_type = ? AND status IN ('paired', 'pending')",
                     (device_type,),
+                )
+                return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    # -------------------------------------------------------------------------
+    # Phase 9: Self-Development & R&D Helpers (Spec Section 11b)
+    # -------------------------------------------------------------------------
+
+    def create_rnd_proposal(
+        self,
+        job_id: str,
+        title: str,
+        description: str,
+        source: str = "user",
+    ) -> Dict[str, Any]:
+        """Insert a new R&D proposal into rnd_proposals."""
+        conn = self._get_connection()
+        try:
+            with conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO rnd_proposals (job_id, title, description, source, status)
+                    VALUES (?, ?, ?, ?, 'proposed')
+                    """,
+                    (job_id, title, description, source),
+                )
+                prop_id = cur.lastrowid
+                row = conn.execute(
+                    "SELECT id, job_id, title, description, source, status, branch_name, worktree_path, "
+                    "writer_model, checker_model, checker_verdict, checker_reason, diff_content, "
+                    "test_results, summary, artifact_path, backup_path, created_at, updated_at, applied_at "
+                    "FROM rnd_proposals WHERE id = ?",
+                    (prop_id,),
+                ).fetchone()
+                cols = [
+                    "id", "job_id", "title", "description", "source", "status", "branch_name", "worktree_path",
+                    "writer_model", "checker_model", "checker_verdict", "checker_reason", "diff_content",
+                    "test_results", "summary", "artifact_path", "backup_path", "created_at", "updated_at", "applied_at"
+                ]
+                return dict(zip(cols, row)) if row else {}
+        finally:
+            conn.close()
+
+    def get_rnd_proposal(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve an R&D proposal by job_id."""
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                "SELECT id, job_id, title, description, source, status, branch_name, worktree_path, "
+                "writer_model, checker_model, checker_verdict, checker_reason, diff_content, "
+                "test_results, summary, artifact_path, backup_path, created_at, updated_at, applied_at "
+                "FROM rnd_proposals WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return None
+            cols = [
+                "id", "job_id", "title", "description", "source", "status", "branch_name", "worktree_path",
+                "writer_model", "checker_model", "checker_verdict", "checker_reason", "diff_content",
+                "test_results", "summary", "artifact_path", "backup_path", "created_at", "updated_at", "applied_at"
+            ]
+            return dict(zip(cols, row))
+        finally:
+            conn.close()
+
+    def list_rnd_proposals(self, status: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        """List R&D proposals, newest first."""
+        conn = self._get_connection()
+        try:
+            cols = [
+                "id", "job_id", "title", "description", "source", "status", "branch_name", "worktree_path",
+                "writer_model", "checker_model", "checker_verdict", "checker_reason", "diff_content",
+                "test_results", "summary", "artifact_path", "backup_path", "created_at", "updated_at", "applied_at"
+            ]
+            cols_str = ", ".join(cols)
+            if status:
+                rows = conn.execute(
+                    f"SELECT {cols_str} FROM rnd_proposals WHERE status = ? ORDER BY id DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"SELECT {cols_str} FROM rnd_proposals ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [dict(zip(cols, r)) for r in rows]
+        finally:
+            conn.close()
+
+    def update_rnd_proposal(self, job_id: str, **kwargs: Any) -> bool:
+        """Update fields on an R&D proposal."""
+        if not kwargs:
+            return False
+        conn = self._get_connection()
+        try:
+            set_clauses = []
+            params = []
+            for k, v in kwargs.items():
+                set_clauses.append(f"{k} = ?")
+                params.append(v)
+            set_clauses.append("updated_at = datetime('now')")
+            params.append(job_id)
+            with conn:
+                cur = conn.execute(
+                    f"UPDATE rnd_proposals SET {', '.join(set_clauses)} WHERE job_id = ?",
+                    params,
+                )
+                return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def record_rnd_backup(self, job_id: str, backup_path: str, files: List[str]) -> int:
+        """Record pre-apply backup for an R&D update."""
+        conn = self._get_connection()
+        try:
+            with conn:
+                cur = conn.execute(
+                    "INSERT INTO rnd_backups (job_id, backup_path, files_json) VALUES (?, ?, ?)",
+                    (job_id, backup_path, json.dumps(files)),
+                )
+                return cur.lastrowid
+        finally:
+            conn.close()
+
+    def get_latest_rnd_backup(self, job_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get the latest non-restored backup, optionally for a specific job."""
+        conn = self._get_connection()
+        try:
+            if job_id:
+                row = conn.execute(
+                    "SELECT id, job_id, backup_path, files_json, created_at, restored_at "
+                    "FROM rnd_backups WHERE job_id = ? AND restored_at IS NULL ORDER BY id DESC LIMIT 1",
+                    (job_id,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT id, job_id, backup_path, files_json, created_at, restored_at "
+                    "FROM rnd_backups WHERE restored_at IS NULL ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0],
+                "job_id": row[1],
+                "backup_path": row[2],
+                "files_json": row[3],
+                "created_at": row[4],
+                "restored_at": row[5],
+            }
+        finally:
+            conn.close()
+
+    def mark_rnd_backup_restored(self, backup_id: int) -> bool:
+        """Mark an R&D backup as restored."""
+        conn = self._get_connection()
+        try:
+            with conn:
+                cur = conn.execute(
+                    "UPDATE rnd_backups SET restored_at = datetime('now') WHERE id = ?",
+                    (backup_id,),
                 )
                 return cur.rowcount > 0
         finally:

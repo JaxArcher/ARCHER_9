@@ -1903,6 +1903,36 @@ Output JSON format:
         title = outcome.get("playing") or query
         return f"Playing {title}."
 
+    # "ARCHER, undo the last update" (Phase 9, Spec Section 11b)
+    _UNDO_UPDATE_RE = re.compile(
+        r"^(?:(?:hey\s+)?archer\s+)?"
+        r"(?:(?:can|could|would|will)\s+you\s+|please\s+|just\s+)*"
+        r"(?:undo|rollback|revert)\s+(?:the\s+)?(?:last\s+)?(?:update|change|patch)"
+        r"(?:\s+(?:for\s+me|please|now))*$",
+        re.IGNORECASE
+    )
+
+    def _handle_undo_update_command(self, text: str) -> Optional[str]:
+        """Restore repository state from backup for 'undo the last update'; the reply to speak, or None."""
+        clean = re.sub(r"[^\w\s'&-]", " ", (text or "").lower())
+        clean = " ".join(clean.split())
+        if not clean or len(clean.split()) > 12:
+            return None
+        if not self._UNDO_UPDATE_RE.match(clean):
+            return None
+        try:
+            from archer.tools.self_dev import get_self_dev_manager
+            res = get_self_dev_manager().undo_last_update()
+            if res.get("status") == "undone":
+                num = len(res.get("restored_files", []))
+                return f"I've undone the last update and restored {num} files from backup."
+            else:
+                msg = res.get("message", "No backup found")
+                return f"I couldn't undo the last update: {msg}."
+        except Exception as e:
+            logger.error(f"CoreAgent: undo_last_update failed: {e}")
+            return f"I ran into an error undoing the update: {e}."
+
     def _transcript_day_window(self, clean: str) -> Optional[tuple[float, float]]:
         """The day a question refers to ('yesterday', 'Tuesday', 'today', ...), as (start, end) epoch seconds."""
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -2011,6 +2041,10 @@ Output JSON format:
         open_reply = self._handle_open_site_command(text) or self._handle_youtube_play_command(text)
         if open_reply:
             return open_reply, "direct_reply", None, ""
+
+        undo_reply = self._handle_undo_update_command(text)
+        if undo_reply:
+            return undo_reply, "direct_reply", None, ""
 
         # Items (Phase 2d): "where's my wallet?", "this is my wallet", "forget my
         # wallet", answered from the item records, never guessed by the model.

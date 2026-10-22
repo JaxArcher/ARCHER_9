@@ -90,6 +90,13 @@ class EventType(str, Enum):
     SYSTEM_SHUTDOWN = "system.shutdown"
     SYSTEM_ERROR = "system.error"
 
+    # Phase 9: Self-development / R&D events
+    RND_PROPOSAL_CREATED = "rnd.proposal_created"
+    RND_JOB_STARTED = "rnd.job_started"
+    RND_JOB_COMPLETED = "rnd.job_completed"
+    RND_UPDATE_APPLIED = "rnd.update_applied"
+    RND_UPDATE_UNDONE = "rnd.update_undone"
+
 
 @dataclass
 class Event:
