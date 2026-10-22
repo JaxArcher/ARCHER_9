@@ -10,6 +10,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ARCHER</title>
   <link rel="stylesheet" href="/static/vendor/gridstack/gridstack.min.css" />
+  <link rel="stylesheet" href="/static/vendor/xterm/xterm.css" />
   <link rel="stylesheet" href="/static/css/ui.css" />
   <link rel="stylesheet" href="/static/css/orb.css" />
   <link rel="stylesheet" href="/static/css/cursor.css" />
@@ -136,6 +137,19 @@
             <div id="archer-artifacts-view" class="archer-dashboard-card archer-artifacts-card">
               <!-- js/artifacts.js renders the artifacts manager & viewer here -->
             </div>
+            <div id="tab-terminal" class="archer-dashboard-card archer-terminal-card">
+              <div class="terminal-card-header">
+                <div class="terminal-header-title">
+                  <span class="terminal-title-icon">&#x25A4;</span>
+                  <span class="terminal-title-text">TERMINAL (PowerShell)</span>
+                </div>
+                <div class="terminal-header-actions">
+                  <button id="terminal-btn-clear" type="button" class="terminal-hdr-btn" title="Clear Screen">Clear</button>
+                  <button id="terminal-btn-restart" type="button" class="terminal-hdr-btn" title="Restart Shell">Restart</button>
+                </div>
+              </div>
+              <div id="archer-terminal-container" class="terminal-xterm-wrap"></div>
+            </div>
             <div id="tab-browser" class="archer-dashboard-card">
               <!-- js/browser.js builds live mirror of ARCHER's Playwright browser -->
             </div>
@@ -240,6 +254,9 @@
   <script src="/static/js/system.js"></script>
   <script src="/static/js/browser.js"></script>
   <script src="/static/js/artifacts.js"></script>
+  <script src="/static/vendor/xterm/xterm.js"></script>
+  <script src="/static/vendor/xterm/addon-fit.js"></script>
+  <script src="/static/js/terminal.js"></script>
   <script src="/static/js/tools.js"></script>
   <script src="/static/js/barehands.js"></script>
   <script src="/static/js/android.js"></script>

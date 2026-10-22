@@ -558,6 +558,18 @@ def _register_event_bridge() -> None:
     except Exception as e:
         logger.debug(f"Failed to wire approval broadcast callback: {e}")
 
+    try:
+        from archer.tools.terminal_manager import get_terminal_manager
+        term_mgr = get_terminal_manager()
+
+        def _broadcast_term_output(chunk: str) -> None:
+            if _ws_clients:
+                _broadcast_ws({"type": "terminal_output", "data": chunk})
+
+        term_mgr.set_broadcast_callback(_broadcast_term_output)
+    except Exception as e:
+        logger.debug(f"Failed to wire terminal broadcast callback: {e}")
+
 
 _register_event_bridge()
 
@@ -1245,6 +1257,32 @@ async def ws_voice(websocket: WebSocket):
                     "action": "show_in_folder",
                     "filepath": fp,
                     "result": res,
+                }))
+            elif msg_type == "terminal_input":
+                data = msg.get("data", "")
+                from archer.tools.terminal_manager import get_terminal_manager
+                get_terminal_manager().write(data)
+            elif msg_type == "terminal_resize":
+                cols = int(msg.get("cols", 80))
+                rows = int(msg.get("rows", 24))
+                from archer.tools.terminal_manager import get_terminal_manager
+                get_terminal_manager().resize(cols, rows)
+            elif msg_type == "terminal_restart":
+                from archer.tools.terminal_manager import get_terminal_manager
+                success = get_terminal_manager().restart()
+                await _ws_send_safe(websocket, json.dumps({
+                    "type": "terminal_restarted",
+                    "status": "success" if success else "error",
+                }))
+            elif msg_type == "terminal_get_history":
+                from archer.tools.terminal_manager import get_terminal_manager
+                tm = get_terminal_manager()
+                if not tm.is_alive():
+                    tm.start()
+                history = tm.get_history()
+                await _ws_send_safe(websocket, json.dumps({
+                    "type": "terminal_history",
+                    "data": history,
                 }))
             elif msg_type == "request_camera_frame":
                 asyncio.create_task(_request_browser_camera_frame(websocket, timeout=5.0))

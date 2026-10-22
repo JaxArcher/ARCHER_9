@@ -52,6 +52,9 @@ const ArcherClient = (() => {
     artifactsList: [],
     artifactDisplay: [],
     artifactActionResult: [],
+    terminalOutput: [],
+    terminalHistory: [],
+    terminalRestarted: [],
     connected: [],
     disconnected: [],
   };
@@ -256,6 +259,15 @@ const ArcherClient = (() => {
       case "artifact_action_result":
         emit("artifactActionResult", msg);
         break;
+      case "terminal_output":
+        emit("terminalOutput", msg.data || "");
+        break;
+      case "terminal_history":
+        emit("terminalHistory", msg.data || "");
+        break;
+      case "terminal_restarted":
+        emit("terminalRestarted", msg);
+        break;
       default:
         console.warn("[ArcherClient] unknown message type:", msg.type);
     }
@@ -457,6 +469,18 @@ const ArcherClient = (() => {
     },
     sendShowArtifactInFolder(filepath) {
       send({ type: "show_artifact_in_folder", filepath });
+    },
+    sendTerminalInput(data) {
+      send({ type: "terminal_input", data });
+    },
+    sendTerminalResize(cols, rows) {
+      send({ type: "terminal_resize", cols, rows });
+    },
+    sendTerminalRestart() {
+      send({ type: "terminal_restart" });
+    },
+    sendTerminalGetHistory() {
+      send({ type: "terminal_get_history" });
     },
     connect,
   };

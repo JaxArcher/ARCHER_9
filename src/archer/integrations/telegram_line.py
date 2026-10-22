@@ -387,7 +387,7 @@ class TelegramLineService:
 
     def _on_approval_requested(self, event: Event) -> None:
         """Send approval card to Col via Telegram with inline buttons."""
-        if not self._running or not self._bot or not self._loop:
+        if not self._running or not self._bot or not self._loop or not self._loop.is_running():
             return
 
         user_id = self._config.telegram_user_id
@@ -430,7 +430,7 @@ class TelegramLineService:
 
     def _on_approval_resolved(self, event: Event) -> None:
         """Update Telegram approval message when resolved from any surface."""
-        if not self._running or not self._bot or not self._loop:
+        if not self._running or not self._bot or not self._loop or not self._loop.is_running():
             return
 
         req_id = event.data.get("request_id")

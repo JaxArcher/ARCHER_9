@@ -78,6 +78,9 @@ dependencies = [
 
     # --- Telegram Line (Spec 10d) ---
     "aiogram==3.31.0",
+
+    # --- Terminal (Phase 6, Spec Section 9) ---
+    "pywinpty==3.1.0",
 ]
 
 [project.optional-dependencies]
@@ -85,6 +88,7 @@ dev = [
     "pytest==8.3.4",
     "pytest-asyncio==0.25.0",
     "pytest-qt==4.4.0",
+    "pytest-timeout==2.4.0",
     "ruff==0.9.2",
     "mypy==1.14.1",
 ]
@@ -111,3 +115,5 @@ warn_return_any = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+timeout = 60
+

@@ -19,6 +19,7 @@ from archer.memory.sqlite_store import get_sqlite_store
 
 from archer.core.approvals import get_approval_manager
 from archer.tools.document_tools import DocumentTools
+from archer.tools.terminal_manager import get_terminal_manager
 
 
 class UniversalToolExecutor:
@@ -31,6 +32,7 @@ class UniversalToolExecutor:
         self._store = get_sqlite_store()
         self._approval_mgr = get_approval_manager()
         self._document_tools = DocumentTools()
+        self._terminal_manager = get_terminal_manager()
     
     def execute(self, tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool call by routing to the correct implementation with Phase 3 gating."""
@@ -79,6 +81,8 @@ class UniversalToolExecutor:
                 res = self._exec_tasks_tool(tool_name, tool_input)
             elif category == 'documents':
                 res = self._exec_documents_tool(tool_name, tool_input)
+            elif category == 'terminal':
+                res = self._exec_terminal_tool(tool_name, tool_input)
             else:
                 res = {'error': f'Unknown tool category: {category}'}
             duration = round(time.time() - start_t, 2)
@@ -375,4 +379,14 @@ class UniversalToolExecutor:
             return {'result': self._document_tools.list_artifacts(extension=inp.get('extension'))}
         else:
             return {'error': f'Unknown documents tool: {tool_name}'}
+
+    def _exec_terminal_tool(self, tool_name: str, inp: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute terminal tools (Phase 6, Spec Section 9)."""
+        if tool_name == 'run_terminal_command':
+            cmd = inp.get('command', '')
+            timeout = float(inp.get('timeout', 30.0))
+            return self._terminal_manager.execute_archer_command(command=cmd, timeout=timeout)
+        else:
+            return {'error': f'Unknown terminal tool: {tool_name}'}
+
 

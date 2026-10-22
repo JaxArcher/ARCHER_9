@@ -2134,5 +2134,83 @@ body.grid-stack-dragging iframe {
   margin-bottom: 6px;
 }
 
+/* --- Phase 6 Terminal (Spec Section 9) --- */
+.archer-terminal-card {
+  display: flex;
+  flex-direction: column;
+  background: rgba(4, 10, 18, 0.85);
+  border: 1px solid rgba(151, 229, 244, 0.25);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  overflow: hidden;
+  min-height: 300px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.terminal-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 14px;
+  background: rgba(8, 20, 36, 0.9);
+  border-bottom: 1px solid rgba(151, 229, 244, 0.15);
+}
+
+.terminal-header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #53e8ff;
+  letter-spacing: 0.5px;
+}
+
+.terminal-title-icon {
+  color: #53e8ff;
+  font-size: 14px;
+}
+
+.terminal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.terminal-hdr-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(151, 229, 244, 0.3);
+  color: #c9f6ff;
+  padding: 3px 10px;
+  font-size: 11px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.terminal-hdr-btn:hover {
+  background: rgba(83, 232, 255, 0.2);
+  border-color: #53e8ff;
+  color: #ffffff;
+}
+
+.terminal-xterm-wrap {
+  flex: 1;
+  min-height: 250px;
+  height: 340px;
+  padding: 8px 10px;
+  background: #040a12;
+  position: relative;
+  overflow: hidden;
+}
+
+.terminal-xterm-wrap .xterm {
+  height: 100%;
+}
+
+.terminal-xterm-wrap .xterm-viewport {
+  border-radius: 4px;
+}
+
 
 

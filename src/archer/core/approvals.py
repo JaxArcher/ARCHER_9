@@ -170,7 +170,7 @@ class ApprovalManager:
         if tool_name == "close_browser":
             return "browser_action", "Close active browser window", ""
 
-        if tool_name in ("execute_command", "run_terminal"):
+        if tool_name in ("execute_command", "run_terminal", "run_terminal_command"):
             cmd = tool_input.get("command", "")
             return "terminal_command", f"Run terminal command: {cmd}", f"Command: {cmd}"
 

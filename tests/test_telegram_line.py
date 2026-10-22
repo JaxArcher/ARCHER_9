@@ -59,11 +59,18 @@ def test_telegram_approval_event_handling(telegram_service, monkeypatch):
     # Mock bot and loop
     mock_bot = MagicMock()
     mock_loop = MagicMock()
+    mock_loop.is_running.return_value = True
     telegram_service._bot = mock_bot
     telegram_service._loop = mock_loop
     telegram_service._running = True
 
     with patch("asyncio.run_coroutine_threadsafe") as mock_run_coro:
+        def _fake_run_coro(coro, loop):
+            coro.close()
+            return MagicMock()
+
+        mock_run_coro.side_effect = _fake_run_coro
+
         # Trigger APPROVAL_REQUESTED event
         bus = get_event_bus()
         bus.publish(Event(

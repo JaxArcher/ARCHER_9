@@ -169,6 +169,9 @@ doesn't require starting it by hand in a separate window.
 | `artifacts_list`       | `files`                         | Phase 5 (Spec 8): List of generated artifact descriptors in `data/artifacts/` |
 | `artifact_display`     | `filename`, `filepath`, `action`| Phase 5 (Spec 8): Notification that an artifact was generated or updated |
 | `artifact_action_result`| `action`, `filepath`, `result` | Phase 5 (Spec 8): Result of native Open or Show In Folder request |
+| `terminal_output`      | `chunk`                         | Phase 6 (Spec 9): Live streaming terminal chunk from PowerShell PTY |
+| `terminal_history`     | `history`                       | Phase 6 (Spec 9): Replayed history buffer on connection/request |
+| `terminal_restarted`   | —                               | Phase 6 (Spec 9): Notification that PowerShell session restarted |
 
 ### Dedicated Binary Stream WebSocket (`/ws/android`)
 
@@ -218,6 +221,10 @@ To guarantee that high-framerate video frames never delay chat, voice state, or 
 {"type": "get_artifacts", "extension": null}            // Phase 5: list data/artifacts/
 {"type": "open_artifact", "filepath": "Meeting_Notes.docx"} // Phase 5: native os.startfile()
 {"type": "show_artifact_in_folder", "filepath": "Report.pdf"} // Phase 5: explorer.exe /select
+{"type": "terminal_input", "data": "dir\r"}        // Phase 6: raw keystrokes / input to PTY
+{"type": "terminal_resize", "cols": 80, "rows": 24} // Phase 6: resize xterm dimensions
+{"type": "terminal_restart"}                       // Phase 6: restart PowerShell session
+{"type": "terminal_get_history"}                   // Phase 6: fetch buffered terminal history
 ```
 
 `text_input` bypasses voice entirely and goes straight to the active
@@ -262,8 +269,12 @@ web/
     system.js         builds the always-visible controls bar (model/mic/speaker) + the System card (camera, GPU/VRAM, performance gauges, ollama-loaded)
     browser.js        builds the Browser (mirror) card, including its primary-row reflow when active
     artifacts.js      builds the ARTIFACTS tab — documents list, native Open/Folder actions, direct image/text viewer (Phase 5)
+    terminal.js       builds the PowerShell Terminal card — xterm.js rendering, keystrokes forwarding, resize, session management (Phase 6)
     barehands.js      mounts barehands into the Gesture tab, if reachable
     android.js        builds the ANDROID tab — emulator controls, canvas stream, mouse/touch/keyboard forwarding
+  vendor/
+    gridstack/        GridStack.js + styles for Spec 4c movable/resizable panes
+    xterm/            xterm.js + addon-fit.js + xterm.css for Phase 6 interactive terminal
 ```
 
 ## Cursor effects
