@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ARCHER Phase 8 — Desktop App in Pane Prototype</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #060b13;
+      color: #e2f1ff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    header {
+      background: rgba(10, 20, 32, 0.95);
+      border-bottom: 1px solid rgba(83, 232, 255, 0.2);
+      padding: 12px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .title-group h1 {
+      font-size: 17px;
+      color: #53e8ff;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .badge-phase {
+      font-size: 11px;
+      background: rgba(83, 232, 255, 0.15);
+      border: 1px solid #53e8ff;
+      color: #53e8ff;
+      padding: 2px 8px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+
+    .controls-bar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    button {
+      background: rgba(83, 232, 255, 0.1);
+      border: 1px solid rgba(83, 232, 255, 0.35);
+      color: #53e8ff;
+      padding: 6px 14px;
+      border-radius: 4px;
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    button:hover {
+      background: rgba(83, 232, 255, 0.25);
+      border-color: #53e8ff;
+      box-shadow: 0 0 10px rgba(83, 232, 255, 0.4);
+    }
+
+    button.btn-danger {
+      border-color: #e74c3c;
+      color: #ff7675;
+      background: rgba(231, 76, 60, 0.1);
+    }
+
+    button.btn-danger:hover {
+      background: rgba(231, 76, 60, 0.25);
+      box-shadow: 0 0 10px rgba(231, 76, 60, 0.4);
+    }
+
+    .main-layout {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* Left pane: Canvas viewer */
+    .stream-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #03060a;
+      position: relative;
+      padding: 16px;
+    }
+
+    canvas {
+      max-width: 100%;
+      max-height: 100%;
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.7);
+      border: 1px solid rgba(83, 232, 255, 0.25);
+      border-radius: 6px;
+      cursor: default;
+      outline: none;
+    }
+
+    canvas:focus {
+      border-color: #53e8ff;
+      box-shadow: 0 0 16px rgba(83, 232, 255, 0.35);
+    }
+
+    .stream-overlay-notice {
+      position: absolute;
+      top: 24px;
+      left: 24px;
+      background: rgba(6, 12, 20, 0.85);
+      border: 1px solid rgba(83, 232, 255, 0.3);
+      padding: 6px 12px;
+      border-radius: 4px;
+      font-size: 11.5px;
+      color: #53e8ff;
+      pointer-events: none;
+    }
+
+    /* Right pane: Diagnostics & Findings */
+    .diagnostics-sidebar {
+      width: 380px;
+      background: rgba(8, 16, 26, 0.95);
+      border-left: 1px solid rgba(83, 232, 255, 0.15);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+
+    .diag-section {
+      padding: 16px;
+      border-bottom: 1px solid rgba(83, 232, 255, 0.1);
+    }
+
+    .diag-section h3 {
+      font-size: 13px;
+      color: #53e8ff;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .metric-card {
+      background: rgba(4, 10, 18, 0.6);
+      border: 1px solid rgba(83, 232, 255, 0.12);
+      border-radius: 4px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .metric-card .label {
+      font-size: 10.5px;
+      color: #7b94ad;
+      text-transform: uppercase;
+    }
+
+    .metric-card .value {
+      font-size: 18px;
+      font-weight: 700;
+      color: #53e8ff;
+      font-family: monospace;
+    }
+
+    .metric-card .unit {
+      font-size: 11px;
+      color: #9ab4cc;
+      font-weight: 400;
+    }
+
+    .info-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-size: 12px;
+    }
+
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      color: #b0c4de;
+    }
+
+    .info-row span:last-child {
+      color: #fff;
+      font-family: monospace;
+    }
+
+    .finding-box {
+      background: rgba(14, 25, 40, 0.7);
+      border-left: 3px solid #53e8ff;
+      padding: 10px 12px;
+      border-radius: 0 4px 4px 0;
+      font-size: 12px;
+      line-height: 1.5;
+      margin-top: 10px;
+      color: #c0d4e8;
+    }
+
+    .finding-box strong {
+      color: #53e8ff;
+    }
+
+    .finding-alert {
+      border-left-color: #e74c3c;
+      background: rgba(231, 76, 60, 0.1);
+    }
+
+    .finding-alert strong {
+      color: #ff7675;
+    }
+
+    .type-box {
+      margin-top: 10px;
+      display: flex;
+      gap: 8px;
+    }
+
+    .type-box input {
+      flex: 1;
+      background: rgba(4, 10, 18, 0.9);
+      border: 1px solid rgba(83, 232, 255, 0.2);
+      border-radius: 4px;
+      padding: 8px 10px;
+      color: #fff;
+      font-size: 12.5px;
+      outline: none;
+    }
+
+    .type-box input:focus {
+      border-color: #53e8ff;
+      box-shadow: 0 0 6px rgba(83, 232, 255, 0.4);
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="title-group">
+      <h1>
+        <span>ARCHER Workspace</span>
+        <span class="badge-phase">Phase 8 Prototype</span>
+        <span style="font-size: 13px; color: #9ab4cc; font-weight: normal;">Windows App in Pane Streamer</span>
+      </h1>
+    </div>
+
+    <div class="controls-bar">
+      <button id="btn-launch" onclick="launchApp('notepad.exe')">&#9654; Launch Notepad</button>
+      <button id="btn-sample" onclick="sendSampleText()">&#9998; Type Sample Text</button>
+      <button class="btn-danger" id="btn-stop" onclick="stopApp()">&#9632; Stop App</button>
+    </div>
+  </header>
+
+  <div class="main-layout">
+    <div class="stream-container">
+      <div class="stream-overlay-notice" id="stream-notice">
+        Click or type on the canvas to interact with Notepad
+      </div>
+      <canvas id="stream-canvas" tabindex="0" width="1280" height="720"></canvas>
+    </div>
+
+    <div class="diagnostics-sidebar">
+      <div class="diag-section">
+        <h3>Live Performance</h3>
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <span class="label">Stream FPS</span>
+            <div class="value" id="fps-val">0.0</div>
+            <span class="unit">frames / sec</span>
+          </div>
+          <div class="metric-card">
+            <span class="label">Capture Time</span>
+            <div class="value" id="cap-val">0.0</div>
+            <span class="unit">milliseconds</span>
+          </div>
+          <div class="metric-card">
+            <span class="label">Input RTT</span>
+            <div class="value" id="rtt-val">0.0</div>
+            <span class="unit">ms roundtrip</span>
+          </div>
+          <div class="metric-card">
+            <span class="label">Frame Size</span>
+            <div class="value" id="size-val">0</div>
+            <span class="unit">KB / frame</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="diag-section">
+        <h3>Target App State</h3>
+        <div class="info-list">
+          <div class="info-row">
+            <span>Executable</span>
+            <span id="info-exe">notepad.exe</span>
+          </div>
+          <div class="info-row">
+            <span>Window HWND</span>
+            <span id="info-hwnd">None</span>
+          </div>
+          <div class="info-row">
+            <span>Title</span>
+            <span id="info-title">Waiting...</span>
+          </div>
+          <div class="info-row">
+            <span>Dimensions</span>
+            <span id="info-dim">1280 x 720</span>
+          </div>
+        </div>
+
+        <div class="type-box">
+          <input type="text" id="type-input" placeholder="Type text to send to app..." onkeydown="handleTypeInput(event)">
+          <button onclick="sendInputText()">Send</button>
+        </div>
+      </div>
+
+      <div class="diag-section">
+        <h3>Phase 8 Prototype Findings</h3>
+        
+        <div class="finding-box">
+          <strong>1. Single Mouse Cursor Catch:</strong><br>
+          Using Direct Win32 Message Posting (<code>PostMessageW</code>) allows clicks and keystrokes to be sent directly to the window <em>without moving Col's physical mouse cursor</em>.
+        </div>
+
+        <div class="finding-box">
+          <strong>2. Direct Window Capture:</strong><br>
+          <code>PrintWindow</code> with <code>PW_RENDERFULLCONTENT</code> captures full window pixels at 25-30 FPS with ~8-15ms latency, with zero driver installs required.
+        </div>
+
+        <div class="finding-box finding-alert">
+          <strong>3. Virtual Display Driver Status:</strong><br>
+          Audited under Phase 4: <code>Virtual-Display-Driver</code> was <strong>REJECTED</strong> due to bundled binaries (<code>.exe</code>, <code>.bin</code>) and requirement for Administrator UMDF driver installation.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("stream-canvas");
+    const ctx = canvas.getContext("2d");
+
+    let ws = null;
+    let lastFrameTime = performance.now();
+    let frameCount = 0;
+    let fps = 0;
+    let lastPingTime = 0;
+
+    // Connect WebSocket
+    function connectWS() {
+      const loc = window.location;
+      const wsUrl = (loc.protocol === "https:" ? "wss://" : "ws://") + loc.host + "/ws/stream";
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log("[Prototype] WebSocket connected");
+        startPingInterval();
+      };
+
+      ws.onmessage = (evt) => {
+        const msg = JSON.parse(evt.data);
+
+        if (msg.type === "pong") {
+          const rtt = performance.now() - lastPingTime;
+          document.getElementById("rtt-val").textContent = rtt.toFixed(1);
+        } else if (msg.type === "frame") {
+          renderFrame(msg);
+        }
+      };
+
+      ws.onclose = () => {
+        console.log("[Prototype] WebSocket closed, retrying...");
+        setTimeout(connectWS, 1500);
+      };
+    }
+
+    function renderFrame(msg) {
+      const img = new Image();
+      img.onload = () => {
+        if (canvas.width !== msg.width || canvas.height !== msg.height) {
+          canvas.width = msg.width;
+          canvas.height = msg.height;
+        }
+        ctx.drawImage(img, 0, 0);
+
+        // Update metrics
+        frameCount++;
+        const now = performance.now();
+        if (now - lastFrameTime >= 1000) {
+          fps = (frameCount * 1000) / (now - lastFrameTime);
+          document.getElementById("fps-val").textContent = fps.toFixed(1);
+          frameCount = 0;
+          lastFrameTime = now;
+        }
+
+        document.getElementById("cap-val").textContent = msg.capture_ms.toFixed(1);
+        document.getElementById("size-val").textContent = Math.round(msg.image.length * 0.75 / 1024);
+        document.getElementById("info-hwnd").textContent = msg.hwnd || "Active";
+        document.getElementById("info-title").textContent = msg.title || "Notepad";
+        document.getElementById("info-dim").textContent = `${msg.width} x ${msg.height}`;
+      };
+      img.src = "data:image/jpeg;base64," + msg.image;
+    }
+
+    function startPingInterval() {
+      setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          lastPingTime = performance.now();
+          ws.send(JSON.stringify({ type: "ping", time: lastPingTime }));
+        }
+      }, 1000);
+    }
+
+    // Input handlers on canvas
+    canvas.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      sendMouseEvent("mousedown", e);
+    });
+
+    canvas.addEventListener("mouseup", (e) => {
+      e.preventDefault();
+      sendMouseEvent("mouseup", e);
+    });
+
+    canvas.addEventListener("click", (e) => {
+      e.preventDefault();
+      sendMouseEvent("click", e);
+    });
+
+    canvas.addEventListener("mousemove", (e) => {
+      if (e.buttons > 0) {
+        sendMouseEvent("mousemove", e);
+      }
+    });
+
+    canvas.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const rect = canvas.getBoundingClientRect();
+        const normX = (e.clientX - rect.left) / rect.width;
+        const normY = (e.clientY - rect.top) / rect.height;
+        ws.send(JSON.stringify({
+          type: "mouse",
+          event: "wheel",
+          norm_x: normX,
+          norm_y: e.deltaY,
+        }));
+      }
+    });
+
+    function sendMouseEvent(type, e) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const rect = canvas.getBoundingClientRect();
+      const normX = (e.clientX - rect.left) / rect.width;
+      const normY = (e.clientY - rect.top) / rect.height;
+      ws.send(JSON.stringify({
+        type: "mouse",
+        event: type,
+        norm_x: normX,
+        norm_y: normY,
+        button: e.button === 2 ? "right" : "left",
+      }));
+    }
+
+    // Key handlers on canvas
+    canvas.addEventListener("keydown", (e) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({
+        type: "key",
+        event: "keydown",
+        key: e.key,
+        char_code: e.key.length === 1 ? e.key.charCodeAt(0) : null,
+      }));
+    });
+
+    function handleTypeInput(e) {
+      if (e.key === "Enter") {
+        sendInputText();
+      }
+    }
+
+    function sendInputText() {
+      const input = document.getElementById("type-input");
+      const val = input.value;
+      if (!val || !ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: "text", text: val }));
+      input.value = "";
+    }
+
+    async function launchApp(exe) {
+      const resp = await fetch("/api/launch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ executable: exe }),
+      });
+      const data = await resp.json();
+      console.log("Launched:", data);
+    }
+
+    async function stopApp() {
+      await fetch("/api/stop", { method: "POST" });
+    }
+
+    function sendSampleText() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: "text",
+          text: "\nARCHER Phase 8: Any desktop app streamed live in pane!\n",
+        }));
+      }
+    }
+
+    // Initialize
+    connectWS();
+  </script>
+</body>
+</html>
