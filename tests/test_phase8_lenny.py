@@ -41,6 +41,9 @@ def test_hands_service_pairing_and_auth():
 
     client = TestClient(hands_app)
 
+    with hands_state._lock:
+        code = hands_state.generate_new_pairing_code()
+
     # Status before pairing
     resp = client.get("/api/status")
     assert resp.status_code == 200
@@ -53,7 +56,7 @@ def test_hands_service_pairing_and_auth():
     assert bad_resp.status_code == 401
 
     # Attempt pairing with correct code
-    pair_resp = client.post("/api/pair", json={"pairing_code": hands_state.pairing_code})
+    pair_resp = client.post("/api/pair", json={"pairing_code": code})
     assert pair_resp.status_code == 200
     token = pair_resp.json()["token"]
     assert token == hands_state.token
@@ -66,6 +69,60 @@ def test_hands_service_pairing_and_auth():
     # Unauthorized protected endpoint
     unauth_mouse = client.post("/api/mouse", json={"event": "click", "norm_x": 0.5, "norm_y": 0.5})
     assert unauth_mouse.status_code == 401
+
+
+def test_hands_service_pairing_security():
+    """Verify single-use code consumption, expiration, lockout after 5 failures, and new_code generation."""
+    from scripts.lenny.hands import app as hands_app, hands_state
+    client = TestClient(hands_app)
+
+    # 1. Reset state with fresh code
+    with hands_state._lock:
+        code1 = hands_state.generate_new_pairing_code()
+        hands_state.locked_until = 0.0
+        hands_state.failed_pairing_attempts = 0
+
+    # 2. Expiration test
+    with hands_state._lock:
+        hands_state.pairing_code_expires_at = time.time() - 5.0  # expired
+    expired_resp = client.post("/api/pair", json={"pairing_code": code1})
+    assert expired_resp.status_code == 400
+    assert "expired" in expired_resp.json()["detail"].lower()
+
+    # 3. Fresh code generation
+    with hands_state._lock:
+        code2 = hands_state.generate_new_pairing_code()
+
+    # 4. Five wrong attempts trigger 10-minute lockout (HTTP 429)
+    for _ in range(4):
+        resp = client.post("/api/pair", json={"pairing_code": "wrong_code"})
+        assert resp.status_code == 401
+
+    # 5th attempt triggers lockout
+    resp5 = client.post("/api/pair", json={"pairing_code": "wrong_code"})
+    assert resp5.status_code == 429
+    assert "locked" in resp5.json()["detail"].lower()
+
+    # Attempt with correct code during lockout should still return 429
+    locked_resp = client.post("/api/pair", json={"pairing_code": code2})
+    assert locked_resp.status_code == 429
+
+    # 5. Generate new code via /api/pair/new_code (resets lockout)
+    new_code_resp = client.post("/api/pair/new_code", headers={"X-Lenny-Token": hands_state.token})
+    assert new_code_resp.status_code == 200
+    code3 = new_code_resp.json()["pairing_code"]
+    assert code3 is not None
+    assert new_code_resp.json()["expires_in_seconds"] == 900
+
+    # Lockout is now cleared, so pairing with code3 succeeds
+    pair_ok = client.post("/api/pair", json={"pairing_code": code3})
+    assert pair_ok.status_code == 200
+    assert pair_ok.json()["status"] == "paired"
+
+    # 6. Single-use test: immediate replay of code3 must fail
+    replay_resp = client.post("/api/pair", json={"pairing_code": code3})
+    assert replay_resp.status_code == 400
+    assert "already used" in replay_resp.json()["detail"].lower()
 
 
 def test_hands_mouse_and_keyboard_input():
@@ -285,21 +342,27 @@ def test_browser_relocation_fallback_when_lenny_offline():
     mock_context.pages = [mock_page]
     mock_playwright.chromium.launch_persistent_context.return_value = mock_context
 
-    with patch("archer.lenny.lenny_client.get_lenny_client") as mock_get_lenny:
-        mock_lenny = MagicMock()
-        mock_lenny.is_configured.return_value = True
-        mock_lenny.is_online.return_value = False  # LENNY offline!
-        mock_get_lenny.return_value = mock_lenny
+    orig_pw = pc._playwright
+    orig_ctx = pc._browser_context
+    try:
+        with patch("archer.lenny.lenny_client.get_lenny_client") as mock_get_lenny:
+            mock_lenny = MagicMock()
+            mock_lenny.is_configured.return_value = True
+            mock_lenny.is_online.return_value = False  # LENNY offline!
+            mock_get_lenny.return_value = mock_lenny
 
-        pc._playwright = mock_playwright
-        pc._browser_context = None
+            pc._playwright = mock_playwright
+            pc._browser_context = None
 
-        with patch.object(pc, "_attach_cdp_impl"):
-            ok = pc._ensure_browser_impl()
-            assert ok is True
-            # Verified: Fell back to Main PC
-            assert pc.get_browser_host() == "Main PC"
-            mock_playwright.chromium.launch_persistent_context.assert_called_once()
+            with patch.object(pc, "_attach_cdp_impl"):
+                ok = pc._ensure_browser_impl()
+                assert ok is True
+                # Verified: Fell back to Main PC
+                assert pc.get_browser_host() == "Main PC"
+                mock_playwright.chromium.launch_persistent_context.assert_called_once()
+    finally:
+        pc._playwright = orig_pw
+        pc._browser_context = orig_ctx
 
 
 def test_browser_relocation_connects_to_lenny_when_online():
@@ -315,25 +378,31 @@ def test_browser_relocation_connects_to_lenny_when_online():
     mock_remote_browser.contexts = [mock_context]
     mock_playwright.chromium.connect_over_cdp.return_value = mock_remote_browser
 
-    with patch("archer.lenny.lenny_client.get_lenny_client") as mock_get_lenny:
-        mock_lenny = MagicMock()
-        mock_lenny.is_configured.return_value = True
-        mock_lenny.is_online.return_value = True
-        mock_lenny.host = "192.168.4.50"
-        mock_lenny.browser_port = 9222
-        mock_get_lenny.return_value = mock_lenny
+    orig_pw = pc._playwright
+    orig_ctx = pc._browser_context
+    try:
+        with patch("archer.lenny.lenny_client.get_lenny_client") as mock_get_lenny:
+            mock_lenny = MagicMock()
+            mock_lenny.is_configured.return_value = True
+            mock_lenny.is_online.return_value = True
+            mock_lenny.host = "192.168.4.50"
+            mock_lenny.browser_port = 9222
+            mock_get_lenny.return_value = mock_lenny
 
-        pc._playwright = mock_playwright
-        pc._browser_context = None
+            pc._playwright = mock_playwright
+            pc._browser_context = None
 
-        with patch.object(pc, "_attach_cdp_impl"):
-            ok = pc._ensure_browser_impl()
-            assert ok is True
-            # Verified: Connected to LENNY
-            assert pc.get_browser_host() == "LENNY"
-            mock_playwright.chromium.connect_over_cdp.assert_called_once_with(
-                "http://192.168.4.50:9222", timeout=3000
-            )
+            with patch.object(pc, "_attach_cdp_impl"):
+                ok = pc._ensure_browser_impl()
+                assert ok is True
+                # Verified: Connected to LENNY
+                assert pc.get_browser_host() == "LENNY"
+                mock_playwright.chromium.connect_over_cdp.assert_called_once_with(
+                    "http://192.168.4.50:9222", timeout=3000
+                )
+    finally:
+        pc._playwright = orig_pw
+        pc._browser_context = orig_ctx
 
 
 # =============================================================================

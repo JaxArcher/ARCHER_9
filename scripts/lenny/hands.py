@@ -20,6 +20,8 @@ from ctypes import wintypes
 import io
 import json
 import os
+import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -27,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
@@ -42,6 +44,18 @@ TOKEN_FILE = LENNY_DIR / "lenny_token.json"
 
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_lan_ip(target_ip: str = "192.168.4.41") -> str:
+    """Detect LENNY's LAN IP address by creating a UDP probe towards target IP."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect((target_ip, 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
 # Win32 Constants & Structs
 INPUT_MOUSE = 0
@@ -108,8 +122,15 @@ class HandsState:
         self.user32 = ctypes.windll.user32
         self.kernel32 = ctypes.windll.kernel32
 
+        self.lan_ip: str = os.environ.get("ARCHER_HANDS_BIND_IP") or get_lan_ip()
         self.token: str = self._load_or_create_token()
-        self.pairing_code: str = self._load_or_create_pairing_code()
+        self.pairing_code: Optional[str] = None
+        self.pairing_code_expires_at: float = 0.0
+        self.failed_pairing_attempts: int = 0
+        self.locked_until: float = 0.0
+        self._lock = threading.Lock()
+        self.generate_new_pairing_code()
+
         self.status: str = "idle"  # idle, working, paused
         self.current_task: str = ""
         self.takeover_active: bool = False
@@ -117,7 +138,6 @@ class HandsState:
 
         self.browser_process: Optional[subprocess.Popen] = None
         self._subscriber_websockets: set[WebSocket] = set()
-        self._lock = threading.Lock()
 
         # Start background safety watchdog for physical user activity
         self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True, name="HandsWatchdog")
@@ -130,21 +150,23 @@ class HandsState:
                 return data.get("token", "")
             except Exception:
                 pass
-        import secrets
         tok = secrets.token_urlsafe(32)
         TOKEN_FILE.write_text(json.dumps({"token": tok, "created_at": time.time()}), encoding="utf-8")
         return tok
 
-    def _load_or_create_pairing_code(self) -> str:
-        # 6-digit numeric pairing code
-        import secrets
+    def generate_new_pairing_code(self) -> str:
+        """Generate a single-use 6-digit numeric pairing code valid for 15 minutes."""
         code = f"{secrets.randbelow(900000) + 100000}"
+        self.pairing_code = code
+        self.pairing_code_expires_at = time.time() + 900.0  # 15 minutes
+        self.failed_pairing_attempts = 0
+        self.locked_until = 0.0
         return code
 
     def verify_auth(self, req_token: Optional[str]) -> bool:
-        if not self.token:
-            return True
-        return req_token == self.token
+        if not self.token or not req_token:
+            return False
+        return secrets.compare_digest(req_token, self.token)
 
     # -------------------------------------------------------------------------
     # Physical User Takeover Detection (GetLastInputInfo)
@@ -494,7 +516,7 @@ class HandsState:
         cmd = [
             exe,
             f"--remote-debugging-port={cdp_port}",
-            "--remote-debugging-address=0.0.0.0",
+            f"--remote-debugging-address={self.lan_ip}",
             f"--user-data-dir={PROFILE_DIR}",
             "--no-first-run",
             "--no-default-browser-check",
@@ -542,9 +564,70 @@ async def get_status(token: Optional[str] = Query(None), x_lenny_token: Optional
 @app.post("/api/pair")
 async def pair_device(payload: dict):
     code = payload.get("pairing_code", "").strip()
-    if code == hands_state.pairing_code:
-        return {"status": "paired", "token": hands_state.token}
-    raise HTTPException(status_code=401, detail="Invalid pairing code")
+    with hands_state._lock:
+        now = time.time()
+        # 1. Check lockout (10 minutes after 5 failed attempts)
+        if now < hands_state.locked_until:
+            rem = int(hands_state.locked_until - now)
+            raise HTTPException(
+                status_code=429,
+                detail=f"Pairing locked for {rem}s due to 5 failed attempts. Please wait or generate a new code on LENNY.",
+            )
+
+        # 2. Check single-use / expiration (15 minutes)
+        if not hands_state.pairing_code or now > hands_state.pairing_code_expires_at:
+            raise HTTPException(
+                status_code=400,
+                detail="Pairing code has expired or was already used. Please generate a new code on LENNY.",
+            )
+
+        # 3. Validate code with secrets.compare_digest
+        if secrets.compare_digest(code, hands_state.pairing_code):
+            hands_state.pairing_code = None  # Single-use: immediately consumed
+            hands_state.pairing_code_expires_at = 0.0
+            hands_state.failed_pairing_attempts = 0
+            logger.info("[Hands] Successfully paired with Main PC. Single-use code consumed.")
+            return {"status": "paired", "token": hands_state.token}
+
+        # 4. Failed attempt tracking & lockout threshold
+        hands_state.failed_pairing_attempts += 1
+        if hands_state.failed_pairing_attempts >= 5:
+            hands_state.locked_until = now + 600.0  # 10 minutes lockout
+            hands_state.failed_pairing_attempts = 0
+            logger.warning("[Hands] 5 failed pairing attempts reached. Pairing locked for 10 minutes.")
+            raise HTTPException(
+                status_code=429,
+                detail="Pairing locked for 10 minutes after 5 failed attempts. Generate a new code on LENNY or wait.",
+            )
+
+        rem_attempts = 5 - hands_state.failed_pairing_attempts
+        raise HTTPException(
+            status_code=401,
+            detail=f"Invalid pairing code. ({rem_attempts} attempts remaining before 10-minute lockout)",
+        )
+
+
+@app.post("/api/pair/new_code")
+async def request_new_pairing_code(request: Request, x_lenny_token: Optional[str] = Header(None)):
+    """Generate a fresh single-use 15-minute pairing code on LENNY."""
+    client_ip = request.client.host if request.client else ""
+    is_local = client_ip in ("127.0.0.1", "::1", "localhost", hands_state.lan_ip)
+    is_authed = hands_state.verify_auth(x_lenny_token)
+    if not (is_local or is_authed):
+        raise HTTPException(
+            status_code=403,
+            detail="Generating a new pairing code is restricted to the LENNY console or authenticated callers.",
+        )
+
+    with hands_state._lock:
+        code = hands_state.generate_new_pairing_code()
+    logger.info(f"[Hands] Fresh single-use pairing code generated: {code} (expires in 15 minutes)")
+    return {
+        "status": "ok",
+        "pairing_code": code,
+        "expires_in_seconds": 900,
+        "expires_at": hands_state.pairing_code_expires_at,
+    }
 
 
 @app.post("/api/mouse")
@@ -762,11 +845,54 @@ async def ws_events(websocket: WebSocket, token: Optional[str] = Query(None)):
 
 if __name__ == "__main__":
     port = int(os.environ.get("ARCHER_HANDS_PORT", 8203))
-    logger.info(f"[Hands] Starting ARCHER Hands Service on 0.0.0.0:{port}")
+    lan_ip = hands_state.lan_ip
+
+    if "--new-code" in sys.argv:
+        import urllib.request
+        success = False
+        token = ""
+        if TOKEN_FILE.exists():
+            try:
+                token = json.loads(TOKEN_FILE.read_text(encoding="utf-8")).get("token", "")
+            except Exception:
+                pass
+
+        for target_host in ("127.0.0.1", lan_ip):
+            try:
+                req = urllib.request.Request(
+                    f"http://{target_host}:{port}/api/pair/new_code",
+                    method="POST",
+                    headers={"X-Lenny-Token": token} if token else {},
+                )
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    data = json.loads(resp.read().decode())
+                    print("=====================================================")
+                    print(" ARCHER Hands - Fresh Pairing Code Generated")
+                    print(f" Code: {data['pairing_code']}")
+                    print(f" Valid for: 15 minutes")
+                    print("=====================================================")
+                    success = True
+                    break
+            except Exception:
+                continue
+
+        if not success:
+            with hands_state._lock:
+                code = hands_state.generate_new_pairing_code()
+            print("=====================================================")
+            print(" ARCHER Hands - Pairing Code (Service Not Responding)")
+            print(f" Code: {code}")
+            print(" Valid for: 15 minutes")
+            print(" Note: Start the service or run python hands.py to accept pairing.")
+            print("=====================================================")
+        sys.exit(0)
+
+    logger.info(f"[Hands] Starting ARCHER Hands Service on {lan_ip}:{port}")
     print(f"=====================================================")
     print(f" ARCHER Hands Service Ready on LENNY")
-    print(f" Pairing Code: {hands_state.pairing_code}")
+    print(f" LAN IP: {lan_ip}")
+    print(f" Pairing Code: {hands_state.pairing_code} (Single-use, expires in 15m)")
     print(f" Token: {hands_state.token[:8]}...")
     print(f" Port: {port}")
     print(f"=====================================================")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run(app, host=lan_ip, port=port, log_level="info")

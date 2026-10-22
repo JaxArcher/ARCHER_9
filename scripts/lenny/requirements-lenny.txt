@@ -1,0 +1,11 @@
+# Pinned dependencies for ARCHER Hands on LENNY (Spec Section 11)
+fastapi==0.115.6
+uvicorn==0.34.0
+websockets==14.1
+pillow==11.1.0
+mss==9.0.2
+pywinauto==0.6.9
+pywin32==311
+comtypes==1.4.15
+playwright==1.49.1
+loguru==0.7.3
