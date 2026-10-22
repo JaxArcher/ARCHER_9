@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ARCHER — iPad Air</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="ARCHER">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="apple-touch-icon" href="/ipad/icon.png">
+  <link rel="icon" type="image/png" href="/ipad/icon.png">
+  <link rel="stylesheet" href="/ipad/style.css">
+</head>
+<body>
+  <!-- State 1: One-Time Pairing Screen -->
+  <div id="view-pairing" class="ipad-view active">
+    <div class="pairing-container">
+      <div class="pairing-card">
+        <div class="pairing-logo-wrap">
+          <img src="/ipad/icon.png" alt="ARCHER" class="pairing-logo">
+        </div>
+        <h1 class="pairing-title">ARCHER</h1>
+        <p class="pairing-subtitle">iPad Air Gateway &middot; Home Wi-Fi</p>
+        <div class="pairing-instructions">
+          Enter the 6-digit code shown on your PC screen in the <strong>SYSTEM</strong> tab.
+        </div>
+        
+        <form id="pairing-form" onsubmit="return false;">
+          <div class="pairing-code-wrapper">
+            <input type="text" id="pairing-code-input" class="pairing-code-input" maxlength="6" pattern="[0-9]*" inputmode="numeric" placeholder="&bull; &bull; &bull; &bull; &bull; &bull;" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          </div>
+          <div id="pairing-error" class="pairing-error" style="display: none;"></div>
+          <button type="submit" id="pairing-submit-btn" class="pairing-btn">Pair with ARCHER</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- State 2: Main Application Screen -->
+  <div id="view-app" class="ipad-view">
+    <!-- Top Header Bar -->
+    <header class="app-header">
+      <div class="header-left">
+        <img src="/ipad/icon.png" alt="" class="header-logo">
+        <div class="header-title-wrap">
+          <span class="header-title">ARCHER</span>
+          <span id="connection-status" class="status-badge connecting">Connecting</span>
+        </div>
+      </div>
+      <div class="header-right">
+        <button id="audio-toggle-btn" class="header-btn audio-muted" title="Toggle spoken replies">
+          <span class="btn-icon">&bull;))</span>
+          <span class="btn-text">Audio Off</span>
+        </button>
+        <button id="unpair-btn" class="header-btn secondary" title="Forget pairing on this iPad">Unpair</button>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="app-main">
+      <!-- 1. CHAT VIEW -->
+      <section id="tab-chat" class="content-tab active">
+        <!-- Persistent Approval Prompt Bar (prominent when active) -->
+        <div id="approval-bar" class="approval-bar" style="display: none;">
+          <!-- Dynamically populated with active approval cards -->
+        </div>
+
+        <!-- Chat Conversation Messages -->
+        <div id="chat-messages" class="chat-messages">
+          <!-- Populated dynamically -->
+        </div>
+
+        <!-- Bottom Chat Input Bar -->
+        <div class="chat-input-bar">
+          <form id="chat-form" onsubmit="return false;">
+            <input type="text" id="chat-input" class="chat-input" placeholder="Message ARCHER..." autocomplete="off" autocorrect="on" autocapitalize="sentences">
+            <button type="submit" id="chat-send-btn" class="chat-send-btn">Send</button>
+          </form>
+        </div>
+      </section>
+
+      <!-- 2. AWAY & TASKS VIEW -->
+      <section id="tab-away-tasks" class="content-tab">
+        <div class="scrollable-container">
+          <!-- While You Were Away Section -->
+          <div class="panel-section">
+            <div class="section-header">
+              <h2>While You Were Away</h2>
+              <span id="away-count-badge" class="count-badge">0</span>
+            </div>
+            <p class="section-hint">Recent interventions and room observations from ARCHER.</p>
+            <div id="away-list" class="away-list">
+              <!-- Populated dynamically -->
+            </div>
+          </div>
+
+          <!-- Tasks Section -->
+          <div class="panel-section">
+            <div class="section-header">
+              <h2>Tasks</h2>
+              <span id="tasks-count-badge" class="count-badge">0</span>
+            </div>
+            <p class="section-hint">Tap a task to mark it complete.</p>
+            <div id="tasks-list" class="tasks-list">
+              <!-- Populated dynamically -->
+            </div>
+          </div>
+
+          <!-- Habits Section -->
+          <div class="panel-section">
+            <div class="section-header">
+              <h2>Habits</h2>
+            </div>
+            <div id="habits-list" class="habits-list">
+              <!-- Populated dynamically -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. WHERE'S MY... (ITEMS) VIEW -->
+      <section id="tab-items" class="content-tab">
+        <div class="scrollable-container">
+          <div class="panel-section">
+            <div class="section-header">
+              <h2>Where's my...</h2>
+              <span id="items-count-badge" class="count-badge">0</span>
+            </div>
+            <p class="section-hint">Tracked household items with last known locations and camera photos.</p>
+
+            <!-- Search Filter -->
+            <div class="search-bar">
+              <input type="text" id="item-search-input" class="search-input" placeholder="Search items (e.g. keys, wallet, passport)...">
+            </div>
+
+            <!-- Items Grid -->
+            <div id="items-grid" class="items-grid">
+              <!-- Populated dynamically -->
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Bottom Touch Navigation Bar -->
+    <nav class="bottom-nav">
+      <button class="nav-tab active" data-tab="tab-chat">
+        <span class="nav-icon">&#x1F4AC;</span>
+        <span class="nav-label">Chat</span>
+        <span id="nav-approval-dot" class="approval-dot" style="display: none;"></span>
+      </button>
+      <button class="nav-tab" data-tab="tab-away-tasks">
+        <span class="nav-icon">&#x2611;</span>
+        <span class="nav-label">Away &amp; Tasks</span>
+      </button>
+      <button class="nav-tab" data-tab="tab-items">
+        <span class="nav-icon">&#x1F50D;</span>
+        <span class="nav-label">Where's My...</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- Photo Modal for Item Zoom -->
+  <div id="photo-modal" class="modal" style="display: none;">
+    <div class="modal-backdrop" id="modal-backdrop"></div>
+    <div class="modal-content">
+      <button class="modal-close" id="modal-close">&times;</button>
+      <img id="modal-img" src="" alt="Item Photo">
+      <div id="modal-caption" class="modal-caption"></div>
+    </div>
+  </div>
+
+  <script src="/ipad/app.js"></script>
+</body>
+</html>

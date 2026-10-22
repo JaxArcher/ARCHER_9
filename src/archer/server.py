@@ -357,6 +357,64 @@ async def browser_restart_endpoint():
     return {"success": ok}
 
 
+# --- System iPad Gateway Pairing Endpoints (Phase 7c / Spec Section 10c) ---
+
+@app.get("/api/system/ipad_pairing")
+async def get_system_ipad_pairing():
+    """Return iPad pairing status, code, and home network URL."""
+    from archer.ipad_server import get_local_lan_ip
+    config = get_config()
+    store = get_sqlite_store()
+    st = store.get_paired_device_status(device_type="ipad")
+    lan_ip = get_local_lan_ip()
+    return {
+        **st,
+        "lan_ip": lan_ip,
+        "port": config.ipad_port,
+        "url": f"http://{lan_ip}:{config.ipad_port}",
+    }
+
+
+@app.post("/api/system/ipad_generate_code")
+async def generate_system_ipad_code():
+    """Generate fresh 6-digit pairing code for iPad Air."""
+    from archer.ipad_server import get_local_lan_ip
+    config = get_config()
+    store = get_sqlite_store()
+    store.generate_new_pairing_code(device_type="ipad")
+    st = store.get_paired_device_status(device_type="ipad")
+    lan_ip = get_local_lan_ip()
+    payload = {
+        **st,
+        "lan_ip": lan_ip,
+        "port": config.ipad_port,
+        "url": f"http://{lan_ip}:{config.ipad_port}",
+    }
+    _broadcast_ws({"type": "system_ipad_pairing", **payload})
+    return payload
+
+
+@app.post("/api/system/ipad_revoke")
+async def revoke_system_ipad_pairing():
+    """Revoke active iPad Air pairing immediately."""
+    from archer.ipad_server import get_local_lan_ip, disconnect_all_ipad_clients
+    config = get_config()
+    store = get_sqlite_store()
+    store.revoke_device_pairing(device_type="ipad")
+    disconnect_all_ipad_clients()
+    st = store.get_paired_device_status(device_type="ipad")
+    lan_ip = get_local_lan_ip()
+    payload = {
+        **st,
+        "lan_ip": lan_ip,
+        "port": config.ipad_port,
+        "url": f"http://{lan_ip}:{config.ipad_port}",
+    }
+    _broadcast_ws({"type": "system_ipad_pairing", **payload})
+    return payload
+
+
+
 
 @app.get("/mobile/health")
 async def health_check():
@@ -1628,6 +1686,45 @@ async def ws_voice(websocket: WebSocket):
                 pc = get_pc_controller()
                 await asyncio.to_thread(pc.restart_browser)
                 _broadcast_ws({"type": "browser_state", **pc.get_browser_status()})
+            elif msg_type == "system_get_ipad_pairing":
+                from archer.ipad_server import get_local_lan_ip
+                config = get_config()
+                st = get_sqlite_store().get_paired_device_status(device_type="ipad")
+                lan_ip = get_local_lan_ip()
+                await _ws_send_safe(websocket, json.dumps({
+                    "type": "system_ipad_pairing",
+                    **st,
+                    "lan_ip": lan_ip,
+                    "port": config.ipad_port,
+                    "url": f"http://{lan_ip}:{config.ipad_port}",
+                }))
+            elif msg_type == "system_generate_ipad_code":
+                from archer.ipad_server import get_local_lan_ip
+                config = get_config()
+                get_sqlite_store().generate_new_pairing_code(device_type="ipad")
+                st = get_sqlite_store().get_paired_device_status(device_type="ipad")
+                lan_ip = get_local_lan_ip()
+                _broadcast_ws({
+                    "type": "system_ipad_pairing",
+                    **st,
+                    "lan_ip": lan_ip,
+                    "port": config.ipad_port,
+                    "url": f"http://{lan_ip}:{config.ipad_port}",
+                })
+            elif msg_type == "system_revoke_ipad_pairing":
+                from archer.ipad_server import get_local_lan_ip, disconnect_all_ipad_clients
+                config = get_config()
+                get_sqlite_store().revoke_device_pairing(device_type="ipad")
+                disconnect_all_ipad_clients()
+                st = get_sqlite_store().get_paired_device_status(device_type="ipad")
+                lan_ip = get_local_lan_ip()
+                _broadcast_ws({
+                    "type": "system_ipad_pairing",
+                    **st,
+                    "lan_ip": lan_ip,
+                    "port": config.ipad_port,
+                    "url": f"http://{lan_ip}:{config.ipad_port}",
+                })
             elif msg_type == "browser_get_screenshot":
                 # Mirrors the SAME Playwright browser ARCHER's own
                 # browser-control tools already drive (tools/pc_control.py)
@@ -2048,6 +2145,12 @@ async def _build_system_snapshot() -> dict:
         "current_speaker_index": config.speaker_device_index,
         "current_mic_name": getattr(config, "mic_device_name", None),
         "current_speaker_name": getattr(config, "speaker_device_name", None),
+        "ipad_pairing": (lambda: {
+            **get_sqlite_store().get_paired_device_status(device_type="ipad"),
+            "lan_ip": __import__("archer.ipad_server", fromlist=["get_local_lan_ip"]).get_local_lan_ip(),
+            "port": config.ipad_port,
+            "url": f"http://{__import__('archer.ipad_server', fromlist=['get_local_lan_ip']).get_local_lan_ip()}:{config.ipad_port}",
+        })(),
     }
 
 

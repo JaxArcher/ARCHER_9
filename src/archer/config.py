@@ -122,6 +122,10 @@ class ArcherConfig(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = 8200
 
+    # --- iPad Gateway (Phase 7c / Spec Section 10c) ---
+    ipad_host: str = Field(default="0.0.0.0", alias="ARCHER_IPAD_HOST")
+    ipad_port: int = Field(default=8201, alias="ARCHER_IPAD_PORT")
+
     # --- Docker Services ---
     chromadb_url: str = "http://127.0.0.1:8100"
     mediapipe_url: str = "http://127.0.0.1:8101"

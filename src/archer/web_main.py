@@ -179,6 +179,13 @@ def main() -> None:
     logger.info(f"Browser client will be at http://{config.api_host}:{config.api_port}/app")
     logger.info("ARCHER is ready. Say 'Hey ARCHER', open the browser client, or Ctrl+C to stop.")
 
+    # iPad Gateway Server (Phase 7c / Spec 10c)
+    try:
+        from archer.ipad_server import start_ipad_server, stop_ipad_server
+        start_ipad_server()
+    except Exception as e:
+        logger.warning(f"iPad gateway server startup skipped: {e}")
+
     import uvicorn
     from archer.server import app, set_orchestrator, set_observer
     set_orchestrator(core_agent)
@@ -190,6 +197,11 @@ def main() -> None:
         pass
     finally:
         logger.info("Shutting down ARCHER...")
+        try:
+            from archer.ipad_server import stop_ipad_server
+            stop_ipad_server()
+        except Exception as e:
+            logger.debug(f"iPad server shutdown error: {e}")
         if observer is not None:
             observer.stop()
         pipeline.stop()

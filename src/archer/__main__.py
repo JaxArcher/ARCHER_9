@@ -323,6 +323,13 @@ def main() -> None:
     except Exception as e:
         logger.debug(f"Telegram line startup skipped: {e}")
 
+    # iPad Gateway Server (Phase 7c / Spec 10c)
+    try:
+        from archer.ipad_server import start_ipad_server
+        start_ipad_server()
+    except Exception as e:
+        logger.debug(f"iPad gateway server startup skipped: {e}")
+
     # Start API Server (Phase 1 / Mobile Bridge)
     def _start_api_server():
         try:

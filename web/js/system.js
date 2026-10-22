@@ -47,6 +47,12 @@
       <p class="archer-memory-hint">Updated every 4s. Tokens/sec only moves when a local-model turn actually finishes generating.</p>
       <div class="archer-gauge-row" id="archer-gauge-row"></div>
     </section>
+
+    <section class="archer-memory-pane" id="archer-system-ipad-pane">
+      <h3>iPad Air Access (Home Wi-Fi)</h3>
+      <p class="archer-memory-hint">One-time pairing for Col's iPad Air (Spec Section 10c). Open the URL below on the iPad Air to connect.</p>
+      <div id="archer-system-ipad-content"></div>
+    </section>
   `;
 
   controlsBar.innerHTML = `
@@ -70,6 +76,7 @@
   const modelSelect = document.getElementById("archer-system-model-select");
   const micSelect = document.getElementById("archer-system-mic-select");
   const speakerSelect = document.getElementById("archer-system-speaker-select");
+  const ipadContent = document.getElementById("archer-system-ipad-content");
 
   function escapeHtml(s) {
     return String(s ?? "").replace(/[&<>"']/g, (c) => ({
@@ -112,6 +119,68 @@
         </div>
       `;
     }).join("");
+  }
+
+  function renderIpadPairing(info) {
+    if (!ipadContent) return;
+    if (!info) {
+      ipadContent.innerHTML = '<p class="archer-memory-empty">iPad gateway status loading...</p>';
+      return;
+    }
+    const isPaired = !!info.paired;
+    const url = info.url || `http://${info.lan_ip || "127.0.0.1"}:${info.port || 8201}`;
+
+    if (isPaired) {
+      ipadContent.innerHTML = `
+        <div class="archer-memory-row" style="background: rgba(0, 229, 163, 0.08); border-left: 3px solid #00e5a3; padding: 12px 14px; border-radius: 6px; margin-bottom: 12px;">
+          <div class="archer-memory-row-main">
+            <span class="archer-badge" style="background: rgba(0,229,163,0.2); color: #00e5a3; border: 1px solid rgba(0,229,163,0.4); padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; text-transform: uppercase;">Paired &middot; Active</span>
+            <strong style="margin-left: 8px; font-size: 15px;">${escapeHtml(info.device_name || "Col's iPad Air")}</strong>
+          </div>
+          <div class="archer-memory-row-sub" style="margin-top: 6px; color: #88a0bc; font-size: 13px;">
+            Connected at <code>${escapeHtml(url)}</code> &middot; Last seen: ${escapeHtml(info.last_seen_at || "Recently")}
+          </div>
+        </div>
+        <div style="display: flex; gap: 10px; align-items: center;">
+          <button id="archer-system-ipad-revoke-btn" class="archer-btn" style="background: #ff4757; color: #fff; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer;">Revoke iPad Pairing</button>
+        </div>
+      `;
+      const revokeBtn = document.getElementById("archer-system-ipad-revoke-btn");
+      if (revokeBtn) {
+        revokeBtn.onclick = () => {
+          if (confirm("Revoke access for Col's iPad Air? The iPad will be disconnected immediately.")) {
+            if (window.ArcherClient) window.ArcherClient.sendSystemRevokeIpadPairing();
+          }
+        };
+      }
+    } else {
+      const code = info.pending_code || "------";
+      const remainingMin = Math.ceil((info.remaining_seconds || 900) / 60);
+      ipadContent.innerHTML = `
+        <div class="archer-memory-row" style="background: rgba(83, 232, 255, 0.05); border-left: 3px solid #53e8ff; padding: 14px; border-radius: 6px; margin-bottom: 12px;">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+            <span class="archer-badge" style="background: rgba(255,165,2,0.2); color: #ffa502; border: 1px solid rgba(255,165,2,0.4); padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; text-transform: uppercase;">Awaiting Pairing</span>
+            <span style="font-size: 12px; color: #88a0bc;">Expires in ~${remainingMin}m</span>
+          </div>
+          <div style="margin: 12px 0; text-align: center;">
+            <div style="font-size: 13px; color: #88a0bc; margin-bottom: 6px;">ENTER THIS 6-DIGIT CODE ON YOUR IPAD AIR:</div>
+            <div style="font-family: monospace; font-size: 32px; font-weight: 700; letter-spacing: 8px; color: #53e8ff; background: rgba(0,0,0,0.4); padding: 10px; border-radius: 8px; display: inline-block; border: 1px dashed rgba(83,232,255,0.4);">${escapeHtml(code)}</div>
+          </div>
+          <div class="archer-memory-row-sub" style="font-size: 13px; color: #88a0bc; text-align: center;">
+            Open <a href="${escapeHtml(url)}" target="_blank" style="color: #53e8ff; text-decoration: underline; font-weight: 600;">${escapeHtml(url)}</a> on your iPad Air Safari browser.
+          </div>
+        </div>
+        <div style="display: flex; gap: 10px; align-items: center;">
+          <button id="archer-system-ipad-generate-btn" class="archer-btn" style="background: rgba(83, 232, 255, 0.15); color: #53e8ff; border: 1px solid rgba(83, 232, 255, 0.3); padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer;">Generate New Code</button>
+        </div>
+      `;
+      const genBtn = document.getElementById("archer-system-ipad-generate-btn");
+      if (genBtn) {
+        genBtn.onclick = () => {
+          if (window.ArcherClient) window.ArcherClient.sendSystemGenerateIpadCode();
+        };
+      }
+    }
   }
 
   function renderModelSelect(available, current) {
@@ -232,6 +301,7 @@
     renderModelSelect(data.availableModels, data.currentModel);
     renderDeviceSelect(micSelect, data.micDevices, data.currentMicIndex, data.currentMicName);
     renderDeviceSelect(speakerSelect, data.speakerDevices, data.currentSpeakerIndex, data.currentSpeakerName);
+    renderIpadPairing(data.ipadPairing);
 
     if (!modelSelectWired) {
       modelSelectWired = true;
@@ -256,6 +326,7 @@
 
   if (window.ArcherClient) {
     window.ArcherClient.on("systemSnapshot", render);
+    window.ArcherClient.on("systemIpadPairing", renderIpadPairing);
   }
 
   // Camera feed + polling only run while the Dashboard is genuinely

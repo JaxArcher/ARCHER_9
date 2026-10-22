@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -684,6 +685,23 @@ class SQLiteStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_tools_registry_status ON tools_registry(status);
                 CREATE INDEX IF NOT EXISTS idx_tools_registry_name ON tools_registry(name);
+
+                -- Device pairings (Phase 7c / Spec Section 10c - iPad Air access)
+                CREATE TABLE IF NOT EXISTS device_pairings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device_type TEXT NOT NULL,
+                    device_name TEXT NOT NULL,
+                    pairing_code TEXT NOT NULL,
+                    token TEXT UNIQUE,
+                    status TEXT NOT NULL, -- 'pending', 'paired', 'revoked'
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP,
+                    paired_at TIMESTAMP,
+                    last_seen_at TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_device_pairings_code ON device_pairings(pairing_code);
+                CREATE INDEX IF NOT EXISTS idx_device_pairings_token ON device_pairings(token);
+                CREATE INDEX IF NOT EXISTS idx_device_pairings_status ON device_pairings(status);
             """)
             try:
                 conn.execute(
@@ -3820,6 +3838,228 @@ class SQLiteStore:
                 }
                 for r in rows
             ]
+        finally:
+            conn.close()
+
+    # --- Device Pairings (Phase 7c / Spec Section 10c - iPad Air access) ---
+
+    def get_or_create_pairing_code(
+        self,
+        device_type: str = "ipad",
+        device_name: str = "Col's iPad Air",
+        code_ttl_seconds: int = 900,
+    ) -> dict[str, Any]:
+        """
+        Retrieve active pending 6-digit pairing code or generate a fresh one.
+        Returns dict with pairing_code, expires_at, remaining_seconds, and status.
+        """
+        conn = self._get_connection()
+        try:
+            with conn:
+                row = conn.execute(
+                    """
+                    SELECT id, pairing_code, expires_at, status
+                    FROM device_pairings
+                    WHERE device_type = ? AND status = 'pending' AND datetime(expires_at) > datetime('now')
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (device_type,),
+                ).fetchone()
+
+                if row:
+                    row_id, code, exp_str, status = row
+                    try:
+                        exp_dt = datetime.fromisoformat(exp_str) if "T" in exp_str else datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S")
+                        remaining = max(0, int((exp_dt.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).total_seconds())) if exp_dt.tzinfo else max(0, int((exp_dt - datetime.utcnow()).total_seconds()))
+                    except Exception:
+                        remaining = code_ttl_seconds
+                    return {
+                        "id": row_id,
+                        "pairing_code": code,
+                        "expires_at": exp_str,
+                        "remaining_seconds": remaining,
+                        "status": "pending",
+                    }
+
+                conn.execute(
+                    "UPDATE device_pairings SET status = 'expired' WHERE device_type = ? AND status = 'pending'",
+                    (device_type,),
+                )
+
+                code = f"{secrets.randbelow(900000) + 100000}"
+                now_utc = datetime.utcnow()
+                exp_utc = now_utc + timedelta(seconds=code_ttl_seconds)
+                exp_str = exp_utc.strftime("%Y-%m-%d %H:%M:%S")
+
+                cur = conn.execute(
+                    """
+                    INSERT INTO device_pairings (device_type, device_name, pairing_code, status, created_at, expires_at)
+                    VALUES (?, ?, ?, 'pending', datetime('now'), ?)
+                    """,
+                    (device_type, device_name, code, exp_str),
+                )
+                return {
+                    "id": cur.lastrowid,
+                    "pairing_code": code,
+                    "expires_at": exp_str,
+                    "remaining_seconds": code_ttl_seconds,
+                    "status": "pending",
+                }
+        finally:
+            conn.close()
+
+    def generate_new_pairing_code(
+        self,
+        device_type: str = "ipad",
+        device_name: str = "Col's iPad Air",
+        code_ttl_seconds: int = 900,
+    ) -> dict[str, Any]:
+        """Invalidate any current pending code and generate a fresh one."""
+        conn = self._get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE device_pairings SET status = 'expired' WHERE device_type = ? AND status = 'pending'",
+                    (device_type,),
+                )
+                code = f"{secrets.randbelow(900000) + 100000}"
+                now_utc = datetime.utcnow()
+                exp_utc = now_utc + timedelta(seconds=code_ttl_seconds)
+                exp_str = exp_utc.strftime("%Y-%m-%d %H:%M:%S")
+
+                cur = conn.execute(
+                    """
+                    INSERT INTO device_pairings (device_type, device_name, pairing_code, status, created_at, expires_at)
+                    VALUES (?, ?, ?, 'pending', datetime('now'), ?)
+                    """,
+                    (device_type, device_name, code, exp_str),
+                )
+                return {
+                    "id": cur.lastrowid,
+                    "pairing_code": code,
+                    "expires_at": exp_str,
+                    "remaining_seconds": code_ttl_seconds,
+                    "status": "pending",
+                }
+        finally:
+            conn.close()
+
+    def verify_and_pair_device(
+        self,
+        code: str,
+        device_type: str = "ipad",
+        device_name: str = "Col's iPad Air",
+    ) -> str | None:
+        """
+        Verify 6-digit code. If valid and not expired, generate persistent token and mark status='paired'.
+        Returns bearer token on success, None on failure.
+        """
+        clean_code = str(code).strip()
+        conn = self._get_connection()
+        try:
+            with conn:
+                row = conn.execute(
+                    """
+                    SELECT id FROM device_pairings
+                    WHERE device_type = ? AND pairing_code = ? AND status = 'pending' AND datetime(expires_at) > datetime('now')
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (device_type, clean_code),
+                ).fetchone()
+
+                if not row:
+                    return None
+
+                pairing_id = row[0]
+                token = secrets.token_urlsafe(32)
+                now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+                conn.execute(
+                    """
+                    UPDATE device_pairings
+                    SET token = ?, status = 'paired', paired_at = ?, last_seen_at = ?, device_name = ?
+                    WHERE id = ?
+                    """,
+                    (token, now_str, now_str, device_name, pairing_id),
+                )
+                return token
+        finally:
+            conn.close()
+
+    def validate_device_token(self, token: str, device_type: str = "ipad") -> bool:
+        """Validate bearer token and update last_seen_at timestamp."""
+        if not token:
+            return False
+        conn = self._get_connection()
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT id FROM device_pairings WHERE token = ? AND status = 'paired'",
+                    (token,),
+                ).fetchone()
+                if not row:
+                    return False
+                conn.execute(
+                    "UPDATE device_pairings SET last_seen_at = datetime('now') WHERE id = ?",
+                    (row[0],),
+                )
+                return True
+        finally:
+            conn.close()
+
+    def get_paired_device_status(self, device_type: str = "ipad") -> dict[str, Any]:
+        """
+        Return pairing status for System tab and iPad status check:
+        - whether a device is currently paired
+        - active pending pairing code and countdown
+        - timestamps
+        """
+        conn = self._get_connection()
+        try:
+            paired_row = conn.execute(
+                """
+                SELECT id, device_name, paired_at, last_seen_at
+                FROM device_pairings
+                WHERE device_type = ? AND status = 'paired'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (device_type,),
+            ).fetchone()
+
+            if paired_row:
+                return {
+                    "paired": True,
+                    "id": paired_row[0],
+                    "device_name": paired_row[1],
+                    "paired_at": paired_row[2],
+                    "last_seen_at": paired_row[3],
+                    "pending_code": None,
+                    "remaining_seconds": 0,
+                }
+
+            pending_code_info = self.get_or_create_pairing_code(device_type=device_type)
+            return {
+                "paired": False,
+                "id": pending_code_info.get("id"),
+                "device_name": None,
+                "paired_at": None,
+                "last_seen_at": None,
+                "pending_code": pending_code_info.get("pairing_code"),
+                "remaining_seconds": pending_code_info.get("remaining_seconds", 0),
+            }
+        finally:
+            conn.close()
+
+    def revoke_device_pairing(self, device_type: str = "ipad") -> bool:
+        """Revoke active pairing and invalidate pending codes."""
+        conn = self._get_connection()
+        try:
+            with conn:
+                cur = conn.execute(
+                    "UPDATE device_pairings SET status = 'revoked' WHERE device_type = ? AND status IN ('paired', 'pending')",
+                    (device_type,),
+                )
+                return cur.rowcount > 0
         finally:
             conn.close()
 

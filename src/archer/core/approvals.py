@@ -226,6 +226,7 @@ class ApprovalManager:
                 "details": details,
                 "prompted_by": prompted_by,
                 "start_time": time.time(),
+                "timeout": timeout,
             }
 
         logger.info(f"[ApprovalManager] Approval requested [{req_id}]: {description}")
@@ -318,6 +319,25 @@ class ApprovalManager:
             "type": "session_approval_state",
             "active": active,
         })
+
+    def get_pending_requests(self) -> list[Dict[str, Any]]:
+        """Return list of all currently active pending approval requests."""
+        with self._pending_lock:
+            now = time.time()
+            res = []
+            for req_id, info in self._pending.items():
+                elapsed = now - info.get("start_time", now)
+                timeout = info.get("timeout", 30.0)
+                res.append({
+                    "request_id": req_id,
+                    "tool_name": info.get("tool_name"),
+                    "action_type": info.get("action_type"),
+                    "description": info.get("description"),
+                    "details": info.get("details"),
+                    "remaining_seconds": max(0, int(timeout - elapsed)),
+                    "timeout_seconds": timeout,
+                })
+            return res
 
     def record_change(
         self,

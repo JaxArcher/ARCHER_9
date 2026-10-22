@@ -177,6 +177,7 @@ doesn't require starting it by hand in a separate window.
 | `tools_uninstall_result`| `result`                       | Phase 4 (Spec 7): Result of candidate tool uninstallation |
 | `browser_screencast_frame`| `data`, `metadata`, `sessionId` | Phase 7 (Spec 10): Live CDP screencast frame (base64 JPEG) |
 | `browser_state`         | `open`, `title`, `url`, `tabs`, `canGoBack`, `canGoForward` | Phase 7 (Spec 10): Browser session state and tabs list |
+| `system_ipad_pairing`   | `paired`, `device_name`, `paired_at`, `last_seen_at`, `pending_code`, `remaining_seconds`, `lan_ip`, `port`, `url` | Phase 7c (Spec 10c): iPad Air pairing state and LAN connection details |
 
 ### Dedicated Binary Stream WebSocket (`/ws/android`)
 
@@ -247,6 +248,11 @@ To guarantee that high-framerate video frames never delay chat, voice state, or 
 {"type": "browser_insert_text", "text": "hello"}    // Phase 7: insert text
 {"type": "browser_screencast_visibility", "visible": true} // Phase 7: pause/resume screencast
 {"type": "browser_restart"}                         // Phase 7: restart browser session
+
+// Phase 7c (Spec 10c): iPad Air Gateway Pairing
+{"type": "system_get_ipad_pairing"}                 // fetch current pairing status and active code
+{"type": "system_generate_ipad_code"}               // generate fresh 6-digit pairing code
+{"type": "system_revoke_ipad_pairing"}              // revoke paired device token immediately
 
 ```
 
@@ -332,3 +338,41 @@ movable and resizable via GridStack.js 14.0.0 (MIT, vendored in `web/vendor/grid
   layout and restores defaults.
 - All persistent DOM elements (`<video>` camera stream, barehands `<iframe>`)
   remain mounted in the DOM without destroying or reloading.
+
+## ARCHER on Col's iPad Air (Phase 7c / Spec Section 10c)
+
+Col uses ARCHER from his 1st generation iPad Air (iOS 12 / Safari 12) from the couch on home Wi-Fi.
+
+### Network Architecture & Isolation
+- **Separate Home Network Port:** Listens on `0.0.0.0:8201` (configurable via `ARCHER_IPAD_HOST` and `ARCHER_IPAD_PORT`).
+- **One-Time Numeric Pairing:**
+  - The PC System tab (`127.0.0.1:8200/app`) displays a fresh 6-digit code.
+  - Col enters the code on the iPad (`http://<LAN_IP>:8201/`), which receives a cryptographically secure long-lived bearer token (`secrets.token_urlsafe(32)`).
+  - Col can revoke the pairing at any time with one click in the PC System tab.
+  - Unpaired devices or invalid/revoked tokens cannot access any ARCHER data (401 Unauthorized).
+- **Strict Capability Boundary:**
+  - Allowed: Chat with ARCHER, spoken replies (Kokoro TTS via HTML5 Audio), Away & Tasks ("While You Were Away" + tasks checklist), "Where's my..." (tracked item locations + camera photos), and touch-friendly Approval Prompts (Approve / Deny).
+  - Strictly blocked: No camera view, logs, transcripts, file browser, terminal, browser screencast, or tool installation endpoints.
+
+### iPad Client Compatibility
+- Target environment: Apple Safari 12 on iOS 12.
+- Plain HTML, CSS, and JavaScript with no build step.
+- Zero usage of unsupported syntax: strictly NO optional chaining (`?.`), NO nullish coalescing (`??`), NO BigInt, and NO WebCodecs.
+- iOS Web Clip / Home Screen support (`apple-mobile-web-app-capable`, `apple-touch-icon`).
+
+### iPad Gateway Endpoints (Port 8201)
+- `GET /`, `GET /ipad`: Serves Safari 12 compatible single-page application.
+- `GET /ipad/style.css`, `GET /ipad/app.js`, `GET /ipad/icon.png`: Static assets.
+- `POST /api/ipad/pair`: Validates 6-digit code and issues bearer token.
+- `GET /api/ipad/status`: Public pairing status check.
+- `GET /api/ipad/chat/history`: Authenticated recent conversation history.
+- `POST /api/ipad/chat/send`: Inbound message dispatch to `CoreAgent`.
+- `GET /api/ipad/tasks`: Tasks and habits checklist.
+- `POST /api/ipad/tasks/toggle`: Checkbox toggle for task completion.
+- `GET /api/ipad/away`: Recent "While You Were Away" interventions.
+- `GET /api/ipad/items`: Tracked items with last seen location and photo availability.
+- `GET /api/ipad/items/photo/{item_id}`: Serves camera snapshot photo of item.
+- `GET /api/ipad/approvals`: Active pending tool execution approval requests.
+- `POST /api/ipad/approvals/respond`: Responds (`approve`, `deny`, `approve_session`).
+- `GET /api/ipad/tts`: WAV audio stream for spoken replies.
+- `WebSocket /ws/ipad?token=...`: Real-time bidirectional event bridge (chat, approvals, tasks).

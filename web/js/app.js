@@ -58,6 +58,7 @@ const ArcherClient = (() => {
     toolsRegistryList: [],
     toolsProposeResult: [],
     toolsUninstallResult: [],
+    systemIpadPairing: [],
     browserScreencastFrame: [],
     browserState: [],
     connected: [],
@@ -178,7 +179,11 @@ const ArcherClient = (() => {
           speakerDevices: msg.speaker_devices || [],
           currentMicIndex: msg.current_mic_index,
           currentSpeakerIndex: msg.current_speaker_index,
+          ipadPairing: msg.ipad_pairing || null,
         });
+        break;
+      case "system_ipad_pairing":
+        emit("systemIpadPairing", msg);
         break;
       case "browser_screenshot":
         // Mirror of ARCHER's own Playwright-driven browser (2026-09-16) --
@@ -426,6 +431,15 @@ const ArcherClient = (() => {
     },
     sendSystemSwitchModel(model) {
       send({ type: "system_switch_model", model });
+    },
+    sendSystemGetIpadPairing() {
+      send({ type: "system_get_ipad_pairing" });
+    },
+    sendSystemGenerateIpadCode() {
+      send({ type: "system_generate_ipad_code" });
+    },
+    sendSystemRevokeIpadPairing() {
+      send({ type: "system_revoke_ipad_pairing" });
     },
     sendBrowserGetScreenshot() {
       send({ type: "browser_get_screenshot" });

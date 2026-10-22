@@ -29,6 +29,7 @@ def isolated_browser_controller(tmp_path_factory):
     os.environ["ARCHER_BROWSER_PROFILE_DIR"] = str(temp_profile)
 
     pc = get_pc_controller()
+    pc.reset_halt()
     yield pc
 
     # Cleanup browser on teardown
@@ -154,6 +155,7 @@ def test_browser_chrome_navigation(isolated_browser_controller):
 def test_agent_tools_backward_compatibility(isolated_browser_controller):
     """Verify existing open_url, browser_screenshot, and get_browser_status methods."""
     pc = isolated_browser_controller
+    pc.reset_halt()
 
     # open_url
     nav_res = pc.open_url("data:text/html,<h2 id='test-title'>Agent Tool Page</h2>")
