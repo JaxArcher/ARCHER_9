@@ -12,6 +12,7 @@ build/
 .venv/
 venv/
 env/
+envs/
 
 # IDE
 .vscode/
@@ -67,3 +68,18 @@ ARCHER_Workspace_Phase0_Audit_06OCT2026.md
 
 # Antigravity's in-place backups (Phase 2c, 2026-10-15)
 *.bak_2c
+
+# Stray root copies (Plan rule)
+/*.ico
+/CONTRACT.md
+/browser.js
+/index.html
+/logs.js
+/memory.js
+/qc
+/system.js
+/tabs.js
+/tasks.js
+/ui.css
+/ui_control_SKILL.md
+barehands/sample-notes/

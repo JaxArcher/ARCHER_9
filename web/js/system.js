@@ -133,19 +133,24 @@
     modelSelect.innerHTML = html;
   }
 
-  function renderDeviceSelect(select, devices, currentIndex) {
+  function renderDeviceSelect(select, devices, currentIndex, currentName) {
     if (document.activeElement === select) return;
     if (!devices || devices.length === 0) {
       select.innerHTML = '<option value="" disabled selected>None found</option>';
       return;
     }
-    const hasMatch = currentIndex != null && devices.some(d => d.index === currentIndex);
+    let matchedIndex = currentIndex;
+    if ((matchedIndex == null || !devices.some(d => d.index === matchedIndex)) && currentName) {
+      const match = devices.find(d => d.name && d.name.toLowerCase().includes(currentName.toLowerCase()));
+      if (match) matchedIndex = match.index;
+    }
+    const hasMatch = matchedIndex != null && devices.some(d => d.index === matchedIndex);
     let html = "";
     if (!hasMatch) {
-      html += `<option value="" disabled ${currentIndex == null ? "selected" : ""}>Select device...</option>`;
+      html += `<option value="" disabled selected>Select device...</option>`;
     }
     html += devices.map((d) =>
-      `<option value="${d.index}" ${d.index === currentIndex ? "selected" : ""}>${escapeHtml(d.name)}</option>`
+      `<option value="${d.index}" ${d.index === matchedIndex ? "selected" : ""}>${escapeHtml(d.name)}</option>`
     ).join("");
     select.innerHTML = html;
   }
@@ -225,8 +230,8 @@
     renderOllamaLoaded(data.ollamaLoaded);
     renderGauges(data);
     renderModelSelect(data.availableModels, data.currentModel);
-    renderDeviceSelect(micSelect, data.micDevices, data.currentMicIndex);
-    renderDeviceSelect(speakerSelect, data.speakerDevices, data.currentSpeakerIndex);
+    renderDeviceSelect(micSelect, data.micDevices, data.currentMicIndex, data.currentMicName);
+    renderDeviceSelect(speakerSelect, data.speakerDevices, data.currentSpeakerIndex, data.currentSpeakerName);
 
     if (!modelSelectWired) {
       modelSelectWired = true;
@@ -237,10 +242,14 @@
     if (!deviceSelectsWired) {
       deviceSelectsWired = true;
       micSelect.addEventListener("change", () => {
-        window.ArcherClient.sendSystemSwitchMic(parseInt(micSelect.value, 10));
+        const idx = parseInt(micSelect.value, 10);
+        const name = micSelect.options[micSelect.selectedIndex]?.text || null;
+        window.ArcherClient.sendSystemSwitchMic(idx, name);
       });
       speakerSelect.addEventListener("change", () => {
-        window.ArcherClient.sendSystemSwitchSpeaker(parseInt(speakerSelect.value, 10));
+        const idx = parseInt(speakerSelect.value, 10);
+        const name = speakerSelect.options[speakerSelect.selectedIndex]?.text || null;
+        window.ArcherClient.sendSystemSwitchSpeaker(idx, name);
       });
     }
   }

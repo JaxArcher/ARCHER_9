@@ -10,7 +10,8 @@ from archer.config import ArcherConfig
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "archer"
 PRIMARY_MODEL_REQUESTS = {
-    "agents/core_agent.py": 3,
+    "agents/core_agent.py": 4,
+    "observer/item_watcher.py": 1,
     "voice/pipeline.py": 1,
     "memory/pattern_learner.py": 1,
     "observer/staleness_reasoner.py": 1,

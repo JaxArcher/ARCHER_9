@@ -88,10 +88,12 @@ class ReolinkSmartDetector:
         True, which only means the background thread launched."""
         return self._connected.is_set()
 
-    def get_snapshot(self) -> bytes | None:
+    def get_snapshot(self, timeout: float = 2.5) -> bytes | None:
         """
         Fetch high-resolution still snapshot (JPEG) from Reolink camera
-        via the authenticated reolink-aio Host client.
+        via the authenticated reolink-aio Host client. The item watcher
+        (Phase 2d) allows longer: a main-stream still often takes more than
+        2.5 s (2026-10-20 log).
         """
         if self._host_client and self._loop and self._connected.is_set():
             try:
@@ -99,7 +101,7 @@ class ReolinkSmartDetector:
                     self._host_client.get_snapshot(0, stream="main"),
                     self._loop,
                 )
-                return future.result(timeout=2.5)
+                return future.result(timeout=timeout)
             except Exception as e:
                 logger.debug(f"ReolinkSmartDetector: snapshot fetch failed ({e})")
         return None

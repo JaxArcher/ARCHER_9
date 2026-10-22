@@ -42,6 +42,36 @@ from archer.voice.auth import VoiceAuthenticator
 
 
 
+# The wake word inside a transcript (2026-10-20: the TV said "You can't control
+# my life ..." during the follow-up window, then Col said "Hey ARCHER", and
+# ARCHER answered the TV).
+_WAKE_IN_TEXT = re.compile(r"\b(?P<hey>(?:hey|hi|okay|ok)[\s,]+)?archer\b[\s,.!?]*", re.IGNORECASE)
+
+
+def _after_wake_word(text: str) -> tuple[str, bool]:
+    """
+    (what's meant for ARCHER, whether the wake word came after other words).
+
+    - "Hey ARCHER, what time is it" -> ("what time is it", False)
+    - "<TV talk> ... Hey ARCHER!" -> ("", True): a fresh wake, listen again
+    - "<TV talk> ... ARCHER, open YouTube" -> ("open YouTube", True)
+    - "What time is it, ARCHER?" -> ("What time is it", False): just his name
+    """
+    matches = list(_WAKE_IN_TEXT.finditer(text or ""))
+    if not matches:
+        return text, False
+    last = matches[-1]
+    before = text[: last.start()].strip(" ,.!?")
+    after = text[last.end():].strip()
+    if not before:
+        return after, not after
+    if after:
+        return after, True
+    if last.group("hey"):
+        return "", True
+    return before, False
+
+
 # How long one of ARCHER's own short lines (a filler, an announcement) stays
 # something the mic may be hearing back (VoicePipeline._recent_own_lines).
 _OWN_LINE_SECONDS = 90.0
@@ -257,9 +287,15 @@ class VoicePipeline:
 
         # Load the speech model and run it once now, in the background, so
         # the first question doesn't wait for it (49 s on 2026-10-20).
-        warm_up = getattr(self._stt, "warm_up", None)
-        if callable(warm_up):
-            threading.Thread(target=warm_up, daemon=True, name="STTWarmUp").start()
+        warm_up_stt = getattr(self._stt, "warm_up", None)
+        if callable(warm_up_stt):
+            threading.Thread(target=warm_up_stt, daemon=True, name="STTWarmUp").start()
+
+        # Warm up the TTS neural engine / CUDA kernels in the background so
+        # the first spoken response doesn't suffer the ~27s cold CUDA init latency.
+        warm_up_tts = getattr(self._tts, "warm_up", None)
+        if callable(warm_up_tts):
+            threading.Thread(target=warm_up_tts, daemon=True, name="TTSWarmUp").start()
 
         logger.info("Voice pipeline initialized.")
 
@@ -633,6 +669,9 @@ class VoicePipeline:
         # Combine speech buffer into single audio
         audio_data = b"".join(self._speech_buffer)
         self._speech_buffer.clear()
+        # When the speech ended, and how long it was, for the TV check below.
+        utterance_end = time.monotonic()
+        utterance_seconds = len(audio_data) / (2.0 * self._config.sample_rate)
 
         if len(audio_data) < 3200:  # Less than ~100ms of audio — too short
             logger.debug("Audio too short, ignoring.")
@@ -654,6 +693,8 @@ class VoicePipeline:
         # result shouldn't cost the user their whole follow-up window; only
         # a HALT should force an immediate return to idle.
         stt_was_empty = threading.Event()
+        # The wake word came after other speech: listen again for the request.
+        woke_again = threading.Event()
 
         # Populated by _worker (via a further background thread, so it
         # doesn't delay the real agent call below) once STT text is
@@ -705,6 +746,28 @@ class VoicePipeline:
                     # the user gets no reply at all, so it must be visible
                     # in the console when it happens.
                     logger.info(f"Ignoring STT result as possible self-echo (ARCHER hearing itself): '{text}'")
+                    stt_was_empty.set()
+                    worker_aborted.set()
+                    return
+
+                # The wake word after other speech: what came before wasn't for
+                # ARCHER (2026-10-20, the TV during the follow-up window).
+                command, woke = _after_wake_word(text)
+                if woke and not command:
+                    logger.info(f"Wake word after other speech ('{text}'): listening for the request.")
+                    woke_again.set()
+                    worker_aborted.set()
+                    return
+                if command != text:
+                    if woke:
+                        logger.info(f"Kept only what followed the wake word: '{command}' (heard: '{text}').")
+                    text = command
+
+                # Speech the PC was playing (the TV, a video) isn't Col talking:
+                # its words match what the PC played (same idea as the room
+                # listener's TV check, observer/pc_playback.py).
+                if not woke and self._pc_played_it(text, utterance_end - utterance_seconds, utterance_end):
+                    logger.info(f"Ignoring speech the PC was playing (TV or video): '{text}'")
                     stt_was_empty.set()
                     worker_aborted.set()
                     return
@@ -795,7 +858,10 @@ class VoicePipeline:
 
         # Worker aborted (empty STT, HALT, etc.) — no response needed
         if worker_aborted.is_set():
-            self._resume_listening_or_idle(stt_was_empty.is_set())
+            if woke_again.is_set():
+                self._listen_after_wake()
+            else:
+                self._resume_listening_or_idle(stt_was_empty.is_set())
             return
 
         # Stream ended immediately with no sentences
@@ -867,7 +933,10 @@ class VoicePipeline:
 
             # Check again in case worker aborted while filler was playing
             if worker_aborted.is_set():
-                self._resume_listening_or_idle(stt_was_empty.is_set())
+                if woke_again.is_set():
+                    self._listen_after_wake()
+                else:
+                    self._resume_listening_or_idle(stt_was_empty.is_set())
                 return
 
         if first is None:
@@ -1087,6 +1156,45 @@ class VoicePipeline:
             logger.debug(f"Acoustic-bleed check failed (non-fatal): {e}")
 
         return False
+
+    def _listen_after_wake(self) -> None:
+        """The wake word ended what was heard: acknowledge it and listen for the request."""
+        self._set_state(VoicePipelineState.LISTENING)
+        self._vad.reset()
+        self._speech_buffer.clear()
+        self._listen_preroll.clear()
+        self._heard_speech = False
+        self._silence_frames = 0
+        self._listen_start = time.monotonic()
+        self._play_wake_ack()
+
+    def _pc_played_it(self, text: str, start: float, end: float) -> bool:
+        """
+        Whether `text` (heard between `start` and `end`, monotonic seconds) is
+        mostly words the PC was playing at the time: the TV or a video, not
+        Col. False when the PC was quiet, the line is too short to judge, or
+        anything fails.
+        """
+        try:
+            from archer.observer.pc_playback import AUDIBLE_RMS, words_match
+
+            get_audio = getattr(self._audio, "get_loopback_audio", None)
+            played = get_audio(start - 1.0, end + 0.3) if callable(get_audio) else None
+            if played is None or len(played) < 8000:
+                return False
+            if float(np.sqrt(np.mean(played.astype(np.float64) ** 2))) < AUDIBLE_RMS:
+                return False
+            pcm = (np.clip(played, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+            played_text = self._stt.transcribe(pcm, publish_event=False)
+            result = words_match(text, played_text or "")
+            if result is None:
+                return False
+            share, count = result
+            logger.info(f"TV check (ARCHER's mic): {share:.2f} of {count} words were also playing on the PC.")
+            return share >= 0.5
+        except Exception as e:
+            logger.debug(f"TV check failed (non-fatal): {type(e).__name__}: {e}")
+            return False
 
     def _resume_listening_or_idle(self, was_empty_stt: bool) -> None:
         """

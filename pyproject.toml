@@ -75,6 +75,9 @@ dependencies = [
     "httpx==0.28.1",
     "loguru==0.7.3",
     "pyaudio==0.2.14",
+
+    # --- Telegram Line (Spec 10d) ---
+    "aiogram==3.31.0",
 ]
 
 [project.optional-dependencies]

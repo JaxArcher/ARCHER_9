@@ -44,6 +44,10 @@ class ArcherConfig(BaseSettings):
     speaker_device_index: int | None = Field(
         default=None, alias="ARCHER_SPEAKER_DEVICE_INDEX"
     )
+    mic_device_name: str | None = Field(default=None, alias="ARCHER_MIC_DEVICE_NAME")
+    speaker_device_name: str | None = Field(
+        default=None, alias="ARCHER_SPEAKER_DEVICE_NAME"
+    )
     sample_rate: int = 16000
     audio_channels: int = 1
 
@@ -51,6 +55,14 @@ class ArcherConfig(BaseSettings):
     @classmethod
     def _empty_str_to_none(cls, v: Any) -> int | None:
         """Treat empty strings from .env as None (triggers interactive selection)."""
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
+
+    @field_validator("mic_device_name", "speaker_device_name", mode="before")
+    @classmethod
+    def _empty_str_to_none_str(cls, v: Any) -> str | None:
+        """Treat empty strings from .env as None."""
         if isinstance(v, str) and v.strip() == "":
             return None
         return v
@@ -292,6 +304,9 @@ class ArcherConfig(BaseSettings):
     # ARCHER's own browser (tools/pc_control.py) opens its window off-screen
     # and is seen through ARCHER's page; true puts the window on the desktop.
     browser_on_screen: bool = Field(default=False, alias="ARCHER_BROWSER_ON_SCREEN")
+    # Phase 2d: the observer watches the room camera for things that get
+    # moved (observer/item_watcher.py). false turns it off.
+    items_watch: bool = Field(default=True, alias="ARCHER_ITEMS_WATCH")
 
     # --- Nightly Maintenance (2026-09-16) ---
     # memory/maintenance.py's run_maintenance() (daily consolidation +
@@ -309,8 +324,19 @@ class ArcherConfig(BaseSettings):
     # Path to a locally-cloned https://github.com/jaredrhod/barehands checkout.
     # ARCHER never clones/installs this itself (untrusted-source download
     # policy) -- the user sets this up by hand, then points ARCHER at it.
-    # Empty string (default) disables the bridge entirely, silently.
-    barehands_dir: str = Field(default="", alias="ARCHER_BAREHANDS_DIR")
+    # --- Telegram Line (Phase 6b / Spec 10d) ---
+    telegram_bot_token: str = Field(default="", alias="ARCHER_TELEGRAM_BOT_TOKEN")
+    telegram_user_id: int | None = Field(default=None, alias="ARCHER_TELEGRAM_USER_ID")
+
+    @field_validator("telegram_user_id", mode="before")
+    @classmethod
+    def _parse_telegram_user_id(cls, v: Any) -> int | None:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        try:
+            return int(v)
+        except (ValueError, TypeError):
+            return None
 
     model_config = {
         "env_file": ".env",
@@ -377,21 +403,22 @@ def _pick_device(direction: str, devices: list[dict]) -> int:
             print(f"   ✗ Please enter a valid integer.")
 
 
-def _save_device_to_env(key: str, value: int) -> None:
-    """Write a device index back to .env so the user doesn't have to pick again."""
+def _save_device_to_env(key: str, value: Any) -> None:
+    """Write a device setting (index or name) back to .env so the user doesn't have to pick again."""
     env_path = Path(".env")
     if not env_path.exists():
         return
 
     lines = env_path.read_text(encoding="utf-8").splitlines()
     found = False
+    val_str = str(value)
     for i, line in enumerate(lines):
         if line.startswith(f"{key}="):
-            lines[i] = f"{key}={value}"
+            lines[i] = f"{key}={val_str}"
             found = True
             break
     if not found:
-        lines.append(f"{key}={value}")
+        lines.append(f"{key}={val_str}")
 
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

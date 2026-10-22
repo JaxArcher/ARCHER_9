@@ -37,6 +37,7 @@ TV check added by Claude 2026-10-20.
 from __future__ import annotations
 
 import collections
+import queue
 import re
 import subprocess
 import threading
@@ -240,12 +241,39 @@ def embed_voice(model: Any, audio: np.ndarray) -> np.ndarray:
         return model.encode_batch(tensor).squeeze().cpu().numpy().astype(np.float32)
 
 
+class _StreamReader:
+    """Reads subprocess.stdout in a daemon background thread so pipe reads can time out."""
+
+    def __init__(self, stream: Any) -> None:
+        self.stream = stream
+        self.q: queue.Queue[bytes] = queue.Queue(maxsize=1000)
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True, name="RoomListener-StreamReader")
+        self.thread.start()
+
+    def _run(self) -> None:
+        while not self.stopped.is_set():
+            try:
+                chunk = self.stream.read(1920)
+                if not chunk:
+                    self.q.put(b"")
+                    break
+                self.q.put(chunk)
+            except Exception:
+                self.q.put(b"")
+                break
+
+    def stop(self) -> None:
+        self.stopped.set()
+
+
 def start_camera_audio(url: str, sample_rate: int = 16000) -> subprocess.Popen:
     """Audio-only ffmpeg connection to the camera stream: 16 kHz mono 16-bit PCM on stdout."""
     cmd = [
         FFMPEG_EXE,
         "-loglevel", "error",
         "-rtsp_transport", "tcp",
+        "-timeout", "10000000",
         "-i", url,
         "-vn",
         "-acodec", "pcm_s16le",
@@ -295,6 +323,7 @@ class RoomListener:
 
         self._running = threading.Event()
         self._stream_proc: subprocess.Popen | None = None
+        self._current_reader: _StreamReader | None = None
         self._capture_thread: threading.Thread | None = None
         self._worker_thread: threading.Thread | None = None
         self._audio_queue: collections.deque = collections.deque()
@@ -402,6 +431,47 @@ class RoomListener:
             except Exception:
                 pass
 
+    def _report_audio_received(self, now: float) -> None:
+        try:
+            self._store.update_audio_received(now)
+        except Exception:
+            pass
+
+    def _report_audio_stall(self, stalled_seconds: float, now: float) -> None:
+        try:
+            self._store.update_audio_stalled(stalled_seconds, now)
+        except Exception:
+            pass
+        try:
+            from archer.memory.redis_buffer import get_redis_buffer
+            from archer.observer.pipeline import OBSERVER_REDIS_CHANNEL
+            rb = get_redis_buffer()
+            if rb.is_connected():
+                rb.publish(OBSERVER_REDIS_CHANNEL, {
+                    "event_type": "room_audio_stall",
+                    "seconds": int(stalled_seconds),
+                    "timestamp": now,
+                })
+        except Exception:
+            pass
+
+    def _report_audio_recovered(self, now: float) -> None:
+        try:
+            self._store.update_audio_received(now)
+        except Exception:
+            pass
+        try:
+            from archer.memory.redis_buffer import get_redis_buffer
+            from archer.observer.pipeline import OBSERVER_REDIS_CHANNEL
+            rb = get_redis_buffer()
+            if rb.is_connected():
+                rb.publish(OBSERVER_REDIS_CHANNEL, {
+                    "event_type": "room_audio_reconnect",
+                    "timestamp": now,
+                })
+        except Exception:
+            pass
+
     def _get_current_people_in_view(self) -> list[str]:
         """Names of the people in view now; unidentified people are listed as such. Empty if nobody."""
         people: list[str] = []
@@ -475,6 +545,12 @@ class RoomListener:
         logger.info("RoomListener stopped.")
 
     def _stop_stream(self) -> None:
+        if self._current_reader is not None:
+            try:
+                self._current_reader.stop()
+            except Exception:
+                pass
+            self._current_reader = None
         proc, self._stream_proc = self._stream_proc, None
         if proc is not None:
             try:
@@ -499,8 +575,17 @@ class RoomListener:
         max_stretch_frames = 500  # ~15 s at most per stretch
         min_stretch_frames = 16   # ~0.5 s at least
 
+        buf = bytearray()
+        last_audio_ts = time.time()
+        stalled = False
+        last_db_audio_report = 0.0
+
         while self._running.is_set():
             if self._stream_proc is None or self._stream_proc.poll() is not None:
+                if self._current_reader is not None:
+                    self._current_reader.stop()
+                    self._current_reader = None
+                buf.clear()
                 if self._stream_proc is not None:
                     code = self._stream_proc.poll()
                     ran_for = time.time() - started_at
@@ -516,6 +601,8 @@ class RoomListener:
                 try:
                     self._stream_proc = start_camera_audio(url, self._sample_rate)
                     started_at = time.time()
+                    last_audio_ts = started_at
+                    self._current_reader = _StreamReader(self._stream_proc.stdout)
                 except Exception as e:
                     backoff = min(max(backoff * 2, 3.0), 60.0)
                     logger.error(f"RoomListener: couldn't start ffmpeg ({type(e).__name__}); retrying in {backoff:.0f} s.")
@@ -523,10 +610,58 @@ class RoomListener:
                         break
                     continue
 
-            try:
-                frame = self._stream_proc.stdout.read(self._frame_bytes)
-            except Exception:
+            # Read frames with 10-second no-audio watchdog (Review 2026-10-21, 16:30)
+            frame = b""
+            while len(buf) < self._frame_bytes and self._running.is_set():
+                if self._stream_proc is None or self._stream_proc.poll() is not None:
+                    break
+                if self._current_reader is None:
+                    break
+                try:
+                    chunk = self._current_reader.q.get(timeout=0.2)
+                except queue.Empty:
+                    chunk = None
+
+                now = time.time()
+                if chunk:
+                    buf.extend(chunk)
+                    last_audio_ts = now
+                    if stalled:
+                        stalled = False
+                        logger.info("RoomListener: camera audio reconnected and flowing.")
+                        self._report_audio_recovered(now)
+                    if now - last_db_audio_report >= 3.0:
+                        last_db_audio_report = now
+                        self._report_audio_received(now)
+                elif chunk == b"":
+                    # EOF from stream
+                    break
+                else:
+                    # Timeout: no chunk for 0.2s, check 10s watchdog
+                    silence_duration = now - last_audio_ts
+                    if silence_duration >= 10.0:
+                        stalled = True
+                        logger.warning(
+                            f"RoomListener: no audio received from camera for {silence_duration:.1f} s (watchdog timeout); "
+                            f"killing ffmpeg to trigger reconnect."
+                        )
+                        self._report_audio_stall(silence_duration, now)
+                        try:
+                            if self._stream_proc is not None:
+                                self._stream_proc.kill()
+                        except Exception:
+                            pass
+                        if self._current_reader is not None:
+                            self._current_reader.stop()
+                            self._current_reader = None
+                        break
+
+            if len(buf) >= self._frame_bytes:
+                frame = bytes(buf[:self._frame_bytes])
+                del buf[:self._frame_bytes]
+            else:
                 frame = b""
+
             if not frame or len(frame) < self._frame_bytes:
                 continue  # the poll() above notices if ffmpeg ended
 

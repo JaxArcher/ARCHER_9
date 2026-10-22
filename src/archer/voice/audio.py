@@ -70,6 +70,106 @@ from archer.config import get_config, _save_device_to_env
 from archer.core.event_bus import Event, EventType, get_event_bus
 
 
+def find_audio_device(
+    direction: str,
+    name_pattern: str | None = None,
+    index_fallback: int | None = None,
+    devices: list[dict] | None = None,
+    preferred_hostapi: int | None = None,
+) -> tuple[int | None, str]:
+    """
+    Resolve audio device index and name.
+    1. If name_pattern is given, search by case-insensitive substring match,
+       preferring the specified hostapi (or active default hostapi for this direction).
+    2. Fall back to index_fallback if valid for the direction.
+    3. Fall back to system default device.
+    Returns (resolved_index, resolved_name).
+    """
+    try:
+        if devices is None:
+            dev_list = sd.query_devices()
+            devices = [
+                {
+                    "index": i,
+                    "name": dev["name"],
+                    "hostapi": dev["hostapi"],
+                    "max_input_channels": dev["max_input_channels"],
+                    "max_output_channels": dev["max_output_channels"],
+                    "default_samplerate": dev["default_samplerate"],
+                }
+                for i, dev in enumerate(dev_list)
+            ]
+    except Exception as e:
+        logger.warning(f"Could not query audio devices: {e}")
+        return index_fallback, "Unknown Device"
+
+    if not devices:
+        return index_fallback, "Unknown Device"
+
+    key = "max_input_channels" if direction == "input" else "max_output_channels"
+    candidates = [d for d in devices if d.get(key, 0) > 0]
+    if not candidates:
+        return None, "No Device Found"
+
+    # Default hostapi preference
+    if preferred_hostapi is None:
+        try:
+            def_idx = sd.default.device[0 if direction == "input" else 1]
+            if def_idx is not None and 0 <= def_idx < len(devices):
+                preferred_hostapi = devices[def_idx].get("hostapi")
+        except Exception:
+            pass
+
+    # 1. Match by name pattern (substring, case-insensitive)
+    if name_pattern and name_pattern.strip():
+        pattern = name_pattern.strip().lower()
+        matches = [d for d in candidates if pattern in (d.get("name") or "").lower()]
+        if matches:
+            def _sort_key(d: dict) -> tuple[int, int, int]:
+                name_clean = (d.get("name") or "").strip().lower()
+                exact = 1 if name_clean == pattern else 0
+                host = 1 if (preferred_hostapi is not None and d.get("hostapi") == preferred_hostapi) else 0
+                return (exact, host, -d.get("index", 0))
+
+            matches.sort(key=_sort_key, reverse=True)
+            chosen = matches[0]
+            chosen_idx = chosen.get("index")
+            chosen_name = chosen.get("name", "")
+            logger.info(
+                f"Resolved {direction} audio device by name '{name_pattern}': "
+                f"index {chosen_idx} ('{chosen_name}') [hostapi={chosen.get('hostapi')}]"
+            )
+            return chosen_idx, chosen_name
+
+    # 2. Match by index fallback
+    if index_fallback is not None and 0 <= index_fallback < len(devices):
+        dev = devices[index_fallback]
+        if dev.get(key, 0) > 0:
+            logger.info(
+                f"Resolved {direction} audio device by index fallback: "
+                f"index {index_fallback} ('{dev.get('name')}')"
+            )
+            return index_fallback, dev.get("name", "")
+
+    # 3. Match by system default
+    try:
+        def_idx = sd.default.device[0 if direction == "input" else 1]
+        if def_idx is not None and 0 <= def_idx < len(devices):
+            dev = devices[def_idx]
+            if dev.get(key, 0) > 0:
+                logger.info(
+                    f"Resolved {direction} audio device to system default: "
+                    f"index {def_idx} ('{dev.get('name')}')"
+                )
+                return def_idx, dev.get("name", "")
+    except Exception:
+        pass
+
+    # 4. Fallback to first candidate
+    first = candidates[0]
+    return first.get("index"), first.get("name", "")
+
+
 class AudioManager:
     """
     Manages audio input (microphone) and output (speakers).
@@ -135,6 +235,14 @@ class AudioManager:
         self._loopback_bin_seconds = 0.02
         # ~10s of 20ms bins — plenty for any barge-in snippet window.
         self._loopback_envelope: collections.deque[tuple[float, float]] = collections.deque(maxlen=500)
+        # The PC's playback itself, mono, for the last 30 s (memory only): the
+        # voice pipeline compares what the mic heard with what the PC played,
+        # so TV and video speech isn't taken as Col talking (2026-10-20).
+        self._loopback_audio: collections.deque[tuple[float, np.ndarray]] = collections.deque(maxlen=1500)
+
+        # Current resolved device names
+        self._current_mic_name: str = "Default Mic"
+        self._current_speaker_name: str = "Default Speaker"
 
         # TTS mute
         self._tts_muted = threading.Event()
@@ -145,6 +253,16 @@ class AudioManager:
         # Register HALT handler
         self._bus.subscribe_halt(self._on_halt)
 
+    @property
+    def is_loopback_available(self) -> bool:
+        return self._loopback_available
+
+    def get_current_mic_name(self) -> str:
+        return self._current_mic_name or "Default Mic"
+
+    def get_current_speaker_name(self) -> str:
+        return self._current_speaker_name or "Default Speaker"
+
     def start_capture(self) -> None:
         """Start microphone capture and speaker playback as independent streams."""
         if self._is_capturing.is_set():
@@ -153,29 +271,31 @@ class AudioManager:
 
         self._is_capturing.set()
 
-        device_index = self._config.mic_device_index
-        speaker_index = self._config.speaker_device_index
+        mic_name_pat = getattr(self._config, "mic_device_name", None)
+        spk_name_pat = getattr(self._config, "speaker_device_name", None)
 
-        # Resolve concrete device indices/names up front (not just for
-        # logging) — the loopback stream needs a real index to query native
-        # rate/channels and to guarantee it targets the SAME physical device
-        # that's actually rendering ARCHER's audio.
-        mic_name = "Default System Mic"
-        speaker_name = "Default System Speaker"
-        effective_speaker_index = speaker_index
-        try:
-            devs = sd.query_devices()
-            if device_index is not None and device_index < len(devs):
-                mic_name = devs[device_index]["name"]
-            elif sd.default.device[0] is not None and sd.default.device[0] < len(devs):
-                mic_name = devs[sd.default.device[0]]["name"]
+        device_index, mic_name = find_audio_device(
+            direction="input",
+            name_pattern=mic_name_pat,
+            index_fallback=self._config.mic_device_index,
+        )
+        effective_speaker_index, speaker_name = find_audio_device(
+            direction="output",
+            name_pattern=spk_name_pat,
+            index_fallback=self._config.speaker_device_index,
+        )
 
-            if effective_speaker_index is None:
-                effective_speaker_index = sd.default.device[1]
-            if effective_speaker_index is not None and effective_speaker_index < len(devs):
-                speaker_name = devs[effective_speaker_index]["name"]
-        except Exception:
-            pass
+        self._current_mic_name = mic_name
+        self._current_speaker_name = speaker_name
+        self._config.mic_device_index = device_index
+        self._config.speaker_device_index = effective_speaker_index
+
+        if not mic_name_pat and mic_name:
+            self._config.mic_device_name = mic_name
+            _save_device_to_env("ARCHER_MIC_DEVICE_NAME", mic_name)
+        if not spk_name_pat and speaker_name:
+            self._config.speaker_device_name = speaker_name
+            _save_device_to_env("ARCHER_SPEAKER_DEVICE_NAME", speaker_name)
 
         # Found 2026-09-16 (Col's live web_main run): input and output used
         # to be opened inside ONE try/except, so a failure on EITHER side
@@ -387,6 +507,21 @@ class AudioManager:
         assert last_error is not None
         raise last_error
 
+    def _notify_loopback_status(self, available: bool) -> None:
+        """Update status board card for voice when loopback fails or recovers."""
+        try:
+            from archer.server import _update_status_board
+            if not available:
+                _update_status_board(
+                    "voice",
+                    "Warning",
+                    "TV check off: can't hear the PC's sound.",
+                    dot="red",
+                    is_error=True,
+                )
+        except Exception:
+            pass
+
     def _start_loopback(self, speaker_index: int | None, speaker_name: str) -> None:
         """
         Best-effort Windows loopback capture on the output device, via the
@@ -395,9 +530,6 @@ class AudioManager:
         soundcard's Recorder.record() is blocking, not callback-based.
         """
         self._loopback_available = False
-        if not speaker_name:
-            logger.warning("Loopback capture skipped: no output device name resolved.")
-            return
         try:
             import soundcard as sc
         except ImportError:
@@ -405,24 +537,61 @@ class AudioManager:
                 "Loopback capture unavailable: the 'soundcard' package isn't installed "
                 "(pip install soundcard) — falling back to content-only self-echo matching."
             )
+            self._notify_loopback_status(False)
             return
 
-        try:
-            # soundcard identifies devices by name (fuzzy-matched), not the
-            # sounddevice/PortAudio integer index — reuse the name we
-            # already resolved for the SAME physical device.
-            loopback_mic = sc.get_microphone(id=speaker_name, include_loopback=True)
-        except Exception as e:
+        def _is_mapper(name: str) -> bool:
+            if not name:
+                return True
+            low = name.lower()
+            return any(m in low for m in ("primary sound", "sound mapper", "default sound"))
+
+        loopback_mic = None
+        target_name = speaker_name
+
+        # If the output device is a Windows virtual mapper ("Primary Sound Driver", "Microsoft Sound Mapper"),
+        # loopback CANNOT open it. Fall back to Windows' real default speaker endpoint.
+        if _is_mapper(target_name):
+            try:
+                def_spk = sc.default_speaker()
+                logger.info(
+                    f"Speaker '{speaker_name}' is a virtual mapper; falling back to "
+                    f"default physical speaker '{def_spk.name}' for loopback."
+                )
+                loopback_mic = sc.get_microphone(id=str(def_spk.id), include_loopback=True)
+                target_name = def_spk.name
+            except Exception as e:
+                logger.warning(f"Loopback fallback to default speaker failed: {e}")
+        else:
+            try:
+                loopback_mic = sc.get_microphone(id=target_name, include_loopback=True)
+            except Exception as e:
+                logger.warning(
+                    f"Loopback capture unavailable for '{target_name}' ({e}) — "
+                    "trying Windows default speaker fallback."
+                )
+                try:
+                    def_spk = sc.default_speaker()
+                    loopback_mic = sc.get_microphone(id=str(def_spk.id), include_loopback=True)
+                    target_name = def_spk.name
+                except Exception as fallback_e:
+                    logger.warning(
+                        f"Loopback fallback to default speaker also failed ({fallback_e}) — "
+                        "TV check off: can't hear the PC's sound."
+                    )
+                    loopback_mic = None
+
+        if loopback_mic is None:
             logger.warning(
-                f"Loopback capture unavailable ({e}) — falling back to "
-                f"content-only self-echo matching."
+                "Loopback capture could not be opened — falling back to content-only self-echo matching."
             )
+            self._notify_loopback_status(False)
             return
 
         self._loopback_stop.clear()
         self._loopback_thread = threading.Thread(
             target=self._loopback_loop,
-            args=(loopback_mic, speaker_name),
+            args=(loopback_mic, target_name),
             daemon=True,
             name="LoopbackCapture",
         )
@@ -456,11 +625,17 @@ class AudioManager:
                     data = rec.record(numframes=block_frames)
                     try:
                         energy = float(np.sqrt(np.mean(data.astype(np.float64) ** 2)))
+                        mono = np.asarray(data, dtype=np.float32)
+                        mono = mono.mean(axis=1) if mono.ndim == 2 else mono
                     except Exception:
                         continue
+                    now = time.monotonic()
                     with self._loopback_lock:
-                        self._loopback_envelope.append((time.monotonic(), energy))
+                        self._loopback_envelope.append((now, energy))
+                        self._loopback_audio.append((now, mono))
         except Exception as e:
+            self._loopback_available = False
+            self._notify_loopback_status(False)
             logger.warning(
                 f"Loopback capture failed ({e}) — falling back to content-only self-echo matching."
             )
@@ -493,9 +668,10 @@ class AudioManager:
         self._loopback_available = False
         with self._loopback_lock:
             self._loopback_envelope.clear()
+            self._loopback_audio.clear()
         logger.info("Audio capture stopped.")
 
-    def switch_input_device(self, device_index: int) -> None:
+    def switch_input_device(self, device_index: int, device_name: str | None = None) -> None:
         """Live hot-swap the microphone to a different device, without a
         process restart (2026-09-16, Col's call for the browser device
         dropdown). Tears down just the input stream and reopens it via the
@@ -522,11 +698,22 @@ class AudioManager:
             blocksize_ms=self._config.audio_chunk_ms,
             callback=self._input_callback,
         )
+        if device_name is None:
+            try:
+                devs = sd.query_devices()
+                if 0 <= device_index < len(devs):
+                    device_name = devs[device_index]["name"]
+            except Exception:
+                pass
+        self._current_mic_name = device_name or "Selected Mic"
         self._config.mic_device_index = device_index
+        self._config.mic_device_name = device_name
         _save_device_to_env("ARCHER_MIC_DEVICE_INDEX", device_index)
-        logger.info(f"Microphone hot-swapped to device {device_index} (capture_rate={self._capture_rate}).")
+        if device_name:
+            _save_device_to_env("ARCHER_MIC_DEVICE_NAME", device_name)
+        logger.info(f"Microphone hot-swapped to device {device_index} ['{device_name}'] (capture_rate={self._capture_rate}).")
 
-    def switch_output_device(self, device_index: int) -> None:
+    def switch_output_device(self, device_index: int, device_name: str | None = None) -> None:
         """Live hot-swap the speaker to a different device -- same reasoning
         as switch_input_device. Also restarts the WASAPI loopback reference
         against the new speaker so barge-in detection keeps working against
@@ -551,18 +738,23 @@ class AudioManager:
             callback=self._output_callback,
         )
         self._playback_chunk_samples = int(self._playback_rate * self._config.audio_chunk_ms / 1000)
+        if device_name is None:
+            try:
+                devs = sd.query_devices()
+                if 0 <= device_index < len(devs):
+                    device_name = devs[device_index]["name"]
+            except Exception:
+                pass
+        speaker_name = device_name or "Selected Speaker"
+        self._current_speaker_name = speaker_name
         self._config.speaker_device_index = device_index
+        self._config.speaker_device_name = speaker_name
         _save_device_to_env("ARCHER_SPEAKER_DEVICE_INDEX", device_index)
+        if speaker_name:
+            _save_device_to_env("ARCHER_SPEAKER_DEVICE_NAME", speaker_name)
 
         # Restart the loopback reference against the new output device --
         # best-effort, same as the initial start_capture() call.
-        speaker_name = "Selected Speaker"
-        try:
-            devs = sd.query_devices()
-            if device_index < len(devs):
-                speaker_name = devs[device_index]["name"]
-        except Exception:
-            pass
         self._loopback_stop.set()
         if self._loopback_thread is not None:
             self._loopback_thread.join(timeout=2.0)
@@ -570,7 +762,7 @@ class AudioManager:
         self._loopback_available = False
         self._start_loopback(device_index, speaker_name)
 
-        logger.info(f"Speaker hot-swapped to device {device_index} (playback_rate={self._playback_rate}).")
+        logger.info(f"Speaker hot-swapped to device {device_index} ['{speaker_name}'] (playback_rate={self._playback_rate}).")
 
     @property
     def loopback_available(self) -> bool:
@@ -581,6 +773,33 @@ class AudioManager:
     def loopback_bin_seconds(self) -> float:
         """Duration (seconds) each loopback envelope bin covers."""
         return self._loopback_bin_seconds
+
+    def get_loopback_audio(self, start: float, end: float) -> np.ndarray | None:
+        """
+        What the PC played between `start` and `end` (time.monotonic()
+        seconds), mono 16 kHz float32. None if loopback capture isn't
+        available or nothing was recorded then.
+        """
+        if not self._loopback_available:
+            return None
+        with self._loopback_lock:
+            blocks = [a for (t, a) in self._loopback_audio if start <= t <= end + self._loopback_bin_seconds]
+        if not blocks:
+            return None
+        audio = np.concatenate(blocks).astype(np.float32)
+        rate = int(self._playback_rate or 16000)
+        if rate != 16000:
+            try:
+                from math import gcd
+
+                from scipy.signal import resample_poly
+
+                g = gcd(rate, 16000)
+                audio = resample_poly(audio, 16000 // g, rate // g).astype(np.float32)
+            except Exception:
+                idx = np.linspace(0, len(audio) - 1, int(len(audio) * 16000 / rate)).astype(int)
+                audio = audio[idx]
+        return audio
 
     def get_loopback_envelope(self, start: float, end: float) -> list[float] | None:
         """

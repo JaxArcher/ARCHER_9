@@ -4,6 +4,11 @@ description: Tracking and managing physical objects, supplies, and locations.
 category: inventory
 ---
 
+### find_item
+Where an item was last seen in the room (phone, wallet, keys, TV remote, mug...), who moved it and when, from the room camera. Use this for any question about where something is, who moved or took it, or when Colby last had it. Never guess a location; say what this returns.
+**Parameters:**
+- name: The item, e.g. "wallet" or "TV remote".
+
 ### search_inventory
 Search for items in the user's physical inventory. Returns location, category, and notes.
 **Parameters:**

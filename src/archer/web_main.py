@@ -169,6 +169,13 @@ def main() -> None:
     from archer.memory.maintenance import start_maintenance_scheduler
     start_maintenance_scheduler()
 
+    # Telegram Line (Phase 6b / Spec 10d) — long-polling bot
+    try:
+        from archer.integrations.telegram_line import get_telegram_line
+        get_telegram_line().start()
+    except Exception as e:
+        logger.debug(f"Telegram line startup skipped: {e}")
+
     logger.info(f"Browser client will be at http://{config.api_host}:{config.api_port}/app")
     logger.info("ARCHER is ready. Say 'Hey ARCHER', open the browser client, or Ctrl+C to stop.")
 
@@ -188,6 +195,11 @@ def main() -> None:
         pipeline.stop()
         from archer.core.event_bus import get_event_bus
         get_event_bus().clear()
+        try:
+            from archer.android_manager import get_android_manager
+            get_android_manager().stop()
+        except Exception as e:
+            logger.debug(f"Android manager stop failed on exit: {e}")
         logger.info("ARCHER shut down cleanly.")
 
 

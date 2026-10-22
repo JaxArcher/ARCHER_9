@@ -25,6 +25,11 @@ const ArcherClient = (() => {
     observerCamera: [],
     switchTab: [],
     logLine: [],
+    logsFeedBulk: [],
+    logsFeedEntry: [],
+    logsStatusBoard: [],
+    technicalLogLine: [],
+    technicalLogBulk: [],
     memorySnapshot: [],
     tasksSnapshot: [],
     systemSnapshot: [],
@@ -34,6 +39,19 @@ const ArcherClient = (() => {
     cameraFrameRequest: [],
     listeningState: [],
     roomTranscript: [],
+    android_state: [],
+    androidState: [],
+    android_log_tail: [],
+    androidLogTail: [],
+    android_frame: [],
+    androidFrame: [],
+    approvalRequest: [],
+    approvalTimeout: [],
+    sessionApprovalState: [],
+    changeLogList: [],
+    artifactsList: [],
+    artifactDisplay: [],
+    artifactActionResult: [],
     connected: [],
     disconnected: [],
   };
@@ -173,9 +191,70 @@ const ArcherClient = (() => {
           cameraReleased: msg.camera_released,
           cameraAvailable: msg.camera_available,
           listeningState: msg.listening_state || null,
+          sessionApprovalActive: !!msg.session_approval_active,
         });
         break;
       case "system_start":
+        break;
+      case "android_state":
+        emit("android_state", msg);
+        emit("androidState", msg);
+        break;
+      case "android_log_tail":
+        emit("android_log_tail", msg.lines || msg.text || []);
+        emit("androidLogTail", msg.lines || msg.text || []);
+        break;
+      case "android_frame":
+        emit("android_frame", msg);
+        emit("androidFrame", msg);
+        break;
+      case "logs_status_board":
+        emit("logsStatusBoard", msg);
+        break;
+      case "logs_feed_bulk":
+        emit("logsFeedBulk", msg.entries || []);
+        break;
+      case "logs_feed_entry":
+        emit("logsFeedEntry", msg.entry || msg);
+        break;
+      case "technical_log_line":
+        emit("technicalLogLine", msg.line || "");
+        break;
+      case "technical_log_bulk":
+        emit("technicalLogBulk", msg.lines || []);
+        break;
+      case "approval_request":
+        emit("approvalRequest", {
+          requestId: msg.request_id,
+          toolName: msg.tool_name,
+          actionType: msg.action_type,
+          description: msg.description,
+          details: msg.details,
+          timeoutSeconds: msg.timeout_seconds || 30,
+        });
+        break;
+      case "approval_timeout":
+        emit("approvalTimeout", {
+          requestId: msg.request_id,
+          description: msg.description,
+        });
+        break;
+      case "session_approval_state":
+        emit("sessionApprovalState", {
+          active: !!msg.active,
+        });
+        break;
+      case "change_log_list":
+        emit("changeLogList", msg.entries || []);
+        break;
+      case "artifacts_list":
+        emit("artifactsList", msg.files || []);
+        break;
+      case "artifact_display":
+        emit("artifactDisplay", msg);
+        break;
+      case "artifact_action_result":
+        emit("artifactActionResult", msg);
         break;
       default:
         console.warn("[ArcherClient] unknown message type:", msg.type);
@@ -307,11 +386,11 @@ const ArcherClient = (() => {
     sendSystemGetAll() {
       send({ type: "system_get_all" });
     },
-    sendSystemSwitchMic(deviceIndex) {
-      send({ type: "system_switch_mic", device_index: deviceIndex });
+    sendSystemSwitchMic(deviceIndex, deviceName) {
+      send({ type: "system_switch_mic", device_index: deviceIndex, device_name: deviceName || null });
     },
-    sendSystemSwitchSpeaker(deviceIndex) {
-      send({ type: "system_switch_speaker", device_index: deviceIndex });
+    sendSystemSwitchSpeaker(deviceIndex, deviceName) {
+      send({ type: "system_switch_speaker", device_index: deviceIndex, device_name: deviceName || null });
     },
     sendSystemSwitchModel(model) {
       send({ type: "system_switch_model", model });
@@ -324,6 +403,60 @@ const ArcherClient = (() => {
     },
     sendForgetRecentRoom(seconds) {
       send({ type: "forget_recent_room", seconds: seconds || 120 });
+    },
+    send(obj) {
+      send(obj);
+    },
+    sendAndroidStart(gpuMode) {
+      send({ type: "android_start", gpu_mode: gpuMode || "host" });
+    },
+    sendAndroidStop() {
+      send({ type: "android_stop" });
+    },
+    sendAndroidQueryState() {
+      send({ type: "android_query_state" });
+    },
+    sendAndroidGetLogs() {
+      send({ type: "android_get_logs" });
+    },
+    sendAndroidButton(button, rotation) {
+      send({ type: "android_button", button, rotation });
+    },
+    sendAndroidTouch(action, x, y) {
+      send({ type: "android_touch", action, x, y });
+    },
+    sendAndroidKey(action, key, code, keyCode, text) {
+      send({ type: "android_key", action, key, code, keyCode, text });
+    },
+    sendAndroidResize(width, height) {
+      send({ type: "android_resize", width, height });
+    },
+    sendAndroidVisibility(visible) {
+      send({ type: "android_tab_visibility", visible });
+    },
+    sendLogsGetStatus() {
+      send({ type: "logs_get_status" });
+    },
+    sendTechnicalLogSubscribe(enable) {
+      send({ type: "technical_log_subscribe", enable: !!enable });
+    },
+    sendApprovalResponse(requestId, decision) {
+      send({ type: "approval_response", request_id: requestId, decision });
+    },
+    sendEndSessionApproval() {
+      send({ type: "end_session_approval" });
+    },
+    sendGetChangeLogs(dateFilter) {
+      send({ type: "get_change_logs", date_filter: dateFilter || null });
+    },
+    sendGetArtifacts(extension) {
+      send({ type: "get_artifacts", extension: extension || null });
+    },
+    sendOpenArtifact(filepath) {
+      send({ type: "open_artifact", filepath });
+    },
+    sendShowArtifactInFolder(filepath) {
+      send({ type: "show_artifact_in_folder", filepath });
     },
     connect,
   };

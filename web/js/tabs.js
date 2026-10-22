@@ -30,6 +30,9 @@
     tools: "tools",
     files: "files",
     artifacts: "artifacts",
+    android: "android",
+    phone: "android",
+    apps: "android",
   };
 
   let activeTabName = "";

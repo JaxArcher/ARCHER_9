@@ -5,6 +5,7 @@ Routes tool calls to appropriate implementations (PC control, canvas, etc.)
 based on skill category.
 """
 
+import time
 from typing import Dict, Any
 from loguru import logger
 
@@ -16,44 +17,102 @@ from archer.core.event_bus import get_event_bus, Event, EventType
 from archer.memory.sqlite_store import get_sqlite_store
 
 
+from archer.core.approvals import get_approval_manager
+from archer.tools.document_tools import DocumentTools
+
+
 class UniversalToolExecutor:
     """Executes tools from any skill category."""
     
     def __init__(self):
+        self._bus = get_event_bus()
         self._pc_controller = PCController()
         self._inventory_tools = InventoryTools()
         self._store = get_sqlite_store()
-        self._confirmation_required = {
-            'open_url', 'open_url_in_my_browser', 'click', 'type_text', 'hotkey', 'focus_window',
-            'browser_click', 'browser_type', 'close_browser'
-        }
+        self._approval_mgr = get_approval_manager()
+        self._document_tools = DocumentTools()
     
     def execute(self, tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a tool call by routing to the correct implementation."""
+        """Execute a tool call by routing to the correct implementation with Phase 3 gating."""
+        # Phase 3 Approval Gate
+        needs_approval, reason = self._approval_mgr.should_gate(tool_name, tool_input)
+
+        if needs_approval:
+            approved = self._approval_mgr.request_approval(
+                tool_name=tool_name,
+                tool_input=tool_input,
+                prompted_by="User request"
+            )
+            if not approved:
+                logger.warning(f"[ToolExecutor] Action denied or cancelled for tool '{tool_name}'.")
+                return {"error": f"Action '{tool_name}' was denied or timed out by user.", "denied": True}
+        else:
+            # If self-record or session-approved, record directly to change log
+            if reason in ("self_record", "session_approved"):
+                self._approval_mgr.record_change(
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    approval_status="session" if reason == "session_approved" else "no_approval_needed",
+                    prompted_by="User request",
+                    success=True
+                )
+
+        start_t = time.time()
+        self._bus.publish(Event(
+            type=EventType.TOOL_START,
+            source="tool_executor",
+            data={"tool_name": tool_name, "tool_input": tool_input},
+        ))
         try:
             category = get_tool_category(tool_name)
             
             if category == 'automation':
-                return self._exec_pc_tool(tool_name, tool_input)
+                res = self._exec_pc_tool(tool_name, tool_input)
             elif category == 'visualization':
                 result = execute_canvas_tool(tool_name, tool_input)
-                return {'result': result}
+                res = {'result': result}
             elif category == 'inventory':
-                return self._exec_inventory_tool(tool_name, tool_input)
+                res = self._exec_inventory_tool(tool_name, tool_input)
             elif category == 'ui_control':
-                return self._exec_ui_control_tool(tool_name, tool_input)
+                res = self._exec_ui_control_tool(tool_name, tool_input)
             elif category == 'tasks':
-                return self._exec_tasks_tool(tool_name, tool_input)
+                res = self._exec_tasks_tool(tool_name, tool_input)
+            elif category == 'documents':
+                res = self._exec_documents_tool(tool_name, tool_input)
             else:
-                return {'error': f'Unknown tool category: {category}'}
+                res = {'error': f'Unknown tool category: {category}'}
+            duration = round(time.time() - start_t, 2)
+            is_err = isinstance(res, dict) and "error" in res
+            self._bus.publish(Event(
+                type=EventType.TOOL_END,
+                source="tool_executor",
+                data={
+                    "tool_name": tool_name,
+                    "success": not is_err,
+                    "result": res,
+                    "duration": duration,
+                },
+            ))
+            return res
                 
         except Exception as e:
+            duration = round(time.time() - start_t, 2)
             logger.error(f'Tool execution failed ({tool_name}): {e}')
+            self._bus.publish(Event(
+                type=EventType.TOOL_END,
+                source="tool_executor",
+                data={
+                    "tool_name": tool_name,
+                    "success": False,
+                    "error": str(e),
+                    "duration": duration,
+                },
+            ))
             return {'error': str(e)}
     
     def requires_confirmation(self, tool_name: str) -> bool:
         """Check if tool requires user confirmation."""
-        return tool_name in self._confirmation_required
+        return self._approval_mgr.should_gate(tool_name, {})[0]
     
     def reset_halt(self) -> None:
         """Clear HALT flag."""
@@ -136,6 +195,16 @@ class UniversalToolExecutor:
 
     def _exec_inventory_tool(self, tool_name: str, inp: Dict[str, Any]) -> Dict[str, Any]:
         """Execute inventory management tools."""
+        if tool_name == 'find_item':
+            # Phase 2d: the room camera's item records (memory/item_store.py).
+            from archer.memory.item_store import ItemStore, describe_where
+
+            name = inp.get('name') or inp.get('query') or ''
+            found = ItemStore().find(name)
+            if not found:
+                return {'result': f"No record of {name or 'that item'}: ARCHER hasn't seen it yet."}
+            return {'result': describe_where(found[0])}
+
         if tool_name == 'search_inventory':
             query = inp.get('query', '')
             results = self._inventory_tools.search_items(query)
@@ -256,3 +325,54 @@ class UniversalToolExecutor:
 
         else:
             return {'error': f'Unknown tasks tool: {tool_name}'}
+
+    def _exec_documents_tool(self, tool_name: str, inp: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute document and artifact tools (Phase 5, Spec Section 8)."""
+        if tool_name == 'create_word_document':
+            return self._document_tools.create_word_document(
+                title=inp.get('title', ''),
+                content=inp.get('content', ''),
+                filename=inp.get('filename')
+            )
+        elif tool_name == 'edit_word_document':
+            return self._document_tools.edit_word_document(
+                filepath=inp.get('filepath', ''),
+                append_text=inp.get('append_text', ''),
+                output_filename=inp.get('output_filename')
+            )
+        elif tool_name == 'create_presentation':
+            return self._document_tools.create_presentation(
+                title=inp.get('title', ''),
+                subtitle=inp.get('subtitle'),
+                slides=inp.get('slides'),
+                filename=inp.get('filename')
+            )
+        elif tool_name == 'create_spreadsheet':
+            return self._document_tools.create_spreadsheet(
+                title=inp.get('title', ''),
+                sheets=inp.get('sheets'),
+                headers=inp.get('headers'),
+                rows=inp.get('rows'),
+                total_columns=inp.get('total_columns'),
+                filename=inp.get('filename')
+            )
+        elif tool_name == 'create_pdf':
+            return self._document_tools.create_pdf(
+                title=inp.get('title', ''),
+                content=inp.get('content', ''),
+                filename=inp.get('filename')
+            )
+        elif tool_name == 'merge_pdfs':
+            return self._document_tools.merge_pdfs(
+                pdf_files=inp.get('pdf_files', []),
+                output_filename=inp.get('output_filename')
+            )
+        elif tool_name == 'open_document':
+            return self._document_tools.open_document(filepath=inp.get('filepath', ''))
+        elif tool_name == 'show_in_folder':
+            return self._document_tools.show_in_folder(filepath=inp.get('filepath', ''))
+        elif tool_name == 'list_artifacts':
+            return {'result': self._document_tools.list_artifacts(extension=inp.get('extension'))}
+        else:
+            return {'error': f'Unknown documents tool: {tool_name}'}
+

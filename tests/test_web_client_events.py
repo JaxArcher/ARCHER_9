@@ -34,3 +34,35 @@ def test_every_emitted_name_is_in_the_listener_list():
     src = (WEB_JS / "app.js").read_text(encoding="utf-8")
     emitted = set(re.findall(r"emit\(\s*[\"'](\w+)[\"']", src))
     assert emitted <= names, f"emitted but not listed: {sorted(emitted - names)}"
+
+
+def _exported_methods() -> set[str]:
+    src = (WEB_JS / "app.js").read_text(encoding="utf-8")
+    block = re.search(r"return\s*\{([\s\S]*?)\n\s*\};\s*\}\)\(\);", src)
+    assert block, "Could not find return object of ArcherClient IIFE in app.js"
+    return set(re.findall(r"^\s*(?:get\s+)?(\w+)\s*[:\(,]", block.group(1), re.M))
+
+
+def test_archer_client_exposes_public_send():
+    """
+    Claude 2026-10-21 15:30: android.js and other modules call window.ArcherClient.send(msg).
+    ArcherClient must expose a generic `send` method so client messages reach the server.
+    """
+    exported = _exported_methods()
+    assert "send" in exported, "ArcherClient does not expose a public send(obj) method"
+
+
+def test_every_method_called_on_archer_client_is_exported():
+    """
+    Verify that any method invoked on ArcherClient or window.ArcherClient in web/js/*.js
+    actually exists in ArcherClient's exported return object.
+    """
+    exported = _exported_methods()
+    missing = {}
+    for js in sorted(WEB_JS.glob("*.js")):
+        content = js.read_text(encoding="utf-8")
+        for method in re.findall(r"(?:window\.)?ArcherClient\.(\w+)\s*\(", content):
+            if method not in exported:
+                missing.setdefault(method, []).append(js.name)
+    assert not missing, f"Methods called on ArcherClient but not exported in app.js: {missing}"
+

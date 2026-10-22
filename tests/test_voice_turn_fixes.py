@@ -325,3 +325,85 @@ def test_play_on_youtube_is_done_directly():
     failing = agent({"result": {"success": False, "reason": "no videos found in YouTube's results"}})
     assert failing._handle_youtube_play_command("put on lo-fi music on youtube") == (
         "I couldn't play that on YouTube: no videos found in YouTube's results.")
+
+
+# --- TV speech and a later wake word (Claude, 2026-10-20, 20:30) -------------------------------
+# During the follow-up window the TV said "You can't control my life ..." and
+# Col then said "Hey ARCHER"; ARCHER answered the TV.
+
+import numpy as np  # noqa: E402
+
+from archer.voice.pipeline import _after_wake_word  # noqa: E402
+
+
+def test_wake_word_after_other_speech():
+    tv = "You can't control my life. All that people's choice is the pattern. It's way more controlled than I do. Hey Archer!"
+    assert _after_wake_word(tv) == ("", True)
+    assert _after_wake_word("blah blah. Archer, open YouTube.") == ("open YouTube.", True)
+    assert _after_wake_word("Hey Archer, what time is it?") == ("what time is it?", False)
+    assert _after_wake_word("What time is it, Archer?") == ("What time is it", False)
+    assert _after_wake_word("Hey Archer.") == ("", True)
+    assert _after_wake_word("What time is it?") == ("What time is it?", False)
+
+
+class _FakeAudio:
+    def __init__(self, played):
+        self.played = played
+
+    def get_loopback_audio(self, start, end):
+        return self.played
+
+
+class _FakeSTT:
+    def __init__(self, text):
+        self.text = text
+        self.calls = 0
+
+    def transcribe(self, pcm, publish_event=True):
+        self.calls += 1
+        return self.text
+
+
+def tv_check(heard, played_text, loud=True):
+    p = VoicePipeline.__new__(VoicePipeline)
+    p._audio = _FakeAudio(np.full(16000 * 3, 0.05 if loud else 0.0, np.float32))
+    p._stt = _FakeSTT(played_text)
+    return VoicePipeline._pc_played_it(p, heard, 100.0, 103.0), p._stt.calls
+
+
+def test_speech_the_pc_was_playing_is_ignored():
+    heard = "You can't control my life. All that people's choice is the pattern."
+    assert tv_check(heard, "you can't control my life all of the people's choices are the pattern") == (True, 1)
+
+
+def test_col_talking_over_the_tv_is_kept():
+    assert tv_check("What time is it on the clock today?", "and the weather tomorrow brings heavy rain")[0] is False
+
+
+def test_a_quiet_pc_is_not_transcribed():
+    assert tv_check("You can't control my life at all, honestly.", "x", loud=False) == (False, 0)
+
+
+def test_short_lines_are_not_judged():
+    assert tv_check("Stop.", "stop the car")[0] is False
+
+
+def test_the_pc_playback_is_kept_in_memory():
+    import collections as c
+
+    m = AudioManager.__new__(AudioManager)
+    m._loopback_available = True
+    m._loopback_lock = __import__("threading").Lock()
+    m._loopback_bin_seconds = 0.02
+    m._playback_rate = 16000
+    m._loopback_audio = c.deque([(10.0 + i * 0.02, np.full(320, i, np.float32)) for i in range(100)], maxlen=1500)
+    audio = m.get_loopback_audio(10.5, 11.0)
+    assert len(audio) == 27 * 320 and audio[0] == 25  # 10.50 to 11.02 s
+    m._loopback_available = False
+    assert m.get_loopback_audio(10.5, 11.0) is None
+
+
+def test_the_worker_uses_both_checks():
+    text = (SRC / "voice" / "pipeline.py").read_text(encoding="utf-8")
+    assert "_after_wake_word(text)" in text and "self._pc_played_it(text" in text
+    assert text.count("self._listen_after_wake()") == 2

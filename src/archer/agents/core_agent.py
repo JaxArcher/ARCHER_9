@@ -182,6 +182,14 @@ class CoreAgent:
         # here to do anything at all.
         from archer.skills.tool_executor import UniversalToolExecutor
         self._tool_executor = UniversalToolExecutor()
+        # Things that get moved (Phase 2d): "where's my wallet?", "this is my
+        # wallet", and mentioning moves by others (agents/item_talk.py).
+        from archer.agents.item_talk import ItemTalk
+        self._item_talk = ItemTalk(
+            get_frame=self._get_camera_frame,
+            describe=self._describe_held_item,
+            show_photo=self._publish_item_photo,
+        )
 
         # Most recent local-model generation speed, in tokens/sec --
         # populated from Ollama's own eval_count/eval_duration on each
@@ -516,6 +524,45 @@ class CoreAgent:
             ))
         except Exception:
             pass
+
+    def _publish_item_photo(self, image_b64: str, title: str) -> None:
+        """Show an item's photo in the chat (Phase 2d), the same way as a tool screenshot."""
+        try:
+            self._bus.publish(Event(
+                type=EventType.ARTIFACT_PUSH,
+                source="core_agent",
+                data={"image_b64": image_b64, "kind": "item_photo", "title": title},
+            ))
+        except Exception:
+            pass
+
+    def _describe_held_item(self, kind: str, frame: Any) -> Optional[str]:
+        """A few words about the item Col is holding up ("black leather wallet"), or None (Phase 2d)."""
+        try:
+            import base64
+            import cv2
+            from archer.agents.item_talk import DESCRIBE_PROMPT
+
+            ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            if not ok:
+                return None
+            payload = {
+                "model": self.primary_model,
+                "think": bool(getattr(self._config, "core_think", False)),
+                "prompt": DESCRIBE_PROMPT.format(kind=kind),
+                "images": [base64.b64encode(jpg.tobytes()).decode()],
+                "stream": False,
+            }
+            main_model_request(payload, self._config, temperature=0.1, num_predict=40)
+            resp = httpx.post(f"{self._config.ollama_base_url}/api/generate", json=payload, timeout=60.0)
+            resp.raise_for_status()
+            text = " ".join((resp.json().get("response") or "").split()).strip(" .\"'")
+            if not text or text.lower() in ("none", "nothing", "unclear") or len(text.split()) > 10:
+                return None
+            return text[0].lower() + text[1:] if not text[:2].isupper() else text
+        except Exception as e:
+            logger.debug(f"Describing the held item failed: {type(e).__name__}: {e}")
+            return None
 
     def _publish_visual_status(self, note: str) -> None:
         """Best-effort push of a human-readable "what the camera check just
@@ -1965,6 +2012,12 @@ Output JSON format:
         if open_reply:
             return open_reply, "direct_reply", None, ""
 
+        # Items (Phase 2d): "where's my wallet?", "this is my wallet", "forget my
+        # wallet", answered from the item records, never guessed by the model.
+        item_reply = self._item_talk.handle(text) if getattr(self, "_item_talk", None) else None
+        if item_reply:
+            return item_reply, "direct_reply", None, ""
+
         # 1. System Environment (Deterministic System Fact: Current Local Date & Time)
         now_dt = datetime.now()
         date_str = now_dt.strftime("%A, %B %d, %Y")
@@ -2179,6 +2232,12 @@ Output JSON format:
         person_followup_note = self._handle_conversational_person_followup(text)
         if person_followup_note:
             domain_kb = (domain_kb + person_followup_note).strip()
+
+        # Items moved by others since Col last spoke, and now and then one item
+        # ARCHER couldn't name (Phase 2d).
+        items_note = self._item_talk.items_note() if getattr(self, "_item_talk", None) else ""
+        if items_note:
+            domain_kb = (domain_kb + items_note).strip()
 
         kb_block = f"\n\n## Reference Domain Knowledge (External Reference - NOT spoken by user)\n{domain_kb}" if domain_kb else ""
 

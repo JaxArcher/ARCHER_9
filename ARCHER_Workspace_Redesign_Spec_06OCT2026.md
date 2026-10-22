@@ -102,8 +102,22 @@ so you never save over a newer version.
    and continue only with items that don't depend on the answer. If nothing
    independent is left, stop and say so.
 5. When a phase's acceptance checks pass: write a short **Phase N summary** in
-   the Action Log (what changed, what was tested and how, anything left open)
-   and stop for sign-off.
+   the Action Log (what changed, what was tested and how, anything left open).
+   **Working mode from 2026-10-21 (Col):**
+   - Don't stop for sign-off. Add Col's acceptance-test steps to a
+     **"Ready for Col to test"** list at the end of the worklog, in plain
+     language, and go straight on to the next phase.
+   - Stop only when something only Col can do blocks you (a sign-in, a
+     physical step, an administrator step that isn't set up), when a decision
+     is Col's and isn't already in `ARCHER_Antigravity_Plan.md`, or when a
+     test Col ran fails.
+   - Restart ARCHER yourself whenever testing needs it. Restart the observer
+     with `schtasks /run /tn ArcherObserverRestart`, after Col's one-time
+     setup.
+   - **GitHub (Col, 2026-10-21): push after each phase.** Before each push,
+     check for passwords, keys and tokens. Never push `.env`, `logs/`,
+     `backups/`, `scratch/`, `data/`, `barehands/sample-notes/` or the stray
+     root copies. Never force-push. Col is making the repo private.
 6. If something breaks ARCHER, restore from the backup, log what happened, and
    ask before trying a different approach.
 
@@ -113,7 +127,7 @@ so you never save over a newer version.
 
 | Topic | Decision |
 |---|---|
-| Layout | A fixed left column — chat box, orb, webcam feed, stacked top to bottom in that order — that never scrolls. A tabbed workspace on the right. |
+| Layout | A fixed left column — chat box, orb, webcam feed, stacked top to bottom in that order — that never scrolls. A tabbed workspace on the right. **Updated by Col 2026-10-21:** this is the starting layout; Col can resize and rearrange every pane (section 4c). |
 | Tabs | **Files** (gesture file access — the barehands board), **Artifacts**, **Tools**, **Away & Tasks** ("While You Were Away" plus Tasks, together in one tab), **System** (performance monitoring), **Logs**. Decided by Col 2026-10-06 (Q-01). |
 | Gestures | Hand gestures work in every tab, not only on the barehands board. |
 | Camera | While ARCHER's page is open, the browser owns the webcam. The fixed webcam pane, the global hand tracker and the barehands board all share that one feed. |
@@ -280,6 +294,56 @@ Requirements:
 never moves while any tab scrolls; every existing card still works.
 
 ---
+
+## 4c. Panes Col can resize and move (Col, 2026-10-21)
+
+**Goal:** Col: "can we make the panes in ARCHER reshapeable and rearrangeable
+by me? The panes for the chat box and webcam feed are too small. It would be
+nice if I could resize those and move them as I'd like. I understand making
+one pane larger may shrink the size of another pane, including the tabs
+panes, and that's fine."
+
+**Order:** after the fixes in the 18:05 and 17:55 reviews, before Phase 3.
+
+**Behaviour**
+- **Panes:** the chat box, the orb, the webcam feed, the tab workspace, and
+  the controls bar if it fits the library.
+- **Resizing:** Col drags the borders between panes to resize them. The
+  neighbouring panes shrink or grow, and every pane has a sensible minimum
+  size.
+- **Moving:** Col drags a pane by its title bar to another side or position
+  (left, right, top, bottom of any pane). The starting layout is today's.
+- **The layout is remembered** in this browser (local storage) and comes back
+  after a reload or restart. A **Reset layout** button returns to the default.
+- **Must keep working while panes move or resize:**
+  - The webcam `<video>` keeps playing. It's the one camera stream, shared by
+    the hand tracker and the barehands board, so moving it must not restart
+    the camera.
+  - The barehands iframe (FILES) and any other iframe must not reload: moving
+    an iframe element in the page normally reloads it.
+  - The ANDROID stream resizes with its pane (the tab's resize message).
+  - The hand cursor and pinch-click work on the new layout.
+  - Tab switching by voice still works.
+- Gestures for resizing and moving are optional in v1. Mouse is enough.
+
+**Rule 11 first.** Look for an existing open-source layout library before
+writing one. Claude's leads, to check:
+- **dockview** (docking layout with drag-and-drop, split views, tab groups and
+  save/restore; works without React; the `dockview` package, not the internal
+  `dockview-core`).
+- **GoldenLayout 2**.
+- **Gridstack.js** (grid of resizable, draggable widgets).
+Report the licence, upkeep, plain-JavaScript support, and how each handles
+iframes and `<video>` when a pane moves. **Col, 2026-10-21: use a free library
+if it passes these checks.** Antigravity picks one, logs why, stores it locally in
+`web/vendor/` (Rule 3) and adds a Section 12 row. It doesn't need to ask again
+unless none of them passes.
+
+**Acceptance:**
+- Col makes the chat box and webcam bigger, moves the webcam to a different
+  spot, and reloads the page: the layout is still there.
+- The camera and the FILES board keep working throughout.
+- Reset layout brings back the default.
 
 ## 5. Phase 2 — Browser owns the camera; gestures in every tab
 
@@ -800,6 +864,46 @@ comes after the room transcription.
   detector. Measure the CPU and GPU cost too: Col games on this PC.
 - **What already exists:** the inventory table and `inventory_SKILL.md`.
 
+**Audit results (Claude, 2026-10-20; `scripts/item_probe.py` on Col's camera):**
+- **Built by Claude** (Col, 2026-10-20).
+- **The camera:** a still from the main stream is 2560x1920. A phone on the
+  couch arm was about 160x65 pixels in it, and the remote in Col's hand about
+  65x150, so a still has enough detail. Taking one took about 9 s with a fresh
+  login each time; the observer keeps a connection open, which is faster.
+- **Naming items:** ARCHER's own vision model (gemma4, on the GPU, already
+  loaded) named the remote in a crop of Col correctly in about 1 s. Asked
+  about the whole room at once, it found the phone but missed the wallet. So
+  it is asked about one spot at a time.
+- **The observer's detector** (YOLOX-Nano) found the phone in the still in
+  under a second on the CPU, but it can't name wallets or keys and called the
+  remote a phone. It isn't used to name things.
+- **The observer's scene model** (moondream) returned nonsense both times. It
+  isn't used.
+- **Existing code:** the database has tables for items, places and moves
+  (`inventory_items`, `storage_locations`, `item_location_history`), but the
+  code meant to fill them returns placeholder values. Phase 2d uses the tables
+  and writes the code.
+- **Existing projects (rule 11):** nothing open-source remembers where things
+  in a home were put down. Hand-and-object research detectors (Hands23,
+  100DOH) are large GPU models built for Linux. Open-vocabulary detectors
+  would be new dependencies, and ARCHER's own model already does the naming.
+
+**How it works (Claude's design, 2026-10-20):**
+- **Key moments.** The observer keeps a picture of the room without people in
+  it, from the 640x480 stream it already reads. When a small patch of the room
+  changes right after someone was there, and stays changed once they've moved
+  away, something was put down or picked up there. The change has to be small
+  and steady, so lighting and cushions shifting don't count.
+- **A closer look.** Only then does ARCHER take a sharp still from the main
+  stream and ask its vision model about that one spot: what the item is, and
+  what it's sitting on. If nothing is there, the change is ignored.
+- **Who.** The person who was at that spot just before: Col, a person ARCHER
+  knows by name, or a waiting label such as Person_N.
+- **Picked up.** When the change is where a known item was last seen and the
+  item is gone, the person who was there has it. If that person then leaves
+  through a door, ARCHER keeps a sharp photo of them leaving, linked to the
+  item.
+
 **Behaviour**
 - **Anyone, not just Col (Col, 2026-10-12).** ARCHER watches everyone it is
   following, not only Col. It records who moved the item: Col, a person it
@@ -833,10 +937,16 @@ comes after the room transcription.
 - **Unknown items.** When ARCHER can't name an item, it keeps a cropped photo of
   it and asks Col about it later in conversation, the same way it does with
   faces: one at a time, when it's a good time.
+- **Teaching ARCHER an item (Col, 2026-10-20).** Col holds an item up to
+  ARCHER's camera and says what it is ("ARCHER, this is my wallet"). ARCHER
+  keeps a reference photo and a short description ("black leather wallet"),
+  so it knows which wallet is Col's and can tell it from others. Pointing at an
+  item in the room is a later addition.
 - **Privacy.** No video is kept. The only stills kept are:
   - each item's last-seen photo
   - the photo of someone leaving with an item
   - photos of items ARCHER couldn't name
+  - the reference photo of an item Col taught ARCHER
 
   All of them stay on the PC and are listed with their item, and Col can delete
   any of them. Photos of unnamed items are deleted once Col names or dismisses
@@ -854,6 +964,87 @@ comes after the room transcription.
 - An item ARCHER can't identify leads to a question later, never a guess.
 - Tested with Col's real camera (a manual checklist), plus automated checks that
   can fail when the feature is broken.
+
+---
+
+## 5e. Logs tab: everything ARCHER is doing, and what state it's in (Col, 2026-10-21)
+
+**Goal:** Col opens the Logs tab and sees what every part of ARCHER is doing
+right now and what just happened. Col: "I'd like to have a log of all
+activities occurring within the log tab. So I can look at it and see what
+process is happening, what state it's in."
+
+**Order:** right after the Phase 7b fixes, before Phase 3.
+
+**What's there now:** `logs.js` shows a curated feed (`log_line`, from
+`_register_status_line_bridge` in `server.py`) built from a few event-bus
+events: voice state, transcripts, replies, camera checks. Most of ARCHER
+never shows up in it.
+
+**1. Status board (top of the tab).** One row per part of ARCHER, each with
+its current state and how long it's been in it. States update live, and a part
+that has stopped or failed turns red with the reason:
+- **Voice:** listening, hearing you, thinking, speaking, paused, or muted.
+  Show the microphone and speaker in use.
+- **Brain:** idle or answering, with the model and the last reply's timing
+  (first words, total time).
+- **Startup:** each step while ARCHER is starting, with its time: the voice
+  model loading, Kokoro, whisper warm-up, the models warming up, the camera.
+  This shows where the ~90 s start goes.
+- **Observer service:** running or stopped, room listening on, paused or
+  off, people in view (as a count, not names), and the item watcher on or
+  off.
+- **Virtual phone:** stopped, or the start-up step (launching, Android
+  booting, connecting the screen), or online, or the error.
+- **ARCHER's browser:** closed, or open with the page title.
+- **Tools:** the tool running now, if any, and the last one with its result.
+- **Background jobs:** nightly maintenance (next run), Ollama (the models
+  loaded, GPU or CPU), Redis and ChromaDB (connected or not).
+
+**2. Activity feed (below).** One plain-English line per event from every part,
+newest at the bottom, keeping today's existing Pause / Clear and the
+"Working for" timer:
+- Voice turns and model rounds, with timing.
+- Every tool call: started, finished or failed, with a one-line result.
+- Browser actions.
+- Virtual phone start, stop and errors.
+- Observer events, which reach ARCHER through the existing Redis bridge:
+  - Someone came into view or left (by name, if recognised).
+  - The room listener kept or dropped a segment. Show a count only, never the
+    words.
+  - Item moves (while Phase 2d is on).
+- Wake words, approvals (once Phase 3 exists), startup steps, and every
+  warning and error.
+- Each warning or error line has a "Details" toggle that shows the raw log
+  line. Errors are highlighted.
+
+**3. Controls.**
+- Filter by part (Voice, Brain, Tools, Observer, Phone, Browser, System) and
+  by "errors only".
+- Search box.
+- **Technical log** toggle: a live tail of ARCHER's own log file at INFO and
+  above (no DEBUG noise, no `GET /api/ps` polling lines), for when something
+  is broken.
+
+**Rules**
+- The feed and the board are shown only in this tab. They're kept in memory:
+  the last 1,000 lines, sent again when the page reconnects, so a reload
+  doesn't lose them. Nothing new is stored on disk beyond ARCHER's existing
+  log files.
+- **Privacy:** room transcripts, and the words of anything heard in the
+  room, never appear (spec 5c). Col's own requests to ARCHER and ARCHER's
+  replies may appear, as they do in the chat box.
+- Cheap to run: events are pushed when they happen; nothing polls just to
+  fill the board.
+- Update `web/CONTRACT.md` for every new message.
+
+**Acceptance:**
+- With the Logs tab open, Col restarts ARCHER and sees each startup step with
+  its time.
+- He asks a question and watches voice → brain → reply, with timings.
+- He starts the virtual phone and watches its steps.
+- He stops the observer service and its row turns red within a few seconds.
+- Room speech shows only as counts.
 
 ---
 
@@ -935,9 +1126,13 @@ with a readable one- or two-sentence summary.
    obfuscated or encoded blobs, bundled binaries, and dependencies with known
    vulnerabilities (OSV database / `pip-audit`, plus `bandit` or `semgrep` for
    Python). Results go into the report.
-4. **Two independent AI reviews:** send the repo's code (and the local-check
-   report) to Claude via `ANTHROPIC_API_KEY` and to OpenAI via
-   `OPENAI_API_KEY`, with the same review instructions: identify malicious or
+4. **Two independent AI reviews (Col, 2026-10-21: through Antigravity on his
+   plan, no pay-per-use API keys):** run two headless Antigravity CLI reviews
+   (`agy -p`, read-only permissions, inside the staging folder), each with a
+   model from a different family. Use a Claude model and an OpenAI-family
+   model if the CLI offers them, otherwise the two most different families it
+   offers, and log which. Send the repo's code and the local-check report,
+   with the same review instructions: identify malicious or
    risky behavior and return a structured verdict (clear / concerns / reject)
    with reasons. **Both must return "clear."** Very large repos: review all
    code that runs, and say in the report what was skipped and why. Only repo
@@ -967,12 +1162,15 @@ edit Word, PowerPoint and PDF files.
 **Viewer**
 - A file list of ARCHER's artifacts folder (`data/artifacts/`), newest first,
   with type, size and time; click (or pinch) to open in the viewer area.
-- PDFs render in the pane.
-- Word and PowerPoint files show a preview made by converting to PDF in the
-  background — with Office itself via COM automation if installed (Phase 0
-  finding), otherwise LibreOffice headless. Plus **Open in Word / Open in
-  PowerPoint** buttons.
-- Images, HTML (sandboxed), text and markdown display directly.
+- **No previews inside ARCHER for Word, PowerPoint or PDF (Col, 2026-10-21):**
+  "I don't need previews or screenshots inside of ARCHER's tabs. I can see the
+  programs myself." Each file gets **Open** (in Word, PowerPoint or the PDF
+  reader) and **Show in folder** buttons. Microsoft Office is installed. No
+  LibreOffice.
+- ARCHER may still render slides to images for its own design check (the
+  vision check in "Designed slides"), using PowerPoint through COM
+  (`pywin32`). That's for ARCHER's own use and isn't shown in the tab.
+- Images, text and markdown display directly.
 
 **Code view/edit (from the Tools tab)**
 - Clicking a skill or tool in the Tools tab opens its program in the Artifacts
@@ -996,15 +1194,39 @@ edit Word, PowerPoint and PDF files.
     (AGPL license — fine for Col's personal use)
   - `pdfplumber` — extract text and tables
   - `ReportLab` — build PDFs from scratch
-  - `OCRmyPDF` — make scanned PDFs searchable (needs Tesseract and Ghostscript
-    installed on Windows — confirm with Col before installing those)
+  - `OCRmyPDF` — make scanned PDFs searchable. Needs Tesseract and Ghostscript
+    installed on Windows: **approved by Col 2026-10-21** (Section 12).
+- Excel (Col, 2026-10-20): create and edit `.xlsx` with formulas, formatting
+  and charts, using `openpyxl` (MIT licence). **Approved by Col 2026-10-21**
+  (Section 12).
 - Editing Col's existing files goes through Phase 3 approval; ARCHER saves an
   edited copy into the artifacts folder unless Col approves overwriting the
   original.
 
+**Designed slides (Col, 2026-10-20).** ARCHER designs decks, not just fills
+bullet points into a blank template.
+- Candidate: **Presenton** (Apache 2.0), an open-source deck generator that works
+  with local Ollama models. It exports editable PowerPoint and PDF, can build
+  templates from Col's own PowerPoint files, and has an API ARCHER can call.
+  - It runs in its own Docker container (Docker already runs ChromaDB and
+    Redis) and uses ARCHER's main Ollama model, so it needs no extra VRAM.
+  - Nothing may leave the PC: its community gallery is switched off
+    (`PRESENTON_COMMUNITY_ENABLED=false`) and no stock-photo or image-service
+    keys are set.
+  - It goes through the Phase 4 review and Col's approval like any repo tool.
+  - **Col, 2026-10-21: try Presenton**, with the templates as backup.
+- Fallback, if it fails the review or the decks aren't good enough: ARCHER's
+  own layouts in `python-pptx`. That means a small set of designed layouts
+  (title, section, two columns, image with text, chart, quote) and one theme.
+  ARCHER then checks its work: it renders each slide to an image and looks at
+  it with its vision model to catch text overflow and overlaps.
+- Either way the deck opens in the Artifacts pane, and Col can edit it.
+
 **Acceptance:** "make me a one-page PDF summary of X", "turn this into a
-5-slide deck", "merge these two PDFs" each produce a file that appears in the
-list and previews correctly.
+5-slide deck", "merge these two PDFs" and "make a spreadsheet of X with totals"
+each produce a file that appears in the list, and opens correctly in its own
+program. A designed
+deck has one consistent theme, varied layouts and no text running off a slide.
 
 ---
 
@@ -1041,6 +1263,10 @@ ARCHER can drive it.
 - ARCHER's existing browser tools keep working against the same page;
   navigation is free, but submit/post/purchase/send actions go through Phase 3.
 - Replaces the 2-second screenshot mirror (`browser.js` / `browser_get_screenshot`).
+- Keeps its sign-ins between restarts: a persistent profile in
+  `data/browser_profile/`, never pushed. Today `pc_control.py` starts a fresh
+  profile on every launch. Needed for Google Messages for web, which stays
+  pinned (Phase 7b texting, Col 2026-10-20).
 
 **Acceptance:** Col browses normally in the pane; ARCHER opens and navigates a
 page Col can watch and take over; the old mirror is gone.
@@ -1096,6 +1322,181 @@ apps, and uses it in the tab with mouse, keyboard and gestures. Switching away
 and back keeps the app where he left it. The CPU and VRAM cost is measured and
 logged, and ARCHER's replies don't slow down noticeably while the emulator runs.
 
+**Audit results (first pass, Claude, 2026-10-20; details in the reviews log)**
+- **Col's choice (2026-10-20): Google's official Android Emulator.** Mirroring
+  his real phone with scrcpy was offered and not chosen.
+- **Hypervisor.** WSL2 is installed, so Windows' own hypervisor is running. The
+  emulator uses Windows Hypervisor Platform (a Windows feature, needs a
+  reboot). The older AEHD driver needs Hyper-V off and is retired on
+  31 Dec 2026.
+- **Installs for approval** (all free, under Google's Android SDK License, not
+  open-source):
+  - SDK command-line tools, the emulator and platform-tools (adb).
+  - One Google Play x86_64 system image. Apps built only for phone chips run
+    through Google's ARM translation on these images; some may fail.
+- **Into the tab.** The emulator's WebRTC kit runs only in Linux containers.
+  On Windows the stream comes from the emulator's gRPC interface (screen
+  frames plus touch and key input) or from scrcpy (Apache 2.0) connected to the
+  emulator. The tab decodes video with WebCodecs. Claude decides which after
+  measuring both.
+- **Graphics.** Measure `-gpu host` (uses the card) against `-gpu software`
+  (uses the CPU) with ARCHER running (`scratch/android_probe_20oct.ps1` takes
+  the starting numbers).
+- **Apps.** Apps can refuse emulators through Google's Play Integrity check
+  (usual for banking and health apps). Only a live test settles eero and
+  Victure. eero has no web dashboard for home users; its app is reported to run
+  fully on Windows. The Victure app is **Victure Home** (Col, 2026-10-21).
+
+**Build decisions for Antigravity (Claude, 2026-10-20; Col approved the
+installs at 22:26)**
+- **Who turns on the Windows feature.** Col switches on Windows Hypervisor
+  Platform himself ("Turn Windows features on or off"), then restarts the PC.
+  Antigravity doesn't change Windows features or system-wide settings.
+- **Where it's installed.** Everything goes under `D:\ARCHER_9\data\android\`:
+  the SDK in `sdk\` and the virtual phone in `avd\`. `ANDROID_SDK_ROOT` /
+  `ANDROID_HOME` and `ANDROID_AVD_HOME` are set only for the processes ARCHER
+  starts, not in the user's or the system's environment. Accept the licences
+  with `sdkmanager --licenses`, after Col has seen them: show them in the
+  worklog first.
+- **System image.** The newest stable (not preview) `google_apis_playstore`
+  x86_64 image that `sdkmanager --list` offers. Log the exact package name.
+- **Virtual phone.** A current Pixel phone profile, 4 GB RAM, with Quick Boot
+  snapshots on, so the phone comes back as Col left it.
+- **The emulator mustn't grab ARCHER's devices.**
+  - Cameras off (`-camera-back none -camera-front none`): the browser owns
+    the webcam.
+  - Audio off (`-no-audio`), so it can't take the JLab microphone.
+  - Sound for apps is a later step if Col asks.
+- **Window and stream.**
+  - The emulator runs without its own window (`-no-window`).
+  - Its gRPC interface listens on `127.0.0.1` only (`-grpc <port>`), with
+    token authentication (`-grpc-use-token`).
+  - ARCHER's server reads frames with `streamScreenshot`, sized to the tab
+    and sent to the tab as JPEG frames over WebSocket. Mouse, touch, wheel and
+    keys go back through the emulator's input calls, following the
+    `emulator_controller.proto` that ships with the installed emulator.
+  - `grpcio` and `protobuf` are already in `.venv`. Generate the Python stubs
+    once, in a throwaway environment, and commit the generated files; don't
+    add `grpcio-tools` to `.venv`.
+  - If lag or CPU use is poor, log the numbers and ask before switching to
+    scrcpy, which isn't approved yet.
+- **Tab toolbar.** Back, Home, Recent apps, rotate, and Stop phone. Text typed
+  on the PC keyboard goes into the focused field.
+- **Graphics.** Try `-gpu host` first. Log VRAM, CPU and ARCHER's reply speed
+  with the phone running, then the same with `-gpu software`, and use the one
+  that leaves ARCHER's replies as fast as before. If neither does, ask.
+- **Leave alone:** Phase 2d files (paused) and the `ARCHER_ITEMS_WATCH` line in
+  `.env`.
+
+**Texting (Col, 2026-10-20: "If it can't text, then I guess we need to make a
+tab in ARCHER for the messenger window? Or what about using Whatsapp?")**
+- **Texts: Google Messages for web.** messages.google.com/web pairs with Col's
+  phone through his Google account and covers his normal texts and RCS chats.
+  - It's a pinned page in ARCHER's own browser (Phase 7), so it needs no
+    separate app or tab. The phone has to be online.
+  - That browser must keep its sign-ins between restarts. Today
+    `pc_control.py` starts a fresh profile each time; Phase 7 switches to a
+    persistent profile in `data/browser_profile/`, never pushed.
+- **WhatsApp (optional, Col's call).** It only reaches people who use WhatsApp,
+  so it doesn't replace texting. It can run in the emulator as a linked device
+  of Col's phone (WhatsApp allows up to five), or as WhatsApp Web in the browser.
+- **ARCHER texting by voice: on hold.** Col, 2026-10-21: "let's devise
+  another texting plan later." Don't build anything for it. The notes below
+  are kept only for that later discussion. Earlier candidate: **SMS Gateway
+  for Android** (Apache 2.0), an app on Col's phone used in its local mode.
+  - It sends SMS and MMS through an API on the home network and reports
+    incoming texts to ARCHER. No account and no cloud.
+  - Limits: it can't send RCS, and installing it on the phone needs Col's
+    approval.
+  - Other options found: KDE Connect (GPL; its Windows app has an SMS window).
+    Avoid the AGPL Google Messages bridges.
+
+---
+
+## 10c. Phase 7c — ARCHER on Col's iPad Air (Col, 2026-10-20)
+
+**Goal:** Col uses ARCHER from his iPad Air (1st generation). iOS 12 is the
+last version that iPad can run.
+
+**Order:** after Phase 3, because the iPad is meant for approving prompts from
+the couch.
+
+**Findings (Claude, 2026-10-20)**
+- **Home Wi-Fi only.** Tailscale needs iOS 15 or later, so this iPad can only
+  reach ARCHER at home. Access from outside the home stays out of scope.
+- **What it is.** A web page that ARCHER serves on the home network. Col saves
+  it to the iPad's Home Screen ("Add to Home Screen"), so it opens like an app.
+  This is the same kind of HTML app Col already uses on this iPad.
+- **Code limits.** It's written for Safari 12: plain HTML, CSS and JavaScript
+  with no build step. No newer JavaScript syntax (`?.` and `??` arrived in
+  Safari 13.1), no MediaPipe gestures and no WebCodecs. Test it on the iPad
+  itself.
+- **Microphone.** Home-screen apps on iOS 12 can't use the microphone; Apple
+  fixed that in iOS 13.4. In Safari itself the microphone works only over
+  HTTPS. So v1 is text and touch, and ARCHER's spoken replies can play on the
+  iPad. Talking to ARCHER through the iPad is a later step: it needs a local
+  HTTPS certificate installed on the iPad.
+
+**Behaviour**
+- **The page:**
+  - Chat with ARCHER. It's the same conversation as on the PC, and replies
+    come as text, optionally spoken on the iPad.
+  - Away & Tasks.
+  - "Where's my …" answers with the item photos.
+  - Approval prompts (Approve / Deny).
+- **Access.** Today ARCHER listens only on the PC itself (`127.0.0.1:8200`).
+  The iPad page gets its own port on the home network with a one-time pairing:
+  - ARCHER shows a 6-digit code on the PC screen.
+  - Col types it on the iPad, and the iPad keeps a long-lived token.
+  - Col can revoke the token from the System tab.
+  - Everything else stays on `127.0.0.1`. In v1 the iPad gets no camera view,
+    logs, transcripts or file access.
+
+**Acceptance:**
+- Col adds the page to the iPad's Home Screen and pairs once.
+- He can chat with ARCHER, see his tasks and While You Were Away, and approve
+  a prompt.
+- Any unpaired device on the network gets nothing.
+
+---
+
+## 10d. Telegram line to ARCHER (Col, 2026-10-21)
+
+**Goal:** Col talks to ARCHER from anywhere through Telegram on his phone.
+
+**Order:** after Phase 3 (approvals are one of its main uses).
+
+**Setup**
+- Col already has a Telegram account. The bot is created from that account
+  with Telegram's @BotFather, so there's no second account or phone number.
+- Its token goes into `.env` as `ARCHER_TELEGRAM_BOT_TOKEN`, and is never
+  logged.
+- Library: **aiogram** (MIT), approved by Col 2026-10-21 (Section 12).
+- Long polling, so no ports are opened on the home network.
+
+**What it does**
+- Text chat with ARCHER, the same conversation as at home.
+- Voice notes are transcribed on the PC with whisper. Replies can come back as
+  voice notes in ARCHER's Kokoro voice.
+- Approval prompts (Phase 3) as Approve / Deny buttons.
+- Reminders, tasks coming due, and While You Were Away items.
+- Forwarded links, photos and documents are filed into memory, tasks or
+  Artifacts.
+- Files ARCHER made are sent to Col (up to 50 MB).
+
+**Privacy**
+- Bot chats aren't end-to-end encrypted: Telegram's servers can read them.
+- Only Col's Telegram user ID is answered. Anyone else is ignored and logged.
+- Room transcripts, camera images and memory summaries are never sent unless
+  Col asks for that specific thing in the chat.
+
+**Acceptance:**
+- From his phone, away from Wi-Fi, Col asks ARCHER something and gets an
+  answer.
+- He sends a voice note and gets a reply.
+- He approves a prompt.
+- A message from another account gets no answer.
+
 ---
 
 ## 11. Phase 8 — Any desktop app inside the pane (prototype first)
@@ -1114,13 +1515,88 @@ integrating.
 - Known catch to evaluate: Windows has one mouse cursor, so while the pane is
   being used the real cursor moves onto the virtual display. Report how
   disruptive this is in practice.
-- The virtual display driver is a third-party install: it goes through the
+- The virtual display driver (open source) is **approved by Col 2026-10-21,
+  provided it passes the Phase 4 review**. It's a third-party install: it goes through the
   Phase 4 review and Col's approval like any tool.
 - ARCHER's clicks/typing in apps go through the Phase 3 gate.
 
 **Acceptance (prototype):** open Notepad on the virtual display, see it live in
 a test page, type into it from the page; written findings on cursor behavior,
 latency and reliability. Integration only after Col reviews.
+
+---
+
+## 11b. Phase 9 — ARCHER works on itself (R&D) (Col, 2026-10-20)
+
+**Goal:** ARCHER researches, writes and tests improvements to its own code, and
+builds new tools and skills for itself. Col: "we need ARCHER to be able to do
+it's own R&D development, improving and working on itself."
+
+**Order:** after Phases 3 (approval gate), 5 (code view and diffs) and 6
+(terminal). Outside repos still come in only through Phase 4.
+
+**Who writes the code (Col, 2026-10-21): Antigravity, with no pay-per-use
+APIs.** Col: one AI writes and a different one checks. "If it has to pay per
+use, then we need to rethink this … archer should simply use antigravity for
+coding."
+- ARCHER hands each coding job to the **Antigravity CLI** (`agy`) in headless
+  mode, e.g. `agy -p "<task>" --output-format json`. It uses Col's existing
+  Antigravity login (his cached credentials), not an API key.
+- **Writer and checker:** the writer runs with one model, and the checker is a
+  second `agy` run with a model from a *different* family. It reviews the
+  diff and the test results and returns clear / concerns / reject, with
+  reasons. Use whichever models the installed CLI offers (`--model`); log
+  which. A change goes ahead only on "clear".
+- **Permissions:** never `--dangerously-skip-permissions`. Pre-approve only
+  what the job needs (`permissions.allow` in its settings: git, the test
+  runner, file edits inside the worktree), and keep the agent inside the
+  worktree (`--sandbox` if the CLI supports it on Windows).
+- **Installing the CLI** is approved by Col's answer, but check first:
+  - its install method, licence and Windows support
+  - how its quota ("AI credits") works on Col's plan
+  Log all of it, and add a Section 12 row.
+- A local model as a third checker is optional later. Today's local models
+  that are good enough at code need more VRAM than is left beside ARCHER's
+  brain.
+- ARCHER's own model (gemma4 e4b) keeps the conversation: it turns Col's
+  request into the task, and reports the result.
+
+**What may leave the PC**
+- Only ARCHER's source code, which is already public on GitHub, and the task
+  description.
+- Never `data/`, `logs/`, `backups/`, `scratch/`, `.env`, the databases,
+  transcripts or photos.
+- How that's enforced: the work happens in a separate copy of the repo (a git
+  worktree with tracked files only), and the coding agent can only read and
+  write inside that copy.
+
+**Flow**
+1. An idea comes from Col ("ARCHER, make the timer skill…"), from ARCHER
+   noticing a tool failing, or from its own research. It's written as a short
+   plain-language proposal in an R&D list in the Away & Tasks tab.
+2. ARCHER works in its own copy on a branch. It writes the change and its
+   tests, and runs the test suite.
+3. The result opens in the Artifacts pane: a diff, a plain-language summary
+   and the test results.
+4. Applying it to the live ARCHER goes through the Phase 3 gate (session
+   approval covers it). The changed files are backed up first, the change
+   takes effect at the next restart, and it's recorded in the Change Log.
+   "ARCHER, undo the last update" restores the backup.
+
+**Never without Col's individual approval:** changes to the approval gate,
+the security and privacy rules, `.env`, or ARCHER's own permissions. ARCHER
+never pushes to GitHub; Col pushes.
+
+**Quota:** no pay-per-use spending. Coding uses Col's Antigravity plan. If the
+quota runs out, ARCHER stops, says so, and waits. It doesn't fall back to a
+paid API.
+
+**Acceptance:**
+- Col asks for a small improvement by voice, and ARCHER produces a tested diff
+  in the Artifacts pane.
+- Col applies it, and it works after a restart. "Undo" restores the old version.
+- The request log shows nothing but tracked code was sent.
+- The checker's verdict is in the record.
 
 ---
 
@@ -1142,6 +1618,14 @@ May be added to ARCHER's own `.venv` / `web/vendor/` without asking again:
 | One person-detector model file, permissively licensed (e.g. SSD-MobileNet via OpenCV, or YOLOX-Nano via onnxruntime; not Ultralytics/AGPL). Pinned source and checksum, recorded in the worklog. Approved by Col 2026-10-12. | 2b | Following people on the room camera |
 | Roboflow `trackers` (ByteTrack; Apache 2.0) and its `supervision` dependency, pinned version. Replaces the hand-written track matching. Approved by Col 2026-10-12. | 2b | Following people on the room camera |
 | `sherpa-onnx` 1.13.8 (+ `sherpa-onnx-core`; Apache 2.0) and its GigaSpeech keyword-spotting model (`sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01`, int8 files, Apache 2.0) in `data/models/kws`. Approved by Col 2026-10-20. | Next stage | "Hey ARCHER" / "ARCHER" wake words |
+| Tesseract OCR and Ghostscript (Windows installers, pinned versions and checksums), for `OCRmyPDF`. Approved by Col 2026-10-21. | 5 | Searchable scanned PDFs |
+| One open-source virtual display driver, if it passes the Phase 4 review. Approved by Col 2026-10-21. | 8 | Desktop apps in the pane |
+| `openpyxl` (MIT), into the document-tools environment. Approved by Col 2026-10-21. | 5 | Excel files |
+| `aiogram` (MIT), pinned version. Approved by Col 2026-10-21. | 10d | Telegram line |
+| `gridstack` 14.0.0 (MIT), stored in `web/vendor/gridstack/`. Selected per Rule 11 check (preserves persistent DOM elements so `<video>` stream and `<iframe>`s never reload on move/resize). Approved by Col 2026-10-21. | 4c | Resizable panes |
+| Antigravity CLI (`agy`), using Col's own Antigravity login, no API keys. Approved in principle by Col 2026-10-21; check the install, licence and quota first. | 9 | ARCHER works on itself |
+| Google's Android SDK command-line tools, Android Emulator, platform-tools (adb) and one Google Play x86_64 system image (Android SDK License; free, not open source), installed in `data/android/` (gitignored), not in `.venv`. Approved by Col 2026-10-20 ("proceed with building"). | 7b | Android tab |
+| Eclipse Temurin JRE 17 (GPLv2+CE, portable zip for Windows x64, pinned SHA-256: `bc21a93923103cdaac93ee337b0ae4365e739fde36df823dd456bc67c8a9d352`), extracted into `data/android/jdk/`, not in `.venv` or system PATH. Approved by Col 2026-10-21. | 7b | Android tab (sdkmanager / avdmanager) |
 
 Everything else — including LibreOffice, Tesseract, Ghostscript and the
 virtual display driver — needs Col's explicit approval (git-repo tools go
@@ -1152,7 +1636,8 @@ through the Phase 4 pipeline).
 ## 13. Out of scope for this package
 
 - The PyQt6 desktop app (left as is).
-- Mobile app, remote access (LiveKit/Tailscale).
+- Mobile app, and access from outside the home (LiveKit/Tailscale). The iPad
+  on home Wi-Fi is in scope (Phase 7c, Col 2026-10-20).
 - Redis reconnect for the observer service (deferred by Col).
 - Observer change detection / "no change" heartbeat.
 - The other open bugs list (desktop startup freeze 2026-10-03, ~100s first

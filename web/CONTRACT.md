@@ -66,6 +66,7 @@ again).
 Tabs in the Right Workspace:
 - **FILES**: barehands gesture file access board.
 - **ARTIFACTS**: Objects ARCHER creates, documents, embedded Playwright browser mirror.
+- **ANDROID**: Interactive Android phone emulator viewport and toolbar (Phase 7b).
 - **TOOLS**: List of installed skills (`skills_registry.py`) and tool pool additions.
 - **AWAY & TASKS**: "While You Were Away" Blindspot interventions + Tasks & Habits cards.
 - **SYSTEM**: GPU/VRAM headroom, SVG performance ring gauges, Ollama loaded models list.
@@ -145,10 +146,11 @@ doesn't require starting it by hand in a separate window.
 | `observer_camera`     | `released`                      | Webcam released/reacquired (e.g. for another app to use it)              |
 | `switch_tab`          | `tab`                           | Switch the active tab (`"dashboard"` or `"gesture"`) — fired by the `switch_tab` agent tool |
 | `log_line`            | `text`                          | One line of the application log, pushed unconditionally                  |
-| `memory_snapshot`     | `contacts`, `commitments`, `entities`, `patterns`, `interventions`, `pending_people` | Bulk memory payload (Memory card now only renders `interventions`/`pending_people`; the rest still ship for the notes_sync mirror and any future consumer) |
+| `memory_snapshot`     | `contacts`, `commitments`, `entities`, `patterns`, `interventions`, `pending_people` | Bulk memory payload (Memory card now only renders `interventions`/`pending_people`; the rest still ship for the notes_sync mirror and any future consumer). `interventions` (While You Were Away) also lists items moved by anyone but Col (`source: "items"`, Phase 2d) |
 | `tasks_snapshot`      | `tasks`, `habits`               | Bulk tasks/habits payload                                                |
 | `system_snapshot`     | `gpu`, `cpu`, `tokens_per_sec`, `ollama_loaded`, `available_models`, `current_model`, `mic_devices`, `speaker_devices`, `current_mic_index`, `current_speaker_index` | GPU/VRAM/temp, CPU%, tokens/sec, ollama-ps-equivalent, and device lists for the controls bar + System card |
 | `browser_screenshot`  | `image_b64`, `active`           | Mirror of ARCHER's own Playwright browser, when a session is open        |
+| `artifact_push`       | `image_b64`, `kind`, `title`    | An image for the chat transcript, shown with its `title`: a tool screenshot (`kind: "screenshot"`) or an item's photo (`kind: "item_photo"`, Phase 2d: last-seen, leaving or reference photo, or an item ARCHER couldn't name) |
 | `hello`               | `mode`, `mic_muted`, `tts_muted`, `camera_released`, `camera_available`, `listening_state` | Sent on connect — initial toolbar state; `listening_state` is `{state, until}` as below |
 | `system_start`        | —                                | Session (re)started                                                      |
 
@@ -157,6 +159,25 @@ doesn't require starting it by hand in a separate window.
 | `camera_frame_ack`     | `request_id`, `size`            | Diagnostic: Server acknowledges receipt and successful decode of browser's camera frame |
 | `listening_state`      | `state`, `until`            | Phase 2c room listening, sent on change: `state` is `listening`, `paused`, `empty` (nobody in the room) or `off` (the observer isn't reporting); `until` is when a pause ends (epoch seconds), `-1` until resumed, `0` otherwise. The observer service reports through the database; the server checks it every 2 s |
 | `room_transcripts_forgotten` | `deleted`                   | Phase 2c confirmation of purged recent room transcripts |
+| `android_state`        | `running`, `starting`, `gpu_mode`, `message`, `detail`, `step`, `step_description`, `elapsed_sec`, `log_tail` | Phase 7b Android virtual phone lifecycle, hardware state, and boot step progress update |
+| `android_log_tail`     | `lines`                         | Tail lines from `logs/android_emulator.log` on demand or during startup |
+| `logs_status_board`    | `cards`                         | Spec 5e: Status Board state for 8 subsystems (`voice`, `brain`, `startup`, `observer`, `phone`, `browser`, `tools`, `jobs`) with state, dot, since, and description |
+| `logs_feed_bulk`       | `entries`                       | Spec 5e: Recent activity feed history (ring buffer of up to 1,000 entries) |
+| `logs_feed_entry`      | `id`, `ts`, `time`, `part`, `text`, `level`, `details` | Spec 5e: Single live activity feed entry broadcast to clients |
+| `technical_log_bulk`   | `lines`                         | Spec 5e: Last 50 technical log lines sent when technical view is toggled on |
+| `technical_log_line`   | `line`                          | Spec 5e: Real-time technical log stream line (Loguru sink) |
+| `artifacts_list`       | `files`                         | Phase 5 (Spec 8): List of generated artifact descriptors in `data/artifacts/` |
+| `artifact_display`     | `filename`, `filepath`, `action`| Phase 5 (Spec 8): Notification that an artifact was generated or updated |
+| `artifact_action_result`| `action`, `filepath`, `result` | Phase 5 (Spec 8): Result of native Open or Show In Folder request |
+
+### Dedicated Binary Stream WebSocket (`/ws/android`)
+
+To guarantee that high-framerate video frames never delay chat, voice state, or approval messages, video frames flow exclusively across `/ws/android`:
+- **Server → Browser:** Raw binary JPEG frames (`Blob` / `ArrayBuffer`), zero base64 or JSON overhead.
+- **Backpressure:** Per-client backpressure drops stale frames if the previous send has not completed. Only the newest frame is transmitted.
+- **Tab-Gated Streaming:** Frames are captured and streamed strictly while the ANDROID tab is visible. Switching to another tab auto-pauses frame capture on the emulator while the phone continues running in the background.
+- **Dynamic Sizing:** Screen capture dimensions dynamically resize to the tab's real pixel height (scaled by `window.devicePixelRatio`), capped at physical device resolution (1080x2400).
+- **Browser → Server Commands:** Accepts JSON command packets (`resize`, `visibility`, `android_touch`, `android_button`, `android_key`) with low latency.
 
 ## Messages (browser → server)
 
@@ -183,6 +204,20 @@ doesn't require starting it by hand in a separate window.
 {"type": "browser_get_screenshot"}
 {"type": "set_listening_pause", "duration": 900}   // seconds; -1 = until resumed; 0 = resume
 {"type": "forget_recent_room", "seconds": 120}
+{"type": "android_start"}                          // start virtual phone (Phase 7b)
+{"type": "android_stop"}                           // stop virtual phone (Phase 7b)
+{"type": "android_tab_visibility", "visible": true} // pauses streaming capture when tab is hidden
+{"type": "android_resize", "width": 540, "height": 1200} // dynamic stream resolution
+{"type": "android_button", "button": "back"}       // "back" | "home" | "overview" | "rotate"
+{"type": "android_touch", "action": "down", "x": 0.5, "y": 0.5}  // normalized 0.0-1.0
+{"type": "android_key", "action": "down", "key": "a", "code": "KeyA", "keyCode": 65, "text": "a"}
+{"type": "android_query_state"}
+{"type": "android_get_logs", "lines": 20}          // fetch tail of logs/android_emulator.log
+{"type": "logs_get_status"}                        // request fresh Status Board state
+{"type": "technical_log_subscribe", "subscribe": true} // toggle live stream of technical loguru lines
+{"type": "get_artifacts", "extension": null}            // Phase 5: list data/artifacts/
+{"type": "open_artifact", "filepath": "Meeting_Notes.docx"} // Phase 5: native os.startfile()
+{"type": "show_artifact_in_folder", "filepath": "Report.pdf"} // Phase 5: explorer.exe /select
 ```
 
 `text_input` bypasses voice entirely and goes straight to the active
@@ -226,7 +261,9 @@ web/
     tasks.js          builds the Dashboard's Tasks card — read-only open-tasks list
     system.js         builds the always-visible controls bar (model/mic/speaker) + the System card (camera, GPU/VRAM, performance gauges, ollama-loaded)
     browser.js        builds the Browser (mirror) card, including its primary-row reflow when active
+    artifacts.js      builds the ARTIFACTS tab — documents list, native Open/Folder actions, direct image/text viewer (Phase 5)
     barehands.js      mounts barehands into the Gesture tab, if reachable
+    android.js        builds the ANDROID tab — emulator controls, canvas stream, mouse/touch/keyboard forwarding
 ```
 
 ## Cursor effects
@@ -247,3 +284,17 @@ Standalone barehands uses its own stored preference.
 To review: switch to the cursor branch, start ARCHER normally, and hard-refresh
 `http://127.0.0.1:8200/app`. Move across Dashboard and Gesture, type into the
 message field, toggle CURSOR FX, and refresh to verify persistence.
+
+## Resizable & Movable Panes (Spec 4c)
+
+Panes (Chat & Transcript, Orb, Live Camera, Room Listening, Workspace) are
+movable and resizable via GridStack.js 14.0.0 (MIT, vendored in `web/vendor/gridstack/`).
+- Drag a pane by its header title bar (`.archer-pane-header`).
+- Drag edges/corners to resize; neighbouring widgets reflow cleanly.
+- `web/js/panes.js` initializes the grid, observes resizing, shields iframes
+  from mouse capture during dragging (`.grid-stack-dragging iframe`), and saves
+  layout coordinates to `localStorage` key `archer.layout.v1`.
+- The RESET LAYOUT toolbar button (`#archer-reset-layout-btn`) clears saved
+  layout and restores defaults.
+- All persistent DOM elements (`<video>` camera stream, barehands `<iframe>`)
+  remain mounted in the DOM without destroying or reloading.

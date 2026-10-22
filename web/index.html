@@ -9,6 +9,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ARCHER</title>
+  <link rel="stylesheet" href="/static/vendor/gridstack/gridstack.min.css" />
   <link rel="stylesheet" href="/static/css/ui.css" />
   <link rel="stylesheet" href="/static/css/orb.css" />
   <link rel="stylesheet" href="/static/css/cursor.css" />
@@ -20,60 +21,101 @@
       <button id="archer-mode-btn" type="button" title="Toggle whether ARCHER's brain runs LOCAL (Ollama, private, no API cost) or CLOUD (Claude/NVIDIA, smarter, needs internet)">MODE</button>
       <button id="archer-mic-btn" type="button" title="Mute/unmute your microphone -- ARCHER stops listening for the wake word or any speech while muted">MIC</button>
       <button id="archer-tts-btn" type="button" title="Mute/unmute ARCHER's spoken replies -- text replies still work while muted">SPEAKER</button>
+      <div id="archer-session-approval-badge" class="session-approval-badge" style="display:none;" title="Session approval is active -- state-changing commands run without prompting">
+        <span>⚡ SESSION APPROVAL ON</span>
+        <button id="archer-end-session-approval-btn" type="button" title="End session approval">END</button>
+      </div>
+      <button id="archer-reset-layout-btn" type="button" title="Reset panes to default layout">RESET LAYOUT</button>
       <button id="archer-halt-btn" type="button" title="Emergency stop -- interrupts whatever ARCHER is currently doing/saying">HALT</button>
     </div>
 
     <!-- Always-visible control strip for model/mic/speaker dropdowns -->
     <div id="archer-controls-bar"></div>
 
-    <div id="archer-main-layout">
-      <!-- Fixed Left Column: Chat box, Orb, Live Webcam Feed (never scrolls) -->
-      <aside id="archer-left-column">
-        <div id="archer-chat-column" class="archer-left-card">
-          <div id="archer-live"></div>
-          <div id="archer-transcript"></div>
-          <form id="archer-text-form">
-            <input id="archer-text-input" type="text" placeholder="Type a message..." autocomplete="off" />
-            <button type="submit">Send</button>
-          </form>
-        </div>
-
-        <div id="archer-orb-column" class="archer-left-card">
-          <div data-archer-orb></div>
-        </div>
-
-        <div id="archer-camera-column" class="archer-left-card">
-          <div class="archer-left-card-header">LIVE CAMERA</div>
-          <div id="archer-left-camera-pane">
-            <video id="archer-system-camera-feed" autoplay playsinline muted></video>
-            <div id="archer-camera-unavailable" style="display:none;" class="archer-memory-empty">Camera unavailable</div>
-            <canvas id="archer-camera-canvas" style="display:none;"></canvas>
+    <div id="archer-main-layout" class="grid-stack">
+      <!-- Pane: Chat Box -->
+      <div id="pane-chat" class="grid-stack-item archer-pane" gs-id="pane-chat" gs-x="0" gs-y="0" gs-w="3" gs-h="5" gs-min-w="2" gs-min-h="3">
+        <div class="grid-stack-item-content archer-pane-inner">
+          <div class="archer-pane-header">
+            <span class="archer-pane-grip">&#x22EE;&#x22EE;</span>
+            <span class="archer-pane-title">CHAT &amp; TRANSCRIPT</span>
+          </div>
+          <div id="archer-chat-column" class="archer-pane-body">
+            <div id="archer-live"></div>
+            <div id="archer-transcript"></div>
+            <form id="archer-text-form">
+              <input id="archer-text-input" type="text" placeholder="Type a message..." autocomplete="off" />
+              <button type="submit">Send</button>
+            </form>
           </div>
         </div>
+      </div>
 
-        <div id="archer-listening-column" class="archer-left-card">
-          <div class="archer-left-card-header">
-            <span>ROOM LISTENING</span>
-            <span id="archer-listening-indicator" class="listening-badge badge-off" title="Room Listening Status">OFF</span>
+      <!-- Pane: Orb -->
+      <div id="pane-orb" class="grid-stack-item archer-pane" gs-id="pane-orb" gs-x="0" gs-y="5" gs-w="3" gs-h="3" gs-min-w="2" gs-min-h="2">
+        <div class="grid-stack-item-content archer-pane-inner">
+          <div class="archer-pane-header">
+            <span class="archer-pane-grip">&#x22EE;&#x22EE;</span>
+            <span class="archer-pane-title">ARCHER ORB</span>
           </div>
-          <div id="archer-listening-pane">
-            <div id="archer-listening-status-text">Waiting for the observer…</div>
-            <div id="archer-listening-controls">
-              <button id="archer-listen-pause-15m" type="button" class="listen-btn" title="Pause room listening for 15 minutes">Pause 15m</button>
-              <button id="archer-listen-pause-1h" type="button" class="listen-btn" title="Pause room listening for 1 hour">Pause 1h</button>
-              <button id="archer-listen-pause-hold" type="button" class="listen-btn" title="Pause room listening until you resume it">Pause</button>
-              <button id="archer-listen-resume" type="button" class="listen-btn resume" style="display:none;" title="Resume room listening">Resume</button>
-              <button id="archer-listen-forget" type="button" class="listen-btn danger" title="Purge room transcripts from the last 2 minutes">Forget That</button>
+          <div id="archer-orb-column" class="archer-pane-body">
+            <div data-archer-orb></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pane: Live Camera -->
+      <div id="pane-camera" class="grid-stack-item archer-pane" gs-id="pane-camera" gs-x="0" gs-y="8" gs-w="3" gs-h="3" gs-min-w="2" gs-min-h="2">
+        <div class="grid-stack-item-content archer-pane-inner">
+          <div class="archer-pane-header">
+            <span class="archer-pane-grip">&#x22EE;&#x22EE;</span>
+            <span class="archer-pane-title">LIVE CAMERA</span>
+          </div>
+          <div id="archer-camera-column" class="archer-pane-body">
+            <div id="archer-left-camera-pane">
+              <video id="archer-system-camera-feed" autoplay playsinline muted></video>
+              <div id="archer-camera-unavailable" style="display:none;" class="archer-memory-empty">Camera unavailable</div>
+              <canvas id="archer-camera-canvas" style="display:none;"></canvas>
             </div>
           </div>
         </div>
-      </aside>
+      </div>
+
+      <!-- Pane: Room Listening -->
+      <div id="pane-listening" class="grid-stack-item archer-pane" gs-id="pane-listening" gs-x="0" gs-y="11" gs-w="3" gs-h="2" gs-min-w="2" gs-min-h="2">
+        <div class="grid-stack-item-content archer-pane-inner">
+          <div class="archer-pane-header">
+            <span class="archer-pane-grip">&#x22EE;&#x22EE;</span>
+            <span class="archer-pane-title">ROOM LISTENING</span>
+            <span id="archer-listening-indicator" class="listening-badge badge-off" title="Room Listening Status">OFF</span>
+          </div>
+          <div id="archer-listening-column" class="archer-pane-body">
+            <div id="archer-listening-pane">
+              <div id="archer-listening-status-text">Waiting for the observer…</div>
+              <div id="archer-listening-controls">
+                <button id="archer-listen-pause-15m" type="button" class="listen-btn" title="Pause room listening for 15 minutes">Pause 15m</button>
+                <button id="archer-listen-pause-1h" type="button" class="listen-btn" title="Pause room listening for 1 hour">Pause 1h</button>
+                <button id="archer-listen-pause-hold" type="button" class="listen-btn" title="Pause room listening until you resume it">Pause</button>
+                <button id="archer-listen-resume" type="button" class="listen-btn resume" style="display:none;" title="Resume room listening">Resume</button>
+                <button id="archer-listen-forget" type="button" class="listen-btn danger" title="Purge room transcripts from the last 2 minutes">Forget That</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <!-- Right Tabbed Workspace: FILES, ARTIFACTS, TOOLS, AWAY & TASKS, SYSTEM, LOGS -->
-      <main id="archer-right-column">
+      <div id="pane-workspace" class="grid-stack-item archer-pane" gs-id="pane-workspace" gs-x="3" gs-y="0" gs-w="9" gs-h="13" gs-min-w="4" gs-min-h="4">
+        <div class="grid-stack-item-content archer-pane-inner">
+          <div class="archer-pane-header">
+            <span class="archer-pane-grip">&#x22EE;&#x22EE;</span>
+            <span class="archer-pane-title">WORKSPACE</span>
+          </div>
+          <main id="archer-right-column" class="archer-pane-body">
         <div id="archer-tabs">
           <button class="tab-btn" data-tab="files" type="button">FILES</button>
           <button class="tab-btn active" data-tab="artifacts" type="button">ARTIFACTS</button>
+          <button class="tab-btn" data-tab="android" type="button">ANDROID</button>
           <button class="tab-btn" data-tab="tools" type="button">TOOLS</button>
           <button class="tab-btn" data-tab="away_tasks" type="button">AWAY &amp; TASKS</button>
           <button class="tab-btn" data-tab="system" type="button">SYSTEM</button>
@@ -89,14 +131,68 @@
             </p>
           </div>
 
-          <!-- ARTIFACTS Tab: viewer placeholder + browser mirror card -->
+          <!-- ARTIFACTS Tab: Documents, files ARCHER creates, viewer, and browser mirror -->
           <div id="tab-artifacts" class="tab-panel active">
-            <div class="archer-dashboard-card archer-artifacts-placeholder">
-              <h3>Artifacts &amp; Viewer</h3>
-              <p class="archer-memory-hint">Objects ARCHER creates, documents, embedded browser, and interactive previews.</p>
+            <div id="archer-artifacts-view" class="archer-dashboard-card archer-artifacts-card">
+              <!-- js/artifacts.js renders the artifacts manager & viewer here -->
             </div>
             <div id="tab-browser" class="archer-dashboard-card">
               <!-- js/browser.js builds live mirror of ARCHER's Playwright browser -->
+            </div>
+          </div>
+
+          <!-- ANDROID Tab: interactive Android phone emulator viewport and toolbar -->
+          <div id="tab-android" class="tab-panel">
+            <div class="archer-dashboard-card android-container-card">
+              <div class="android-toolbar">
+                <div class="android-toolbar-group">
+                  <button id="android-btn-back" type="button" class="android-btn" title="Back">
+                    <span class="android-btn-icon">&#x25C0;</span> Back
+                  </button>
+                  <button id="android-btn-home" type="button" class="android-btn" title="Home">
+                    <span class="android-btn-icon">&#x25CF;</span> Home
+                  </button>
+                  <button id="android-btn-recents" type="button" class="android-btn" title="Recent Apps">
+                    <span class="android-btn-icon">&#x25A0;</span> Apps
+                  </button>
+                  <button id="android-btn-rotate" type="button" class="android-btn" title="Rotate Screen">
+                    <span class="android-btn-icon">&#x21BB;</span> Rotate
+                  </button>
+                </div>
+                <div class="android-toolbar-group">
+                  <span id="android-status-badge" class="status-pill pill-gray">Offline</span>
+                  <button id="android-btn-details" type="button" class="android-btn btn-secondary" style="display:none;" title="Toggle Emulator Log Details">Details</button>
+                  <button id="android-btn-start-stop" type="button" class="android-btn btn-primary" title="Start/Stop Virtual Phone">Start Virtual Phone</button>
+                </div>
+              </div>
+
+              <!-- Start-up Progress Banner -->
+              <div id="android-step-banner" class="android-step-banner" style="display:none;">
+                <span class="android-step-spinner">&#x25F7;</span>
+                <span id="android-step-text" class="android-step-text">Launching emulator...</span>
+                <span id="android-step-time" class="android-step-time">0s</span>
+              </div>
+
+              <!-- Details Log Pane -->
+              <div id="android-details-pane" class="android-details-pane" style="display:none;">
+                <div class="android-details-header">
+                  <span>Emulator Log (live tail)</span>
+                  <button id="android-details-close" type="button" class="android-btn-close">Close</button>
+                </div>
+                <pre id="android-details-log" class="android-details-pre">Waiting for emulator log output...</pre>
+              </div>
+
+              <div class="android-viewport-wrapper">
+                <div id="android-placeholder-message" class="android-placeholder">
+                  <div class="android-placeholder-content">
+                    <div class="android-phone-icon">&#x1F4F1;</div>
+                    <h3>Android Virtual Phone</h3>
+                    <p id="android-placeholder-detail">Google Play Store &bull; Pixel Profile &bull; Isolated in data/android</p>
+                    <p class="android-hint">Click &ldquo;Start Virtual Phone&rdquo; above to launch the virtual phone on this PC.</p>
+                  </div>
+                </div>
+                <canvas id="archer-android-canvas" class="android-canvas" style="display:none;"></canvas>
+              </div>
             </div>
           </div>
 
@@ -126,9 +222,13 @@
           </div>
         </div>
       </main>
+        </div>
+      </div>
     </div>
   </div>
 
+  <script src="/static/vendor/gridstack/gridstack-all.js"></script>
+  <script src="/static/js/panes.js"></script>
   <script src="/static/js/app.js"></script>
   <script src="/static/js/camera.js"></script>
   <script src="/static/js/orb.js"></script>
@@ -139,8 +239,10 @@
   <script src="/static/js/tasks.js"></script>
   <script src="/static/js/system.js"></script>
   <script src="/static/js/browser.js"></script>
+  <script src="/static/js/artifacts.js"></script>
   <script src="/static/js/tools.js"></script>
   <script src="/static/js/barehands.js"></script>
+  <script src="/static/js/android.js"></script>
   <script type="module" src="/static/js/cursor.js"></script>
 </body>
 </html>

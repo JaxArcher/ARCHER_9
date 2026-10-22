@@ -1348,3 +1348,17 @@ class AgentOrchestrator:
         """Get a copy of the in-session conversation history."""
         with self._history_lock:
             return list(self._conversation_history)
+
+
+_orchestrator_instance: AgentOrchestrator | None = None
+_orch_lock = threading.Lock()
+
+
+def get_orchestrator() -> AgentOrchestrator:
+    """Get or create the global AgentOrchestrator singleton."""
+    global _orchestrator_instance
+    if _orchestrator_instance is None:
+        with _orch_lock:
+            if _orchestrator_instance is None:
+                _orchestrator_instance = AgentOrchestrator()
+    return _orchestrator_instance

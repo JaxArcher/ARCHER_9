@@ -368,6 +368,12 @@ class PCController:
         # model then answered about something else). Allow 90 s for that.
         timeout = 30.0 if self._browser is not None else 90.0
         result = self._run_on_pw_thread(self._open_url_impl, url, timeout=timeout)
+        if result and result.get("success"):
+            self._bus.publish(Event(
+                type=EventType.BROWSER_ACTION,
+                source="pc_control",
+                data={"action": "open_url", "title": result.get("title", ""), "url": url},
+            ))
         return result if result is not None else {"success": False, "reason": "Playwright call failed/timed out"}
 
     def play_youtube(self, query: str) -> dict[str, Any]:
@@ -384,6 +390,12 @@ class PCController:
             return {"success": False, "reason": "Nothing to search for"}
         timeout = 45.0 if self._browser is not None else 105.0
         result = self._run_on_pw_thread(self._play_youtube_impl, query, timeout=timeout)
+        if result and result.get("success"):
+            self._bus.publish(Event(
+                type=EventType.BROWSER_ACTION,
+                source="pc_control",
+                data={"action": "play_youtube", "title": result.get("playing", ""), "url": result.get("url", "")},
+            ))
         return result if result is not None else {"success": False, "reason": "Playwright call failed/timed out"}
 
     # The first real video in YouTube's results (ads and Shorts use other
@@ -609,4 +621,22 @@ class PCController:
         if self._check_halt():
             return
         self._run_on_pw_thread(self._close_browser)
+        self._bus.publish(Event(
+            type=EventType.BROWSER_ACTION,
+            source="pc_control",
+            data={"action": "close", "title": "Closed"},
+        ))
         logger.info("Browser closed by user request.")
+
+    def get_browser_status(self) -> dict[str, Any]:
+        """Return whether ARCHER's browser is open and its current page title."""
+        if self._browser is None or self._browser_context is None:
+            return {"open": False, "title": "Closed"}
+        try:
+            pages = self._browser_context.pages
+            if pages:
+                title = pages[-1].title()
+                return {"open": True, "title": title or pages[-1].url}
+        except Exception:
+            pass
+        return {"open": True, "title": "Open"}

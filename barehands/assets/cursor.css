@@ -20,6 +20,18 @@
 #archer-cursor.ac-click .ac-core { background: #fff; box-shadow: 0 0 12px 5px #ad93ff; }
 .archer-cursor-trail { position: fixed; width: 7px; height: 7px; border-radius: 50%; background: #4bdfff; opacity: 0; z-index: 2147483646; }
 html.archer-cursor-active, html.archer-cursor-active * { cursor: none !important; }
+html.archer-cursor-active input,
+html.archer-cursor-active textarea,
+html.archer-cursor-active select,
+html.archer-cursor-active [contenteditable],
+html.archer-cursor-active iframe,
+html.archer-cursor-active [data-native-cursor] {
+  cursor: auto !important;
+}
+html.archer-cursor-active input[type="text"],
+html.archer-cursor-active textarea {
+  cursor: text !important;
+}
 #archer-cursor-toggle { margin-left: auto; background: transparent; color: #91d7e6; border: 1px solid #285064; border-radius: 5px; padding: 6px 10px; font: inherit; font-size: 11px; }
 #archer-cursor-toggle:focus-visible { outline: 2px solid #bcaaff; outline-offset: 2px; }
 @keyframes ac-spin { to { transform: rotate(360deg); } }

@@ -166,6 +166,19 @@ class SQLiteStore:
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
 
+                -- Phase 3 Change Log
+                CREATE TABLE IF NOT EXISTS change_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    what_changed TEXT NOT NULL,
+                    prompted_by TEXT NOT NULL,
+                    approval_status TEXT NOT NULL,
+                    tool_name TEXT,
+                    details TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_change_log_ts
+                    ON change_log(timestamp);
+
                 -- User inventory (Assistant agent)
                 CREATE TABLE IF NOT EXISTS inventory (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -641,6 +654,19 @@ class SQLiteStore:
                     samples INTEGER NOT NULL DEFAULT 0,
                     enrolled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+
+                -- Phase 3: Approval System Change Log (Spec Section 6)
+                CREATE TABLE IF NOT EXISTS change_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    what_changed TEXT NOT NULL,
+                    prompted_by TEXT NOT NULL,
+                    approval_status TEXT NOT NULL,
+                    tool_name TEXT,
+                    details TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_change_log_timestamp ON change_log(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_change_log_status ON change_log(approval_status);
             """)
             try:
                 conn.execute(
@@ -682,6 +708,8 @@ class SQLiteStore:
                 ("listening_control", "forget_until", "REAL NOT NULL DEFAULT 0.0"),
                 ("listening_control", "launch_requested_at", "REAL NOT NULL DEFAULT 0.0"),
                 ("listening_control", "launch_handled_at", "REAL NOT NULL DEFAULT 0.0"),
+                ("listening_control", "audio_last_received_at", "REAL NOT NULL DEFAULT 0.0"),
+                ("listening_control", "audio_stalled_seconds", "REAL NOT NULL DEFAULT 0.0"),
             ):
                 existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
                 if column not in existing:
@@ -1708,6 +1736,55 @@ class SQLiteStore:
             conn.close()
 
     get_action_audit = get_recent_actions
+
+    # --- Phase 3: Change Log ---
+
+    def add_change_log(
+        self,
+        what_changed: str,
+        prompted_by: str,
+        approval_status: str,
+        tool_name: str | None = None,
+        details: str | None = None,
+    ) -> int:
+        """Add an entry to the Phase 3 change log."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO change_log
+                        (what_changed, prompted_by, approval_status, tool_name, details)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (what_changed, prompted_by, approval_status, tool_name, details),
+                )
+                conn.commit()
+                return cursor.lastrowid
+            finally:
+                conn.close()
+
+    def get_change_logs(
+        self,
+        limit: int = 100,
+        date_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve recent change log entries, newest first, optional date filter (YYYY-MM-DD)."""
+        conn = self._get_connection()
+        try:
+            if date_filter:
+                cursor = conn.execute(
+                    "SELECT * FROM change_log WHERE date(timestamp) = date(?) ORDER BY id DESC LIMIT ?",
+                    (date_filter, limit),
+                )
+            else:
+                cursor = conn.execute(
+                    "SELECT * FROM change_log ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
 
     # --- Configuration / Toggle State ---
 
@@ -3412,6 +3489,15 @@ class SQLiteStore:
             listener_heartbeat=float(now if now is not None else time.time()),
         )
 
+    def update_audio_received(self, now: float | None = None) -> None:
+        """Record audio frame received and clear stall timer."""
+        curr = float(now if now is not None else time.time())
+        self._update_listening(audio_last_received_at=curr, audio_stalled_seconds=0.0)
+
+    def update_audio_stalled(self, stalled_seconds: float, now: float | None = None) -> None:
+        """Record audio stall duration in seconds."""
+        self._update_listening(audio_stalled_seconds=float(stalled_seconds))
+
     def get_listening_status(self, now: float | None = None, stale_after: float = 45.0) -> dict:
         """
         What the page shows: state is 'paused', 'listening', 'empty' or 'off'
@@ -3506,6 +3592,74 @@ class SQLiteStore:
         finally:
             conn.close()
 
+    # --- Phase 3: Change Log ---
+
+    def add_change_log(
+        self,
+        what_changed: str,
+        prompted_by: str,
+        approval_status: str,
+        tool_name: str = "",
+        details: str = "",
+    ) -> int:
+        """Insert a row into change_log table."""
+        conn = self._get_connection()
+        try:
+            with conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO change_log (what_changed, prompted_by, approval_status, tool_name, details)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (what_changed, prompted_by, approval_status, tool_name, details),
+                )
+                return cur.lastrowid
+        finally:
+            conn.close()
+
+    def get_change_logs(
+        self, limit: int = 100, date_filter: str | None = None
+    ) -> list[dict]:
+        """Fetch change_log rows, optionally filtered by date (YYYY-MM-DD)."""
+        conn = self._get_connection()
+        try:
+            if date_filter:
+                rows = conn.execute(
+                    """
+                    SELECT id, timestamp, what_changed, prompted_by, approval_status, tool_name, details
+                    FROM change_log
+                    WHERE date(timestamp, 'localtime') = date(?) OR date(timestamp) = date(?)
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (date_filter, date_filter, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, timestamp, what_changed, prompted_by, approval_status, tool_name, details
+                    FROM change_log
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+
+            return [
+                {
+                    "id": r[0],
+                    "timestamp": r[1],
+                    "what_changed": r[2],
+                    "prompted_by": r[3],
+                    "approval_status": r[4],
+                    "tool_name": r[5],
+                    "details": r[6],
+                }
+                for r in rows
+            ]
+        finally:
+            conn.close()
+
 # ====== END OF NEW METHODS ======
 
 
@@ -3521,4 +3675,4 @@ def get_sqlite_store() -> SQLiteStore:
         with _store_lock:
             if _store is None:
                 _store = SQLiteStore()
-    return _store
+    return _store

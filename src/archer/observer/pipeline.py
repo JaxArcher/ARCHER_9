@@ -51,6 +51,7 @@ from archer.observer.analyzers import DetectionResult, SceneAnalyzer
 from archer.observer.person_id import PersonIdentifier
 from archer.observer.person_tracker import PersonTracker
 from archer.observer.room_listener import RoomListener
+from archer.observer.item_watcher import ItemWatcher
 
 # Single Redis channel for every observation this pipeline (or the
 # staleness reasoner, a separate periodic pass -- see
@@ -147,6 +148,16 @@ class ObserverPipeline:
         self._person_tracker = PersonTracker()
         self._room_listener: RoomListener | None = RoomListener(
             pipeline=self, tracker=self._person_tracker, db_path=db_path
+        )
+        # Things that get moved (Phase 2d): watches the room camera beside the
+        # people tracker; started with the tracker below.
+        self._item_watcher: ItemWatcher | None = (
+            ItemWatcher(
+                snapshot=self._item_snapshot,
+                is_at_exit=self._person_tracker.is_at_exit,
+                notify=self._note_item_move,
+            )
+            if getattr(self._config, "items_watch", True) else None
         )
 
         # Control
@@ -252,6 +263,14 @@ class ObserverPipeline:
             if self._room_listener is not None:
                 self._room_listener.start()
 
+            # Things that get moved (Phase 2d)
+            if self._item_watcher is not None:
+                try:
+                    self._item_watcher.start()
+                except Exception as e:
+                    logger.warning(f"ItemWatcher didn't start: {type(e).__name__}: {e}")
+                    self._item_watcher = None
+
             logger.info(
                 f"Observer pipeline started "
                 f"(motion-gated: active interval {self._active_interval}s, "
@@ -276,6 +295,12 @@ class ObserverPipeline:
                 self._room_listener.stop()
             except Exception as e:
                 logger.debug(f"RoomListener stop error: {e}")
+
+        if self._item_watcher is not None:
+            try:
+                self._item_watcher.stop()
+            except Exception as e:
+                logger.debug(f"ItemWatcher stop error: {e}")
 
         if self._tracker_thread is not None:
             self._tracker_thread.join(timeout=3.0)
@@ -563,6 +588,31 @@ class ObserverPipeline:
                 self._tracker_last_update_ts = time.time()
             except Exception as e:
                 logger.error(f"Observer tracker update failed: {e}")
+                continue
+
+            if self._item_watcher is not None:
+                try:
+                    self._item_watcher.observe(frame, timestamp or time.time(), self._person_tracker.active_tracks)
+                except Exception as e:
+                    logger.warning(f"ItemWatcher frame failed: {type(e).__name__}: {e}")
+
+    def _item_snapshot(self) -> bytes | None:
+        """A sharp still from the room camera's main stream, for the item watcher (Phase 2d)."""
+        if self._reolink_detector is None:
+            return None
+        return self._reolink_detector.get_snapshot(timeout=8.0)
+
+    def _note_item_move(self, text: str) -> None:
+        """Someone other than Col moved an item: list it under While You Were Away (Phase 2d).
+        Marked delivered at once: ARCHER mentions item moves itself (CoreAgent, from the item
+        records), not through the Blindspot catch-up."""
+        try:
+            row_id = self._store.add_pending_intervention(
+                category="items", metric="item_moved", content=text, source="items"
+            )
+            self._store.mark_interventions_delivered([row_id])
+        except Exception as e:
+            logger.debug(f"Couldn't add the item move to While You Were Away: {e}")
 
     def _face_check_loop(self) -> None:
         """

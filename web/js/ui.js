@@ -70,6 +70,21 @@ ArcherClient.on("artifactPush", ({ imageB64, title }) => {
 
 ArcherClient.on("halt", () => {
   liveEl.textContent = "";
+  document.querySelectorAll(".approval-card").forEach((card) => {
+    if (card._approvalTimer) clearInterval(card._approvalTimer);
+    const actions = card.querySelector(".approval-actions");
+    const timer = card.querySelector(".approval-countdown");
+    const status = card.querySelector(".approval-status");
+    if (actions && actions.style.display !== "none") {
+      actions.style.display = "none";
+      if (timer) timer.style.display = "none";
+      if (status) {
+        status.style.display = "block";
+        status.className = "approval-status status-denied";
+        status.textContent = "🛑 Cancelled (HALT)";
+      }
+    }
+  });
 });
 
 textFormEl.addEventListener("submit", (event) => {
@@ -101,11 +116,127 @@ function setTtsButton(muted) {
   ttsBtnEl.classList.toggle("is-muted", muted);
 }
 
-ArcherClient.on("hello", ({ mode, micMuted, ttsMuted, listeningState }) => {
+// Session Approval Badge Elements (Phase 3)
+const sessionBadgeEl = document.getElementById("archer-session-approval-badge");
+const endSessionBtnEl = document.getElementById("archer-end-session-approval-btn");
+
+function setSessionApproval(active) {
+  if (sessionBadgeEl) {
+    sessionBadgeEl.style.display = active ? "inline-flex" : "none";
+  }
+}
+
+function escapeHtml(s) {
+  if (!s) return "";
+  const d = document.createElement("div");
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+
+function addApprovalCard({ requestId, toolName, actionType, description, details, timeoutSeconds }) {
+  if (!transcriptEl) return;
+  const card = document.createElement("div");
+  card.className = "line line-assistant approval-card";
+  card.id = `approval-card-${requestId}`;
+
+  let timeLeft = timeoutSeconds || 30;
+
+  card.innerHTML = `
+    <div class="approval-header">
+      <span class="approval-icon">⚠️</span>
+      <span class="approval-title">Approval Required</span>
+      <span class="approval-countdown" id="appr-timer-${requestId}">${timeLeft}s</span>
+    </div>
+    <div class="approval-desc">${escapeHtml(description)}</div>
+    ${details ? `<div class="approval-details">${escapeHtml(details)}</div>` : ""}
+    <div class="approval-actions" id="appr-actions-${requestId}">
+      <button type="button" class="approval-btn approve-btn" data-act="approve">Approve</button>
+      <button type="button" class="approval-btn deny-btn" data-act="deny">Deny</button>
+      <button type="button" class="approval-btn session-btn" data-act="approve_session">Approve Session</button>
+    </div>
+    <div class="approval-status" id="appr-status-${requestId}" style="display:none;"></div>
+  `;
+
+  // Countdown timer
+  const timerEl = card.querySelector(`#appr-timer-${requestId}`);
+  const timer = setInterval(() => {
+    timeLeft--;
+    if (timerEl) timerEl.textContent = `${timeLeft}s`;
+    if (timeLeft <= 0) {
+      clearInterval(timer);
+    }
+  }, 1000);
+  card._approvalTimer = timer;
+
+  // Actions
+  const actionsEl = card.querySelector(`#appr-actions-${requestId}`);
+  const statusEl = card.querySelector(`#appr-status-${requestId}`);
+
+  actionsEl.addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    const act = btn.getAttribute("data-act");
+    if (!act) return;
+
+    if (card._approvalTimer) clearInterval(card._approvalTimer);
+    ArcherClient.sendApprovalResponse(requestId, act);
+
+    actionsEl.style.display = "none";
+    if (timerEl) timerEl.style.display = "none";
+    statusEl.style.display = "block";
+    if (act === "approve") {
+      statusEl.className = "approval-status status-approved";
+      statusEl.textContent = "✓ Approved";
+    } else if (act === "approve_session") {
+      statusEl.className = "approval-status status-session";
+      statusEl.textContent = "⚡ Approved for entire session";
+    } else {
+      statusEl.className = "approval-status status-denied";
+      statusEl.textContent = "✗ Denied";
+    }
+  });
+
+  transcriptEl.appendChild(card);
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+ArcherClient.on("approvalRequest", (payload) => {
+  addApprovalCard(payload);
+});
+
+ArcherClient.on("approvalTimeout", ({ requestId }) => {
+  const card = document.getElementById(`approval-card-${requestId}`);
+  if (card) {
+    if (card._approvalTimer) clearInterval(card._approvalTimer);
+    const actionsEl = card.querySelector(`#appr-actions-${requestId}`);
+    const timerEl = card.querySelector(`#appr-timer-${requestId}`);
+    const statusEl = card.querySelector(`#appr-status-${requestId}`);
+    if (actionsEl) actionsEl.style.display = "none";
+    if (timerEl) timerEl.style.display = "none";
+    if (statusEl) {
+      statusEl.style.display = "block";
+      statusEl.className = "approval-status status-denied";
+      statusEl.textContent = "⏱ Denied (timed out)";
+    }
+  }
+});
+
+ArcherClient.on("sessionApprovalState", ({ active }) => {
+  setSessionApproval(active);
+});
+
+if (endSessionBtnEl) {
+  endSessionBtnEl.addEventListener("click", () => {
+    ArcherClient.sendEndSessionApproval();
+  });
+}
+
+ArcherClient.on("hello", ({ mode, micMuted, ttsMuted, listeningState, sessionApprovalActive }) => {
   if (mode) setModeButton(mode);
   setMicButton(!!micMuted);
   setTtsButton(!!ttsMuted);
   if (listeningState) setListeningState(listeningState.state, listeningState.until);
+  if (sessionApprovalActive !== undefined) setSessionApproval(sessionApprovalActive);
 });
 ArcherClient.on("mode", setModeButton);
 ArcherClient.on("micMute", setMicButton);

@@ -203,6 +203,25 @@ class LocalTTS(TTSBackend):
             logger.error(f"Local TTS error: {e}")
             raise
 
+    def warm_up(self) -> None:
+        """
+        Synthesize sample phrases in the background at startup so Kokoro, PyTorch,
+        and CUDA / cuDNN initialize before the user's first spoken interaction.
+        Without warm-up, the first synthesis takes ~27s cold CUDA init.
+        With warm-up, subsequent syntheses take ~0.4s - 0.6s.
+        """
+        try:
+            start = time.monotonic()
+            warmup_phrases = [
+                "System online.",
+                "One moment while I look into this.",
+            ]
+            for phrase in warmup_phrases:
+                self.synthesize(phrase)
+            logger.info(f"LocalTTS warmed up in {time.monotonic() - start:.1f} s.")
+        except Exception as e:
+            logger.warning(f"LocalTTS warm-up failed (non-fatal): {type(e).__name__}: {e}")
+
     def is_available(self) -> bool:
         if self._kokoro_pipeline is not None:
             return True
@@ -297,6 +316,12 @@ class TTSService:
         except Exception as e:
             logger.error(f"All TTS backends failed: {e}")
             return None
+
+    def warm_up(self) -> None:
+        """Warm up the TTS backend in the background."""
+        warm_up = getattr(self._local, "warm_up", None)
+        if callable(warm_up):
+            warm_up()
 
     def get_filler_text(self) -> str:
         """Get a random conversational filler phrase."""

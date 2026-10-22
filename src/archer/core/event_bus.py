@@ -49,6 +49,11 @@ class EventType(str, Enum):
     AGENT_INTERVENTION = "agent.intervention"
     ACTION_COMPLETED = "agent.action_completed"
     VISUAL_QUERY = "agent.visual_query"  # camera-frame attach attempt for a visual Q&A turn, success or failure -- see core_agent.py._check_visual_query
+    TOOL_START = "tool.start"
+    TOOL_END = "tool.end"
+    APPROVAL_REQUESTED = "approval.requested"
+    APPROVAL_RESOLVED = "approval.resolved"
+    BROWSER_ACTION = "browser.action"
 
     # Toggle events
     MODE_CHANGED = "system.mode_changed"

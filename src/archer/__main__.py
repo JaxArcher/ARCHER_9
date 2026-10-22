@@ -316,6 +316,13 @@ def main() -> None:
     from archer.memory.maintenance import start_maintenance_scheduler
     start_maintenance_scheduler()
 
+    # Telegram Line (Phase 6b / Spec 10d) — long-polling bot
+    try:
+        from archer.integrations.telegram_line import get_telegram_line
+        get_telegram_line().start()
+    except Exception as e:
+        logger.debug(f"Telegram line startup skipped: {e}")
+
     # Start API Server (Phase 1 / Mobile Bridge)
     def _start_api_server():
         try:
