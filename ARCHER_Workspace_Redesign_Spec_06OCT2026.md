@@ -1499,30 +1499,144 @@ the couch.
 
 ---
 
-## 11. Phase 8 — Any desktop app inside the pane (prototype first)
+## 11. Phase 8 — ARCHER's own desk: LENNY (revised by Col, 2026-10-22)
 
-**Goal:** see and use any Windows app from the Artifacts tab.
+**Goal:** ARCHER uses Windows programs with its **own** mouse and keyboard,
+independent of Col's. Col: "I want ARCHER to be able to use these programs
+internally, using its own mouse movement independent of the rest of the
+system. So basically I can use the PC and mouse for other things while ARCHER
+works."
 
-This is the riskiest phase. Do a standalone prototype and report back before
-integrating.
+**What changed and why**
+- The first prototype captured windows on Col's own PC and posted input to
+  them (`desktop_streamer.py`, `scripts/prototype_desktop_pane/`). Many apps
+  ignore posted input, and that approach shares Col's desktop.
+- The virtual display driver failed the Phase 4 review (bundled binaries;
+  needs Windows test-signing).
+- Col has a spare PC that can stay on and be ARCHER's alone, so ARCHER gets a
+  real desk of its own.
+- Keep the prototype code as a reference. Don't build further on it.
 
-- Windows only sends keyboard input to the window in front, so apps can't
-  simply be "embedded". Proposed approach to prototype: a **virtual second
-  monitor** (an open-source virtual display driver) that isn't physically
-  shown. Apps ARCHER or Col open "in ARCHER" go to that display; the pane
-  streams it (DXGI desktop duplication or Windows Graphics Capture) and sends
-  input to it.
-- Known catch to evaluate: Windows has one mouse cursor, so while the pane is
-  being used the real cursor moves onto the virtual display. Report how
-  disruptive this is in practice.
-- The virtual display driver (open source) is **approved by Col 2026-10-21,
-  provided it passes the Phase 4 review**. It's a third-party install: it goes through the
-  Phase 4 review and Col's approval like any tool.
-- ARCHER's clicks/typing in apps go through the Phase 3 gate.
+**The machine: LENNY** (Col, 2026-10-22: "It can be left on without anyone
+using it.")
+- Windows 11 Pro 25H2 (build 26200).
+- Intel i5-10310U (4 cores / 8 threads), 40 GB RAM.
+- NVIDIA Quadro P520 (2 GB), which is too small for AI models: all the models
+  run on the main PC.
+- 1.8 TB disk.
+- Microsoft Office installed.
+- It's on the home network. A wired connection is preferred.
 
-**Acceptance (prototype):** open Notepad on the virtual display, see it live in
-a test page, type into it from the page; written findings on cursor behavior,
-latency and reliability. Integration only after Col reviews.
+**Setup on LENNY (one-time).** Antigravity writes `scripts/lenny_setup.ps1`
+and a plain-language checklist. Col copies the script to LENNY and runs it once
+as Administrator. It:
+1. **Uses Col's own Windows account on LENNY** (Col, 2026-10-22: "I'd prefer
+   ARCHER use my login"). Office is already signed in there. Turns on automatic
+   sign-in to that account at boot (Microsoft's Sysinternals Autologon), so
+   the desk comes back after a restart. Col was told this leaves LENNY's
+   account, files and browser sign-ins open to anyone at the machine. Hands
+   runs as a normal, non-elevated process.
+2. Sets no sleep, no screen lock, and no lid-close sleep,
+   with Windows Update restarts outside active hours.
+3. Installs a pinned Python and the **ARCHER Hands** service (below). The
+   service starts in Col's session at sign-in, through a scheduled task that
+   runs at logon.
+4. Adds a firewall rule: the Hands port is reachable **only from the main
+   PC's address**, on the home network only. Never from the internet.
+5. Pairs with ARCHER: LENNY shows a code, and Col types it into ARCHER once.
+   After that, every connection uses that token.
+
+Office is already signed in under Col's account, so there's nothing more to do there.
+
+**ARCHER Hands (on LENNY).** A small service that does what the main PC's
+ARCHER asks:
+- Streams the screen, as frames sent only while someone is watching or
+  ARCHER is working.
+- Mouse and keyboard on **LENNY's own** desktop (`SendInput`). It's ARCHER's
+  machine, so moving that pointer disturbs nobody.
+- The UI Automation tree: lists controls by name, role and position, and
+  invokes or sets them.
+- Office automation (Word, Excel and PowerPoint object models through COM)
+  and opening apps and files.
+- Moves files to and from ARCHER's artifacts folder.
+- **Pauses itself** if someone uses LENNY's own keyboard or mouse
+  (`GetLastInputInfo`), and tells ARCHER.
+- **Rule 11 first:** evaluate Windows-MCP, Microsoft UFO² and the Cua driver
+  as the base for Hands (licence, upkeep, whether they run fully locally with
+  no cloud model). Adopt one if it fits, and log why.
+
+**ARCHER's side (main PC)**
+- **A LENNY tab: a live video feed of LENNY's screen** (Col, 2026-10-22:
+  "a live feed of the LENNY screen as ARCHER uses it. Not a screenshot, but
+  live feed").
+  - **Live video, not refreshed screenshots.** Smooth motion, about 30 frames
+    a second whenever the screen changes, under about 200 ms behind, and
+    text sharp at the tab's size.
+  - It streams while the tab is visible, and stops when it's hidden.
+  - **Rule 11 candidates:**
+    - a VNC server on LENNY plus noVNC (MPL 2.0) in the tab;
+    - Apache Guacamole (Apache 2.0, over VNC). Not RDP: RDP takes over
+      LENNY's console session;
+    - an H.264 stream (ffmpeg's desktop-duplication capture, hardware
+      encoding on LENNY's Intel graphics; the P520 has no hardware encoder)
+      decoded in the tab with WebCodecs;
+    - WebRTC.
+    Measure frame rate and delay on the real network, pick the best, and log
+    the numbers.
+  - **Interactive.** Col can click and type in the feed to take over. ARCHER
+    pauses while he does, and resumes when he hands back.
+  - A "Working on: …" line, plus **Pause** and **Stop**, which HALT also
+    triggers.
+  - **Locked down.** The stream and its input are reachable only from the
+    main PC, on the home network, with the pairing token or password. Nothing
+    is recorded.
+- **How ARCHER operates apps, in this order:**
+  1. App automation (Office COM, files) where it exists.
+  2. UI Automation (find the control by name and role, and act on it).
+  3. **Look and click:** a screenshot goes to a local vision model on the
+     main PC, which returns the click point, and Hands clicks it. Candidates:
+     UI-TARS-1.5-7B (Apache 2.0) or a Qwen-VL model with grounding. Load it
+     only when needed and unload it after; measure VRAM next to ARCHER's
+     brain and the virtual phone, and log a question if they don't fit. No
+     pay-per-use APIs.
+- **Approvals:** every action that changes something goes through the
+  Phase 3 gate (session approval covers it), and is recorded in the Change
+  Log and on the Logs tab (a **Desk** card: connected, idle, working or
+  paused, plus the current task).
+- **Privacy:** LENNY's screen never leaves the home network, and nothing is
+  stored except the screenshots of a task that's running (kept in memory).
+
+**ARCHER's web browser moves to LENNY (Col, 2026-10-22)**
+- **Why:** it keeps web risks (downloads, hostile pages) on LENNY, away from
+  ARCHER's brain, memory and camera data on the main PC.
+- **How:**
+  - Phase 7's Playwright Chromium runs on LENNY, and ARCHER on the main PC
+    drives it over the home network through the Chrome DevTools Protocol. So
+    ARCHER still reads pages as text and clicks page elements, not pixels.
+  - The DevTools port accepts connections only from the main PC's address,
+    with authentication if available, and never from the internet. That port
+    gives full control of the browser.
+  - The browser uses **its own clean profile** on LENNY, not Col's Chrome
+    profile. It signs into a site only when Col tells it to, and keeps those
+    sign-ins.
+  - **Google Messages for web** stays pinned in that browser.
+- **What you see:** the browser shows in ARCHER's browser pane as before, and
+  it's also visible in the LENNY tab, since it runs on LENNY's screen.
+- **Fallback:** if LENNY is off or unreachable, ARCHER says so and uses the
+  local browser on the main PC (today's), and logs it on the Logs tab.
+
+**Acceptance:**
+- Col uses his own PC normally while ARCHER, on LENNY, writes a Word document
+  from a voice request, saves it, and the file appears in ARCHER's Artifacts.
+- Col watches in the DESK tab, takes over mid-task, and hands back.
+- ARCHER completes a step in a non-Office Windows app using UI Automation, and
+  a step that only the vision fallback can do.
+- After LENNY reboots, ARCHER's desk comes back by itself, with no help from
+  Col.
+- The LENNY tab shows smooth live video. Measured frame rate and delay are in
+  the worklog.
+- ARCHER browses a site on LENNY, and Col watches it live.
+- With LENNY switched off, browsing falls back to the main PC and says so.
 
 ---
 
@@ -1583,6 +1697,60 @@ coding."
    takes effect at the next restart, and it's recorded in the Change Log.
    "ARCHER, undo the last update" restores the backup.
 
+**R&D scouting: ARCHER improves its own setup (Col, 2026-10-22)**
+Col: "this is something that ARCHER should do … a part of ARCHER's internal
+R&D system … conducted occasionally, during downtime. Perhaps once a week."
+This is ARCHER's job, not a one-off for Antigravity.
+- **Runs without the GUI (Col, 2026-10-22: "The GUI does not need to be
+  running for this R&D agent to run").** The R&D agent's scheduled work (this
+  weekly scouting, and its periodic outside research) runs in a background
+  service that starts at boot, like `ArcherObserver`. Col's PC sits at the
+  Windows sign-in screen after a restart, so it can't rely on a login-time
+  start.
+  - It brings up whatever it needs itself, and shuts it down afterwards. In
+    particular, the main GPU Ollama normally starts with the tray app at
+    login, so the service runs its own GPU Ollama instance for tests.
+  - It stands down as soon as ARCHER starts ("all systems go", the launcher,
+    the web app), and frees the graphics card first.
+  - Results go to the database. They show in the R&D card and While You Were
+    Away the next time the GUI opens, and as a Telegram message if the
+    Telegram line is on.
+  - Applying anything still waits for Col's approval.
+- **When:** once a week, in downtime: overnight with the maintenance
+  scheduler, or when the observer has seen nobody for a while. If Col starts
+  using ARCHER (wake word, chat, any tab), it stops at once, puts the normal
+  setup back, and tries again the next night.
+- **Research (external):** the R&D agent looks for newer local models and
+  tools that could make ARCHER smarter or faster: brain candidates, a
+  screen-clicking model for LENNY, a coding model, and a large "deep thinker"
+  that fits in the main PC's regular memory (256 GB). Sources: model
+  libraries, release notes, GitHub. It uses ARCHER's browser on LENNY and
+  never sends Col's data.
+- **Trial:** it downloads candidates from Ollama's official library only,
+  within a disk budget (default 150 GB for trials, in `data/`). Anything from
+  elsewhere goes through the Phase 4 review first. Rejected candidates are
+  deleted.
+- **Benchmark (a fixed set, the same every week):** 20–30 real ARCHER
+  requests (time, open a site, camera questions, add a task, reasoning,
+  following ARCHER's rules), plus a task set for each specialist. It
+  measures:
+  - time to the first spoken word and to the full reply
+  - how many requests it gets right
+  - VRAM and RAM used
+  - load time (for specialists)
+  - any effect on room listening and the virtual phone
+- **The rule for a new brain:** clearly better on the requests, and no more
+  than about 1 s slower to the first word.
+- **Specialists** are loaded only when the brain calls for one ("let me think
+  harder on that") and unloaded afterwards. They never displace the brain or
+  the voice models.
+- **Report:** a short table in the R&D card (Away & Tasks), with each
+  candidate, its numbers, a verdict and a recommendation, plus a line in
+  While You Were Away.
+- **Never automatic:** switching the brain or adding a specialist
+  permanently. Col approves each one with one tap from the report. Undo
+  restores the previous setup.
+
 **Never without Col's individual approval:** changes to the approval gate,
 the security and privacy rules, `.env`, or ARCHER's own permissions. ARCHER
 never pushes to GitHub; Col pushes.
@@ -1619,7 +1787,8 @@ May be added to ARCHER's own `.venv` / `web/vendor/` without asking again:
 | Roboflow `trackers` (ByteTrack; Apache 2.0) and its `supervision` dependency, pinned version. Replaces the hand-written track matching. Approved by Col 2026-10-12. | 2b | Following people on the room camera |
 | `sherpa-onnx` 1.13.8 (+ `sherpa-onnx-core`; Apache 2.0) and its GigaSpeech keyword-spotting model (`sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01`, int8 files, Apache 2.0) in `data/models/kws`. Approved by Col 2026-10-20. | Next stage | "Hey ARCHER" / "ARCHER" wake words |
 | Tesseract OCR and Ghostscript (Windows installers, pinned versions and checksums), for `OCRmyPDF`. Approved by Col 2026-10-21. | 5 | Searchable scanned PDFs |
-| One open-source virtual display driver, if it passes the Phase 4 review. Approved by Col 2026-10-21. | 8 | Desktop apps in the pane |
+| ~~One open-source virtual display driver~~: rejected by the Phase 4 review (2026-10-22). Replaced by LENNY (spec 11). | 8 | — |
+| On LENNY: a pinned Python, ARCHER Hands and its dependencies, and Sysinternals Autologon. Approved by Col 2026-10-22 as part of the LENNY plan. A local vision model for "look and click" (e.g. UI-TARS-1.5-7B, Apache 2.0) on the main PC. | 8 | ARCHER's own desk |
 | `openpyxl` (MIT), into the document-tools environment. Approved by Col 2026-10-21. | 5 | Excel files |
 | `aiogram` (MIT), pinned version. Approved by Col 2026-10-21. | 10d | Telegram line |
 | `gridstack` 14.0.0 (MIT), stored in `web/vendor/gridstack/`. Selected per Rule 11 check (preserves persistent DOM elements so `<video>` stream and `<iframe>`s never reload on move/resize). Approved by Col 2026-10-21. | 4c | Resizable panes |

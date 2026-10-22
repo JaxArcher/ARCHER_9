@@ -54,6 +54,9 @@ READ_ONLY_TOOLS = {
     "list_artifacts",
     "list_rnd_proposals",
     "get_rnd_status",
+    "lenny_get_status",
+    "lenny_get_controls",
+    "lenny_screenshot",
 }
 
 # ARCHER's internal record mutations and new artifact creations (Spec Section 6)

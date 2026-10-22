@@ -97,6 +97,13 @@ class EventType(str, Enum):
     RND_UPDATE_APPLIED = "rnd.update_applied"
     RND_UPDATE_UNDONE = "rnd.update_undone"
 
+    # Phase 8: LENNY Desk events
+    LENNY_STATUS_CHANGED = "lenny.status_changed"
+    LENNY_TAKEOVER_START = "lenny.takeover_start"
+    LENNY_TAKEOVER_END = "lenny.takeover_end"
+    LENNY_TASK_PROGRESS = "lenny.task_progress"
+
+
 
 @dataclass
 class Event:

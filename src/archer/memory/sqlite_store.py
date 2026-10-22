@@ -738,6 +738,19 @@ class SQLiteStore:
                     restored_at TIMESTAMP
                 );
                 CREATE INDEX IF NOT EXISTS idx_rnd_backups_job_id ON rnd_backups(job_id);
+
+                CREATE TABLE IF NOT EXISTS lenny_config (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    host TEXT NOT NULL DEFAULT '',
+                    port INTEGER NOT NULL DEFAULT 8203,
+                    token TEXT NOT NULL DEFAULT '',
+                    browser_port INTEGER NOT NULL DEFAULT 9222,
+                    paired_at TIMESTAMP,
+                    last_seen_at TIMESTAMP,
+                    status TEXT NOT NULL DEFAULT 'unpaired'
+                );
+                INSERT OR IGNORE INTO lenny_config (id, host, port, token, browser_port, status)
+                VALUES (1, '', 8203, '', 9222, 'unpaired');
             """)
             try:
                 conn.execute(
@@ -4257,6 +4270,87 @@ class SQLiteStore:
                     (backup_id,),
                 )
                 return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    # --- Phase 8: LENNY Desk Storage ---
+
+    def get_lenny_config(self) -> Dict[str, Any]:
+        """Get the current LENNY connection configuration."""
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                "SELECT host, port, token, browser_port, paired_at, last_seen_at, status FROM lenny_config WHERE id = 1"
+            ).fetchone()
+            if not row:
+                return {
+                    "host": "", "port": 8203, "token": "", "browser_port": 9222,
+                    "paired_at": None, "last_seen_at": None, "status": "unpaired"
+                }
+            return {
+                "host": row[0] or "",
+                "port": row[1] or 8203,
+                "token": row[2] or "",
+                "browser_port": row[3] or 9222,
+                "paired_at": row[4],
+                "last_seen_at": row[5],
+                "status": row[6] or "unpaired",
+            }
+        finally:
+            conn.close()
+
+    def update_lenny_config(
+        self,
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+        token: Optional[str] = None,
+        browser_port: Optional[int] = None,
+        status: Optional[str] = None,
+        paired: bool = False,
+    ) -> Dict[str, Any]:
+        """Update LENNY configuration parameters."""
+        conn = self._get_connection()
+        try:
+            current = self.get_lenny_config()
+            new_host = host if host is not None else current["host"]
+            new_port = port if port is not None else current["port"]
+            new_token = token if token is not None else current["token"]
+            new_bport = browser_port if browser_port is not None else current["browser_port"]
+            new_status = status if status is not None else current["status"]
+
+            with conn:
+                if paired:
+                    conn.execute(
+                        """
+                        UPDATE lenny_config
+                        SET host = ?, port = ?, token = ?, browser_port = ?, status = ?,
+                            paired_at = CURRENT_TIMESTAMP, last_seen_at = CURRENT_TIMESTAMP
+                        WHERE id = 1
+                        """,
+                        (new_host, new_port, new_token, new_bport, new_status),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE lenny_config
+                        SET host = ?, port = ?, token = ?, browser_port = ?, status = ?
+                        WHERE id = 1
+                        """,
+                        (new_host, new_port, new_token, new_bport, new_status),
+                    )
+            return self.get_lenny_config()
+        finally:
+            conn.close()
+
+    def touch_lenny_heartbeat(self, status: str = "connected") -> None:
+        """Update last seen timestamp for LENNY."""
+        conn = self._get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE lenny_config SET last_seen_at = CURRENT_TIMESTAMP, status = ? WHERE id = 1",
+                    (status,),
+                )
         finally:
             conn.close()
 

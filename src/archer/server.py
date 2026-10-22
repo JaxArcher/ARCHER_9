@@ -603,6 +603,84 @@ async def undo_rnd_update_endpoint(payload: dict = None):
     return res
 
 
+# --- Phase 8: LENNY Desk Endpoints (Spec Section 11) ---
+
+@app.get("/api/lenny/status")
+async def get_lenny_status_endpoint():
+    """Return LENNY connection status, current task, takeover state, and browser host."""
+    from archer.lenny.lenny_client import get_lenny_client
+    from archer.tools.pc_control import get_pc_controller
+    client = get_lenny_client()
+    status_data = client.get_status()
+    pc = get_pc_controller()
+    status_data["browser_host"] = pc.get_browser_host()
+    return status_data
+
+
+@app.post("/api/lenny/pair")
+async def pair_lenny_endpoint(payload: dict):
+    """Pair Main PC ARCHER with Hands service on LENNY using 6-digit code."""
+    from archer.lenny.lenny_client import get_lenny_client
+    client = get_lenny_client()
+    code = (payload.get("pairing_code") or "").strip()
+    host = (payload.get("host") or "").strip() or None
+    port = payload.get("port")
+    if not code:
+        raise HTTPException(status_code=400, detail="Pairing code is required")
+    try:
+        res = client.pair(pairing_code=code, host=host, port=port)
+        _broadcast_ws({"type": "lenny_status", **client.get_status()})
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/lenny/task")
+async def set_lenny_task_endpoint(payload: dict):
+    """Set active task or status on LENNY."""
+    from archer.lenny.lenny_client import get_lenny_client
+    client = get_lenny_client()
+    task = payload.get("task", "")
+    status = payload.get("status", "working")
+    res = client.set_task(task=task, status=status)
+    _broadcast_ws({"type": "lenny_status", **client.get_status()})
+    return res
+
+
+@app.post("/api/lenny/control")
+async def control_lenny_endpoint(payload: dict):
+    """Control execution state on LENNY (pause, resume, stop)."""
+    from archer.lenny.lenny_client import get_lenny_client
+    client = get_lenny_client()
+    action = payload.get("action", "pause")
+    if action == "pause":
+        res = client.set_task(task=client.current_task, status="paused")
+    elif action == "resume":
+        res = client.set_task(task=client.current_task, status="working")
+    elif action == "stop":
+        res = client.set_task(task="", status="idle")
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown action {action}")
+    _broadcast_ws({"type": "lenny_status", **client.get_status()})
+    return res
+
+
+@app.get("/api/lenny/files")
+async def list_lenny_artifacts_endpoint():
+    """List synced artifacts downloaded from LENNY."""
+    repo_root = Path(__file__).resolve().parents[2]
+    art_dir = repo_root / "data" / "artifacts"
+    files = []
+    if art_dir.exists():
+        for p in art_dir.glob("Lenny*.*"):
+            files.append({
+                "name": p.name,
+                "size": p.stat().st_size,
+                "modified": p.stat().st_mtime,
+            })
+    return {"files": sorted(files, key=lambda x: x["modified"], reverse=True)}
+
+
 # --- Browser client event bridge ---
 # Forwards the internal event bus (archer.core.event_bus — the same one
 # the PyQt6 ConversationPanel subscribes to, see gui/conversation.py) to
@@ -897,6 +975,14 @@ _status_board_state: dict[str, dict[str, Any]] = {
         "since": _time.time(),
         "is_error": False,
     },
+    "desk": {
+        "name": "Desk (LENNY)",
+        "state": "Unpaired",
+        "dot": "gray",
+        "desc": "Unpaired | Browser on Main PC",
+        "since": _time.time(),
+        "is_error": False,
+    },
 }
 
 _last_board_broadcast = 0.0
@@ -1159,6 +1245,30 @@ def _status_board_monitor_loop() -> None:
             except Exception:
                 pass
 
+            try:
+                from archer.lenny.lenny_client import get_lenny_client
+                from archer.tools.pc_control import get_pc_controller
+                lenny = get_lenny_client()
+                pc = get_pc_controller()
+                b_host = pc.get_browser_host()
+                if not lenny.is_configured():
+                    _update_status_board("desk", "Unpaired", f"Unpaired | Browser on {b_host}", dot="gray")
+                else:
+                    st = lenny.get_status(timeout=1.0)
+                    if st.get("online"):
+                        desk_status = st.get("status", "idle")
+                        task = st.get("current_task", "")
+                        if st.get("takeover_active"):
+                            _update_status_board("desk", "Paused", f"User Takeover Active | Browser on {b_host}", dot="amber")
+                        elif desk_status == "working":
+                            _update_status_board("desk", "Working", f"Working: {task or 'active'} | Browser on {b_host}", dot="amber")
+                        else:
+                            _update_status_board("desk", "Idle", f"Connected & Idle | Browser on {b_host}", dot="green")
+                    else:
+                        _update_status_board("desk", "Offline", f"Offline | Browser on {b_host}", dot="red", is_error=True)
+            except Exception:
+                pass
+
             if _ws_clients:
                 _broadcast_ws({"type": "logs_status_board", "board": _status_board_state})
 
@@ -1278,6 +1388,32 @@ def _register_status_line_bridge() -> None:
             _log_activity("Browser", f"🌐 Browser opened: {title or url}")
 
     bus.subscribe(EventType.BROWSER_ACTION, _on_browser_action)
+
+    def _on_lenny_status(e: Event) -> None:
+        st = e.data.get("status", "")
+        task = e.data.get("task", "")
+        _log_activity("Desk", f"🖥️ LENNY desk status: {st} ({task or 'no active task'})")
+        _broadcast_ws({"type": "lenny_status", "status": st, "task": task})
+
+    def _on_lenny_takeover(e: Event) -> None:
+        active = e.type == EventType.LENNY_TAKEOVER_START
+        if active:
+            _log_activity("Desk", "✋ Physical takeover detected on LENNY (paused)")
+        else:
+            _log_activity("Desk", "✋ Physical takeover ended on LENNY")
+        _broadcast_ws({"type": "lenny_takeover", "active": active})
+
+    def _on_lenny_task(e: Event) -> None:
+        task = e.data.get("task", "")
+        st = e.data.get("status", "working")
+        if task:
+            _log_activity("Desk", f"⚙️ LENNY task: {task}")
+        _broadcast_ws({"type": "lenny_status", "status": st, "task": task})
+
+    bus.subscribe(EventType.LENNY_STATUS_CHANGED, _on_lenny_status)
+    bus.subscribe(EventType.LENNY_TAKEOVER_START, _on_lenny_takeover)
+    bus.subscribe(EventType.LENNY_TAKEOVER_END, _on_lenny_takeover)
+    bus.subscribe(EventType.LENNY_TASK_PROGRESS, _on_lenny_task)
 
 
 _register_status_line_bridge()
@@ -2261,6 +2397,69 @@ async def _build_system_snapshot() -> dict:
             "url": f"http://{__import__('archer.ipad_server', fromlist=['get_local_lan_ip']).get_local_lan_ip()}:{config.ipad_port}",
         })(),
     }
+
+
+@app.websocket("/ws/lenny_stream")
+async def ws_lenny_stream_proxy(websocket: WebSocket):
+    """
+    Live video feed & interactive input relay for LENNY (Spec Section 11).
+    Relays ~30 FPS screen stream from LENNY Hands service to browser frontend,
+    and forwards interactive user input (mouse/keyboard takeover) upstream to LENNY.
+    """
+    await websocket.accept()
+    from archer.lenny.lenny_client import get_lenny_client
+    client = get_lenny_client()
+
+    if not client.host or not client.token:
+        await websocket.send_text(json.dumps({
+            "type": "status",
+            "status": "unpaired",
+            "message": "LENNY is not paired or configured yet.",
+        }))
+        await websocket.close(code=4000, reason="Unpaired")
+        return
+
+    lenny_ws_url = client.get_stream_ws_url()
+    import websockets
+
+    try:
+        async with websockets.connect(lenny_ws_url, ping_interval=10, ping_timeout=5) as upstream:
+            logger.info(f"[ServerWS] Connected proxy stream to LENNY at {client.host}:{client.port}")
+            client_active = True
+
+            async def client_to_lenny():
+                nonlocal client_active
+                try:
+                    while client_active:
+                        data = await websocket.receive_text()
+                        await upstream.send(data)
+                except Exception:
+                    client_active = False
+
+            async def lenny_to_client():
+                nonlocal client_active
+                try:
+                    while client_active:
+                        frame_data = await upstream.recv()
+                        await websocket.send_text(frame_data)
+                except Exception:
+                    client_active = False
+
+            t1 = asyncio.create_task(client_to_lenny())
+            t2 = asyncio.create_task(lenny_to_client())
+            await asyncio.gather(t1, t2, return_exceptions=True)
+
+    except Exception as e:
+        logger.warning(f"[ServerWS] LENNY stream proxy connection error: {e}")
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "status",
+                "status": "offline",
+                "message": f"LENNY is unreachable: {e}",
+            }))
+            await websocket.close()
+        except Exception:
+            pass
 
 
 def start_server(host: str = None, port: int = None):

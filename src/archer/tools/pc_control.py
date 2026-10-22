@@ -72,6 +72,7 @@ class PCController:
         self._active_page = None
         self._active_page_idx = 0
         self._cdp_session = None
+        self._browser_host = "Disconnected"
 
         # Screencasting & interaction state
         self._screencast_active = False
@@ -296,7 +297,7 @@ class PCController:
     # ------------------------------------------------------------------
 
     def _ensure_browser_impl(self) -> bool:
-        """Ensure Playwright persistent browser context is launched."""
+        """Ensure Playwright persistent browser context is launched (LENNY first, Main PC fallback)."""
         if self._browser_context is not None:
             return True
         if self._playwright is None:
@@ -306,28 +307,57 @@ class PCController:
             from archer.config import get_config
             cfg = get_config()
 
-            profile_dir = Path(os.environ.get("ARCHER_BROWSER_PROFILE_DIR", str(cfg.data_dir / "browser_profile"))).resolve()
-            profile_dir.mkdir(parents=True, exist_ok=True)
+            # Attempt to connect to LENNY Chromium first (Spec Section 11)
+            connected_to_lenny = False
+            if getattr(cfg, "lenny_enabled", True):
+                try:
+                    from archer.lenny.lenny_client import get_lenny_client
+                    lenny = get_lenny_client()
+                    if lenny.is_configured() and lenny.is_online(timeout=1.2):
+                        lenny.start_browser(port=lenny.browser_port)
+                        cdp_url = f"http://{lenny.host}:{lenny.browser_port}"
+                        logger.info(f"[PCController] Connecting to Chromium on LENNY over CDP: {cdp_url}")
+                        self._browser = self._playwright.chromium.connect_over_cdp(cdp_url, timeout=3000)
+                        if self._browser.contexts:
+                            self._browser_context = self._browser.contexts[0]
+                        else:
+                            self._browser_context = self._browser.new_context(viewport={"width": 1280, "height": 800})
+                        self._browser_host = "LENNY"
+                        connected_to_lenny = True
+                        logger.info("[PCController] Successfully connected to Playwright browser on LENNY.")
+                except Exception as e:
+                    logger.warning(f"[PCController] LENNY is offline or unreachable ({e}). Falling back to local browser on Main PC.")
+                    self._bus.publish(Event(
+                        type=EventType.BROWSER_ACTION,
+                        data={"action": "fallback", "message": "LENNY unreachable — using local browser fallback on Main PC", "host": "Main PC"}
+                    ))
+                    connected_to_lenny = False
 
-            self._browser_off_screen = not getattr(cfg, "browser_on_screen", False)
-            if not self._browser_off_screen:
-                args = ["--start-maximized"]
-            else:
-                args = [
-                    "--window-position=12000,12000",
-                    "--window-size=1280,800",
-                    "--disable-features=CalculateNativeWinOcclusion",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-renderer-backgrounding",
-                ]
+            if not connected_to_lenny:
+                profile_dir = Path(os.environ.get("ARCHER_BROWSER_PROFILE_DIR", str(cfg.data_dir / "browser_profile"))).resolve()
+                profile_dir.mkdir(parents=True, exist_ok=True)
 
-            self._browser_context = self._playwright.chromium.launch_persistent_context(
-                user_data_dir=str(profile_dir),
-                headless=False,
-                args=args,
-                viewport={"width": 1280, "height": 800},
-            )
-            self._browser = getattr(self._browser_context, "browser", self._browser_context)
+                self._browser_off_screen = not getattr(cfg, "browser_on_screen", False)
+                if not self._browser_off_screen:
+                    args = ["--start-maximized"]
+                else:
+                    args = [
+                        "--window-position=12000,12000",
+                        "--window-size=1280,800",
+                        "--disable-features=CalculateNativeWinOcclusion",
+                        "--disable-backgrounding-occluded-windows",
+                        "--disable-renderer-backgrounding",
+                    ]
+
+                self._browser_context = self._playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(profile_dir),
+                    headless=False,
+                    args=args,
+                    viewport={"width": 1280, "height": 800},
+                )
+                self._browser = getattr(self._browser_context, "browser", self._browser_context)
+                self._browser_host = "Main PC"
+                logger.info(f"Playwright persistent browser launched locally (profile: {profile_dir}).")
 
             pages = self._browser_context.pages
             if not pages:
@@ -345,7 +375,6 @@ class PCController:
                     logger.debug(f"Initial navigation to Messages: {e}")
 
             self._attach_cdp_impl(page)
-            logger.info(f"Playwright persistent browser launched (profile: {profile_dir}).")
             return True
         except Exception as e:
             logger.error(f"Browser launch failed: {e}")
@@ -413,6 +442,10 @@ class PCController:
     # ------------------------------------------------------------------
     # Public Browser Controls & CDP Screencast API
     # ------------------------------------------------------------------
+
+    def get_browser_host(self) -> str:
+        """Get the current host hosting ARCHER's browser ('LENNY' or 'Main PC')."""
+        return self._browser_host
 
     def ensure_browser(self) -> bool:
         """Ensure browser is open and running."""

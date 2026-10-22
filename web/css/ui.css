@@ -1193,6 +1193,280 @@ body.grid-stack-dragging iframe {
   word-break: break-all;
 }
 
+/* --- Section 11: LENNY Desk Tab Styles --- */
+#tab-lenny {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  padding: 0;
+}
+
+.lenny-container-card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  border: none;
+  background: rgba(2, 8, 16, 0.95);
+  overflow: hidden;
+}
+
+.lenny-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 16px;
+  background: rgba(5, 20, 32, 0.85);
+  border-bottom: 1px solid rgba(151, 229, 244, 0.2);
+  gap: 12px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.lenny-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.lenny-task-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.lenny-task-label {
+  color: #7fd9ff;
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+.lenny-task-text {
+  color: #ffffff;
+  font-weight: 500;
+  max-width: 320px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stream-metric {
+  background: rgba(5, 20, 32, 0.8);
+  border: 1px solid rgba(151, 229, 244, 0.25);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #4dffb8;
+  font-family: Consolas, monospace;
+}
+
+.lenny-btn {
+  background: transparent;
+  border: 1px solid rgba(151, 229, 244, 0.4);
+  color: #c9f6ff;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.lenny-btn:hover {
+  border-color: #53e8ff;
+  background: rgba(83, 232, 255, 0.1);
+}
+
+.lenny-btn.btn-primary {
+  border-color: #4dffb8;
+  color: #4dffb8;
+}
+
+.lenny-btn.btn-primary:hover {
+  background: rgba(77, 255, 184, 0.15);
+}
+
+.lenny-btn.btn-danger {
+  border-color: rgba(255, 77, 77, 0.6);
+  color: #ff9d9d;
+}
+
+.lenny-btn.btn-danger:hover {
+  border-color: #ff4d4d;
+  background: rgba(255, 77, 77, 0.15);
+}
+
+.lenny-takeover-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(255, 184, 77, 0.2);
+  border-bottom: 1px solid rgba(255, 184, 77, 0.4);
+  padding: 6px 12px;
+  color: #ffb84d;
+  font-size: 12px;
+  font-weight: 600;
+  animation: pulseTakeover 2s infinite ease-in-out;
+}
+
+@keyframes pulseTakeover {
+  0%, 100% { opacity: 0.9; }
+  50% { opacity: 0.6; }
+}
+
+.lenny-viewport-wrapper {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000000;
+}
+
+.lenny-canvas {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  cursor: crosshair;
+  outline: none;
+  box-shadow: 0 0 20px rgba(0, 0, 0, 0.8);
+}
+
+.lenny-canvas:focus {
+  outline: 2px solid rgba(83, 232, 255, 0.4);
+}
+
+.lenny-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(2, 8, 16, 0.95);
+  z-index: 10;
+}
+
+.lenny-placeholder-content {
+  max-width: 460px;
+  text-align: center;
+  padding: 24px;
+}
+
+.lenny-desk-icon {
+  font-size: 42px;
+  margin-bottom: 8px;
+  opacity: 0.85;
+}
+
+.lenny-placeholder h3 {
+  margin: 0 0 8px 0;
+  color: #53e8ff;
+  font-size: 18px;
+}
+
+#lenny-placeholder-detail {
+  font-size: 13px;
+  opacity: 0.75;
+  line-height: 1.45;
+  margin-bottom: 16px;
+}
+
+.lenny-pairing-box {
+  background: rgba(10, 41, 64, 0.6);
+  border: 1px solid rgba(151, 229, 244, 0.25);
+  border-radius: 8px;
+  padding: 16px;
+  margin: 16px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pairing-field {
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.pairing-field label {
+  color: #7fd9ff;
+  font-weight: 500;
+}
+
+.lenny-input {
+  background: rgba(2, 8, 16, 0.8);
+  border: 1px solid rgba(151, 229, 244, 0.35);
+  color: #c9f6ff;
+  border-radius: 4px;
+  padding: 7px 10px;
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.lenny-input:focus {
+  border-color: #53e8ff;
+  outline: none;
+}
+
+.lenny-error-text {
+  color: #ff6b6b;
+  font-size: 12px;
+}
+
+.lenny-setup-hint {
+  font-size: 11px;
+  opacity: 0.7;
+  line-height: 1.4;
+}
+
+.lenny-setup-hint code {
+  color: #53e8ff;
+  background: rgba(5, 20, 32, 0.7);
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.lenny-footer-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 16px;
+  background: rgba(5, 20, 32, 0.85);
+  border-top: 1px solid rgba(151, 229, 244, 0.15);
+  font-size: 11px;
+  color: rgba(201, 246, 255, 0.8);
+  flex-shrink: 0;
+}
+
+.lenny-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lenny-footer-sep {
+  opacity: 0.3;
+}
+
+.lenny-artifact-link {
+  color: #53e8ff;
+  text-decoration: none;
+  margin-left: 6px;
+}
+
+.lenny-artifact-link:hover {
+  text-decoration: underline;
+}
+
 /* --- Section 5e: Logs Tab Status Board, Controls & Activity Feed --- */
 #tab-logs {
   display: flex;

@@ -376,3 +376,38 @@ Col uses ARCHER from his 1st generation iPad Air (iOS 12 / Safari 12) from the c
 - `POST /api/ipad/approvals/respond`: Responds (`approve`, `deny`, `approve_session`).
 - `GET /api/ipad/tts`: WAV audio stream for spoken replies.
 - `WebSocket /ws/ipad?token=...`: Real-time bidirectional event bridge (chat, approvals, tasks).
+
+## ARCHER's Dedicated Desk: LENNY (Phase 8 / Spec Section 11)
+
+ARCHER uses its own dedicated desk machine (LENNY, Windows 11 Pro PC on home network with Office installed) so ARCHER has its own independent mouse, keyboard, and browser, without disturbing Col on the Main PC.
+
+### Architecture & Security
+- **Hands Service on LENNY:** Runs non-elevated on `http://<LENNY_IP>:8203` in Col's session.
+- **Firewall Restriction:** Inbound TCP 8203 (Hands) and TCP 9222 (Playwright CDP) are restricted exclusively to Main PC (`192.168.4.41`).
+- **One-Time Pairing:** 6-digit numeric pairing code displayed on LENNY during setup exchanges for persistent bearer token.
+- **Takeover Watchdog:** Uses `GetLastInputInfo` on LENNY console. Any physical mouse/keyboard activity automatically pauses Hands and notifies ARCHER.
+- **Privacy:** Desktop frames and screen input never leave the home network; nothing is recorded.
+
+### Browser Relocation & Fallback
+- ARCHER's Playwright web browser runs on LENNY in a clean profile (`C:\archer_lenny\browser_profile`), driven over CDP (`port 9222`) from Main PC.
+- Pinned Google Messages on Tab 0.
+- Automatic Fallback: If LENNY is offline or unreachable, ARCHER falls back to the local browser on Main PC and logs the fallback on the Logs tab.
+
+### LENNY Workspace Tab (`#tab-lenny`)
+- Smooth ~30 FPS live video stream rendered to HTML5 `<canvas>`.
+- Frame rate (FPS) and network latency (ms) counters.
+- Streaming activates only while tab is visible and stops when hidden.
+- Bidirectional interactive takeover: clicking or typing in the canvas forwards physical input to LENNY via `SendInput`.
+- Task tracking line ("Working on: ...") and Pause, Resume, Stop controls.
+- Synced artifacts viewer for Word documents and Excel sheets generated via Office COM on LENNY.
+
+### Status Board Desk Card
+- Added `desk` card to Logs tab Status Board tracking connection status (`Connected`, `Working`, `Paused`, `Offline`, `Unpaired`), active task, and active browser host (`LENNY` or `Main PC`).
+
+### Endpoints & WebSockets (Main PC)
+- `GET /api/lenny/status`: Current connection status, active task, takeover state, and browser host.
+- `POST /api/lenny/pair`: Body `{"host": "<ip>", "pairing_code": "<code>"}`.
+- `POST /api/lenny/task`: Body `{"task": "<name>", "status": "working"}`.
+- `POST /api/lenny/control`: Body `{"action": "pause" | "resume" | "stop"}`.
+- `GET /api/lenny/files`: Synced artifacts created on LENNY and downloaded to Main PC.
+- `WebSocket /ws/lenny_stream`: Low-latency WebSocket relay bridging screen frames from LENNY to the browser client and user input upstream to LENNY.

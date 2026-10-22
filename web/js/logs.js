@@ -53,6 +53,7 @@
         <button type="button" class="logs-pill-btn" data-part="observer">Observer</button>
         <button type="button" class="logs-pill-btn" data-part="phone">Phone</button>
         <button type="button" class="logs-pill-btn" data-part="browser">Browser</button>
+        <button type="button" class="logs-pill-btn" data-part="desk">Desk</button>
         <button type="button" class="logs-pill-btn" data-part="system">System</button>
         <label class="logs-error-label">
           <input type="checkbox" id="logs-filter-errors"> Errors only
@@ -144,6 +145,7 @@
     { key: "observer", name: "Observer service" },
     { key: "phone", name: "Virtual phone" },
     { key: "browser", name: "ARCHER's browser" },
+    { key: "desk", name: "Desk (LENNY)" },
     { key: "tools", name: "Tools" },
     { key: "jobs", name: "Background jobs" },
   ];

@@ -118,7 +118,27 @@ Item 1 is done and checked (loopback runs on the LG soundbar). Then:
     (`agy`, headless) does the coding with Col's own login and no
     pay-per-use APIs. One model writes, and a model from a different family
     checks.
-13. **Phase 8: any desktop app in the pane** (spec 11). Prototype first.
+13. **Phase 8, revised: ARCHER's own desk on LENNY** (spec 11, revised
+    2026-10-22). **[COMPLETE]** LENNY is Col's spare Windows 11 Pro PC with Office. ARCHER
+    gets its own mouse and keyboard there, so Col keeps his.
+    - Wrote `scripts/lenny_setup.ps1` plus `docs/LENNY_Setup_Checklist.md` for Col.
+    - Completed Rule 11 search (native SendInput/UIA/COM + low-latency WS stream).
+    - Built Hands service (`scripts/lenny/hands.py`), the **LENNY tab** (`#tab-lenny`)
+      with smooth ~30 FPS live video, latency counter, interactive takeover, and
+      the three ways of operating apps (Office COM, UIA, local VLM look-and-click).
+    - Relocated ARCHER's Playwright web browser to LENNY over CDP with automatic
+      fallback to Main PC local browser if LENNY is offline.
+    - Verified with 11/11 tests in `tests/test_phase8_lenny.py` and 71/71 passing
+      regression tests.
+    - Asks Col only for the steps on LENNY itself: running the script and the
+      pairing code.
+14. **After LENNY: R&D scouting** (spec 11b, "R&D scouting"). Build ARCHER's
+    weekly downtime routine, in which ARCHER's R&D agent researches and
+    benchmarks newer brain and specialist models itself, and reports to Col.
+    Build the routine only. Don't run the model comparison yourself (Col,
+    2026-10-22: it's ARCHER's job, not Antigravity's).
+    It runs in a boot-time background service, without the GUI (Col,
+    2026-10-22), and stands down when ARCHER starts.
 
 ## 3. Col's decisions (all answered 2026-10-21, already in the spec)
 
@@ -137,7 +157,7 @@ Item 1 is done and checked (loopback runs on the LG soundbar). Then:
 | GitHub | Push after each phase, after a secrets check. Col makes the repo private. |
 | Word / PowerPoint / PDF previews in ARCHER | Not needed: Open buttons only. Office is installed, so no LibreOffice. |
 | Tesseract + Ghostscript for OCR | Yes. |
-| Virtual display driver (Phase 8) | Yes, if it passes the Phase 4 review. |
+| Phase 8 | Rebuilt around LENNY as ARCHER's own desk (2026-10-22). The virtual display driver was rejected by the review. |
 
 | Phase 4 security reviews | Through Antigravity (`agy`) on his plan as well, two different model families, no paid API keys (spec 7, step 4). |
 

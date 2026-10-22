@@ -342,6 +342,13 @@ class ArcherConfig(BaseSettings):
         except (ValueError, TypeError):
             return None
 
+    # --- LENNY Desk (Phase 8 / Spec 11) ---
+    lenny_host: str = Field(default="", alias="ARCHER_LENNY_HOST")
+    lenny_port: int = Field(default=8203, alias="ARCHER_LENNY_PORT")
+    lenny_token: str = Field(default="", alias="ARCHER_LENNY_TOKEN")
+    lenny_browser_port: int = Field(default=9222, alias="ARCHER_LENNY_BROWSER_PORT")
+    lenny_enabled: bool = Field(default=True, alias="ARCHER_LENNY_ENABLED")
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

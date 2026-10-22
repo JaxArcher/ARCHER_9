@@ -33,6 +33,8 @@
     android: "android",
     phone: "android",
     apps: "android",
+    lenny: "lenny",
+    desk: "lenny",
   };
 
   let activeTabName = "";
