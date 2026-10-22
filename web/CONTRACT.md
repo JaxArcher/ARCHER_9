@@ -172,6 +172,9 @@ doesn't require starting it by hand in a separate window.
 | `terminal_output`      | `chunk`                         | Phase 6 (Spec 9): Live streaming terminal chunk from PowerShell PTY |
 | `terminal_history`     | `history`                       | Phase 6 (Spec 9): Replayed history buffer on connection/request |
 | `terminal_restarted`   | —                               | Phase 6 (Spec 9): Notification that PowerShell session restarted |
+| `tools_registry_list`  | `tools`                         | Phase 4 (Spec 7): Candidate tool pool entries from tools_registry table |
+| `tools_propose_result` | `result`                        | Phase 4 (Spec 7): Result of candidate tool proposal and review |
+| `tools_uninstall_result`| `result`                       | Phase 4 (Spec 7): Result of candidate tool uninstallation |
 
 ### Dedicated Binary Stream WebSocket (`/ws/android`)
 
@@ -225,6 +228,9 @@ To guarantee that high-framerate video frames never delay chat, voice state, or 
 {"type": "terminal_resize", "cols": 80, "rows": 24} // Phase 6: resize xterm dimensions
 {"type": "terminal_restart"}                       // Phase 6: restart PowerShell session
 {"type": "terminal_get_history"}                   // Phase 6: fetch buffered terminal history
+{"type": "tools_get_registry"}                     // Phase 4: fetch candidate tools registry
+{"type": "tools_propose", "repo_url": "https://github.com/...", "commit_hash": null, "name": "my_tool"} // Phase 4
+{"type": "tools_uninstall", "name": "my_tool"}      // Phase 4: uninstall tool
 ```
 
 `text_input` bypasses voice entirely and goes straight to the active

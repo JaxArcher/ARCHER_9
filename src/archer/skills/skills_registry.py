@@ -143,10 +143,16 @@ def parse_tool_section(section: str, category: str) -> Dict[str, Any]:
 _SKILLS_CACHE = None
 
 
-def get_all_tools() -> List[Dict[str, Any]]:
+def invalidate_skills_cache() -> None:
+    """Clear cached skills so newly added/removed *_SKILL.md files are re-scanned."""
+    global _SKILLS_CACHE
+    _SKILLS_CACHE = None
+
+
+def get_all_tools(refresh: bool = False) -> List[Dict[str, Any]]:
     """Get all tool schemas from all skills."""
     global _SKILLS_CACHE
-    if _SKILLS_CACHE is None:
+    if _SKILLS_CACHE is None or refresh:
         _SKILLS_CACHE = load_all_skills()
     return _SKILLS_CACHE['tools']
 
@@ -178,8 +184,14 @@ def get_all_tools_ollama_format() -> List[Dict[str, Any]]:
 
 
 def get_tool_category(tool_name: str) -> str:
-    """Get the category for a specific tool."""
+    """Get the category for a specific tool with automatic cache refresh if missing."""
     global _SKILLS_CACHE
     if _SKILLS_CACHE is None:
         _SKILLS_CACHE = load_all_skills()
-    return _SKILLS_CACHE['categories'].get(tool_name, 'general')
+    
+    cat = _SKILLS_CACHE['categories'].get(tool_name)
+    if cat is None:
+        # Check if cache is stale from dynamic tool installation
+        _SKILLS_CACHE = load_all_skills()
+        cat = _SKILLS_CACHE['categories'].get(tool_name, 'general')
+    return cat

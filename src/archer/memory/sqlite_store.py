@@ -667,6 +667,23 @@ class SQLiteStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_change_log_timestamp ON change_log(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_change_log_status ON change_log(approval_status);
+
+                -- Phase 4: Tool Pool Registry (Spec Section 7)
+                CREATE TABLE IF NOT EXISTS tools_registry (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    repo_url TEXT NOT NULL,
+                    commit_hash TEXT NOT NULL,
+                    install_folder TEXT NOT NULL,
+                    env_path TEXT NOT NULL,
+                    review_results TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    reason TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_tools_registry_status ON tools_registry(status);
+                CREATE INDEX IF NOT EXISTS idx_tools_registry_name ON tools_registry(name);
             """)
             try:
                 conn.execute(
@@ -3654,6 +3671,152 @@ class SQLiteStore:
                     "approval_status": r[4],
                     "tool_name": r[5],
                     "details": r[6],
+                }
+                for r in rows
+            ]
+        finally:
+            conn.close()
+
+    # --- Phase 4 Tool Pool Registry (Spec Section 7) ---
+
+    def register_tool_candidate(
+        self,
+        name: str,
+        repo_url: str,
+        commit_hash: str,
+        install_folder: str = "",
+        env_path: str = "",
+        review_results: str = "{}",
+        status: str = "proposed",
+        reason: str = "",
+    ) -> int:
+        """Register a new candidate tool in tools_registry."""
+        conn = self._get_connection()
+        try:
+            with conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO tools_registry
+                    (name, repo_url, commit_hash, install_folder, env_path, review_results, status, reason, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    ON CONFLICT(name) DO UPDATE SET
+                    repo_url=excluded.repo_url,
+                    commit_hash=excluded.commit_hash,
+                    install_folder=excluded.install_folder,
+                    env_path=excluded.env_path,
+                    review_results=excluded.review_results,
+                    status=excluded.status,
+                    reason=excluded.reason,
+                    updated_at=datetime('now')
+                    """,
+                    (name, repo_url, commit_hash, install_folder, env_path, review_results, status, reason),
+                )
+                return cur.lastrowid
+        finally:
+            conn.close()
+
+    def update_tool_candidate(
+        self,
+        tool_id_or_name: int | str,
+        status: str,
+        reason: str | None = None,
+        review_results: str | None = None,
+        install_folder: str | None = None,
+        env_path: str | None = None,
+    ) -> bool:
+        """Update tool status and details in tools_registry."""
+        conn = self._get_connection()
+        try:
+            with conn:
+                updates = ["status = ?", "updated_at = datetime('now')"]
+                params: list[Any] = [status]
+                if reason is not None:
+                    updates.append("reason = ?")
+                    params.append(reason)
+                if review_results is not None:
+                    updates.append("review_results = ?")
+                    params.append(review_results)
+                if install_folder is not None:
+                    updates.append("install_folder = ?")
+                    params.append(install_folder)
+                if env_path is not None:
+                    updates.append("env_path = ?")
+                    params.append(env_path)
+
+                if isinstance(tool_id_or_name, int) or (isinstance(tool_id_or_name, str) and tool_id_or_name.isdigit()):
+                    where = "id = ?"
+                    params.append(int(tool_id_or_name))
+                else:
+                    where = "name = ?"
+                    params.append(str(tool_id_or_name))
+
+                cur = conn.execute(
+                    f"UPDATE tools_registry SET {', '.join(updates)} WHERE {where}",
+                    tuple(params),
+                )
+                return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def get_tool_candidate(self, tool_id_or_name: int | str) -> dict | None:
+        """Fetch a single tool from tools_registry by ID or name."""
+        conn = self._get_connection()
+        try:
+            if isinstance(tool_id_or_name, int) or (isinstance(tool_id_or_name, str) and tool_id_or_name.isdigit()):
+                where = "id = ?"
+                param = int(tool_id_or_name)
+            else:
+                where = "name = ?"
+                param = str(tool_id_or_name)
+
+            row = conn.execute(
+                f"SELECT id, name, repo_url, commit_hash, install_folder, env_path, review_results, status, reason, created_at, updated_at FROM tools_registry WHERE {where}",
+                (param,),
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0],
+                "name": row[1],
+                "repo_url": row[2],
+                "commit_hash": row[3],
+                "install_folder": row[4],
+                "env_path": row[5],
+                "review_results": row[6],
+                "status": row[7],
+                "reason": row[8],
+                "created_at": row[9],
+                "updated_at": row[10],
+            }
+        finally:
+            conn.close()
+
+    def list_tool_candidates(self, status: str | None = None) -> list[dict]:
+        """List tools from tools_registry, optionally filtered by status."""
+        conn = self._get_connection()
+        try:
+            if status:
+                rows = conn.execute(
+                    "SELECT id, name, repo_url, commit_hash, install_folder, env_path, review_results, status, reason, created_at, updated_at FROM tools_registry WHERE status = ? ORDER BY id DESC",
+                    (status,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, name, repo_url, commit_hash, install_folder, env_path, review_results, status, reason, created_at, updated_at FROM tools_registry ORDER BY id DESC"
+                ).fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "name": r[1],
+                    "repo_url": r[2],
+                    "commit_hash": r[3],
+                    "install_folder": r[4],
+                    "env_path": r[5],
+                    "review_results": r[6],
+                    "status": r[7],
+                    "reason": r[8],
+                    "created_at": r[9],
+                    "updated_at": r[10],
                 }
                 for r in rows
             ]

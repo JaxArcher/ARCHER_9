@@ -83,6 +83,8 @@ class UniversalToolExecutor:
                 res = self._exec_documents_tool(tool_name, tool_input)
             elif category == 'terminal':
                 res = self._exec_terminal_tool(tool_name, tool_input)
+            elif category == 'pool_tools':
+                res = self._exec_pool_tool(tool_name, tool_input)
             else:
                 res = {'error': f'Unknown tool category: {category}'}
             duration = round(time.time() - start_t, 2)
@@ -388,5 +390,14 @@ class UniversalToolExecutor:
             return self._terminal_manager.execute_archer_command(command=cmd, timeout=timeout)
         else:
             return {'error': f'Unknown terminal tool: {tool_name}'}
+
+    def _exec_pool_tool(self, tool_name: str, inp: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute installed tool pool tools (Phase 4, Spec Section 7)."""
+        from archer.tools.tool_pool_manager import get_tool_pool_manager
+        clean_name = tool_name
+        if clean_name.startswith("run_"):
+            clean_name = clean_name[4:]
+        cmd = inp.get("command", "")
+        return get_tool_pool_manager().execute_tool(clean_name, command=cmd)
 
 

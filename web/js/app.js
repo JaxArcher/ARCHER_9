@@ -55,6 +55,9 @@ const ArcherClient = (() => {
     terminalOutput: [],
     terminalHistory: [],
     terminalRestarted: [],
+    toolsRegistryList: [],
+    toolsProposeResult: [],
+    toolsUninstallResult: [],
     connected: [],
     disconnected: [],
   };
@@ -267,6 +270,15 @@ const ArcherClient = (() => {
         break;
       case "terminal_restarted":
         emit("terminalRestarted", msg);
+        break;
+      case "tools_registry_list":
+        emit("toolsRegistryList", msg.tools || []);
+        break;
+      case "tools_propose_result":
+        emit("toolsProposeResult", msg.result || {});
+        break;
+      case "tools_uninstall_result":
+        emit("toolsUninstallResult", msg.result || {});
         break;
       default:
         console.warn("[ArcherClient] unknown message type:", msg.type);
@@ -481,6 +493,15 @@ const ArcherClient = (() => {
     },
     sendTerminalGetHistory() {
       send({ type: "terminal_get_history" });
+    },
+    sendToolsGetRegistry() {
+      send({ type: "tools_get_registry" });
+    },
+    sendToolsPropose(repo_url, commit_hash, name) {
+      send({ type: "tools_propose", repo_url, commit_hash, name });
+    },
+    sendToolsUninstall(name) {
+      send({ type: "tools_uninstall", name });
     },
     connect,
   };

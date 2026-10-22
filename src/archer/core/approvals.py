@@ -175,7 +175,7 @@ class ApprovalManager:
             return "terminal_command", f"Run terminal command: {cmd}", f"Command: {cmd}"
 
         if tool_name in ALWAYS_ASK_TOOLS:
-            repo = tool_input.get("repo") or tool_input.get("package") or ""
+            repo = tool_input.get("repo") or tool_input.get("repo_url") or tool_input.get("name") or tool_input.get("package") or ""
             return "tool_install", f"Install tool or library: {repo}", f"Target: {repo}"
 
         # Self-record summaries

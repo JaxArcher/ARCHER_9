@@ -262,6 +262,48 @@ async def get_skills_list():
     return {"skills": result}
 
 
+# --- Phase 4 Tool Pool (Spec Section 7) ---
+
+@app.get("/api/tools/registry")
+async def get_tools_registry():
+    """Return tools candidate registry for Phase 4 Tool Pool (Spec Section 7)."""
+    from archer.memory.sqlite_store import get_sqlite_store
+    store = get_sqlite_store()
+    return {"tools": store.list_tool_candidates()}
+
+
+@app.post("/api/tools/propose")
+async def propose_tool_endpoint(data: dict):
+    """Propose and review external git tool candidate."""
+    from archer.tools.tool_pool_manager import get_tool_pool_manager
+    mgr = get_tool_pool_manager()
+    repo_url = data.get("repo_url", "")
+    commit_hash = data.get("commit_hash")
+    name = data.get("name")
+    res = mgr.propose_and_review(repo_url=repo_url, commit_hash=commit_hash, tool_name=name)
+    return res
+
+
+@app.post("/api/tools/install")
+async def install_tool_endpoint(data: dict):
+    """Install approved tool candidate into dedicated venv and register skill."""
+    from archer.tools.tool_pool_manager import get_tool_pool_manager
+    mgr = get_tool_pool_manager()
+    name = data.get("name")
+    res = mgr.install_tool(name)
+    return res
+
+
+@app.post("/api/tools/uninstall")
+async def uninstall_tool_endpoint(data: dict):
+    """Uninstall tool candidate and remove dedicated environment."""
+    from archer.tools.tool_pool_manager import get_tool_pool_manager
+    mgr = get_tool_pool_manager()
+    name = data.get("name")
+    res = mgr.uninstall_tool(name)
+    return res
+
+
 @app.get("/mobile/health")
 async def health_check():
     """Detailed health check - no authentication required."""
@@ -1283,6 +1325,33 @@ async def ws_voice(websocket: WebSocket):
                 await _ws_send_safe(websocket, json.dumps({
                     "type": "terminal_history",
                     "data": history,
+                }))
+            elif msg_type == "tools_get_registry":
+                from archer.memory.sqlite_store import get_sqlite_store
+                tools_list = get_sqlite_store().list_tool_candidates()
+                await _ws_send_safe(websocket, json.dumps({
+                    "type": "tools_registry_list",
+                    "tools": tools_list,
+                }))
+            elif msg_type == "tools_propose":
+                from archer.tools.tool_pool_manager import get_tool_pool_manager
+                mgr = get_tool_pool_manager()
+                res = mgr.propose_and_review(
+                    repo_url=msg.get("repo_url", ""),
+                    commit_hash=msg.get("commit_hash"),
+                    tool_name=msg.get("name"),
+                )
+                await _ws_send_safe(websocket, json.dumps({
+                    "type": "tools_propose_result",
+                    "result": res,
+                }))
+            elif msg_type == "tools_uninstall":
+                from archer.tools.tool_pool_manager import get_tool_pool_manager
+                mgr = get_tool_pool_manager()
+                res = mgr.uninstall_tool(msg.get("name", ""))
+                await _ws_send_safe(websocket, json.dumps({
+                    "type": "tools_uninstall_result",
+                    "result": res,
                 }))
             elif msg_type == "request_camera_frame":
                 asyncio.create_task(_request_browser_camera_frame(websocket, timeout=5.0))
