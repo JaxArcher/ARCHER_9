@@ -751,6 +751,26 @@ class SQLiteStore:
                 );
                 INSERT OR IGNORE INTO lenny_config (id, host, port, token, browser_port, status)
                 VALUES (1, '', 8203, '', 9222, 'unpaired');
+
+                -- "I have questions" tab (Spec 5f, Col 2026-10-22)
+                CREATE TABLE IF NOT EXISTS questions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    question_id TEXT UNIQUE NOT NULL,
+                    source TEXT NOT NULL,                  -- 'person', 'item', 'task', 'blindspot', 'rnd', etc.
+                    subject_ref TEXT,                      -- e.g. 'Person_110', 'item_12'
+                    text TEXT NOT NULL,                    -- 1-2 plain sentences
+                    context TEXT,                          -- when, where, what triggered it
+                    image_refs TEXT,                       -- JSON array or strings of image paths / data URIs
+                    status TEXT NOT NULL DEFAULT 'open',   -- 'open', 'later', 'answered', 'deleted'
+                    thread_id TEXT,                        -- parent question_id if threaded follow-up, or self
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    answer_text TEXT,
+                    answered_at TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_questions_status ON questions(status);
+                CREATE INDEX IF NOT EXISTS idx_questions_thread ON questions(thread_id);
+                CREATE INDEX IF NOT EXISTS idx_questions_subject ON questions(subject_ref);
             """)
             try:
                 conn.execute(
@@ -1505,7 +1525,15 @@ class SQLiteStore:
                             """,
                             (c_row["id"],),
                         )
-                        logger.info(f"SQLiteStore: Closed pending label {pid} as Col (all sightings in Col stays).")
+                        conn.execute(
+                            """
+                            UPDATE questions
+                            SET status = 'answered', answer_text = 'Resolved as Col', answered_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                            WHERE subject_ref = ? AND status = 'open'
+                            """,
+                            (pid,),
+                        )
+                        logger.info(f"SQLiteStore: Closed pending label {pid} and resolved open questions as Col (all sightings in Col stays).")
 
                 conn.commit()
                 return updated_count
@@ -2785,6 +2813,19 @@ class SQLiteStore:
             finally:
                 conn.close()
 
+    def get_pending_person_confirmation_by_person_id(self, person_id: str) -> dict[str, Any] | None:
+        """Fetch pending person confirmation row by person_id."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM pending_person_confirmations WHERE person_id = ? ORDER BY id DESC LIMIT 1",
+                    (person_id,),
+                ).fetchone()
+                return dict(row) if row else None
+            finally:
+                conn.close()
+
     def get_pending_person_confirmations(
         self,
         status: str | list[str] | tuple[str, ...] | None = "pending",
@@ -2838,6 +2879,12 @@ class SQLiteStore:
                     "UPDATE pending_person_confirmations SET status = ?, confirmed_name = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (status, confirmed_name, confirmation_id),
                 )
+                if row_dict.get("person_id") and status in ("confirmed", "dismissed", "decor"):
+                    resolution = confirmed_name or status
+                    conn.execute(
+                        "UPDATE questions SET status = 'answered', answer_text = ?, answered_at = CURRENT_TIMESTAMP WHERE subject_ref = ? AND status = 'open'",
+                        (resolution, row_dict["person_id"]),
+                    )
                 conn.commit()
                 return row_dict
             finally:
@@ -2860,6 +2907,12 @@ class SQLiteStore:
                     "UPDATE pending_person_confirmations SET status = ?, confirmed_name = ?, resolved_at = CURRENT_TIMESTAMP WHERE person_id = ?",
                     (status, confirmed_name, person_id),
                 )
+                if status in ("confirmed", "dismissed", "decor"):
+                    resolution = confirmed_name or status
+                    conn.execute(
+                        "UPDATE questions SET status = 'answered', answer_text = ?, answered_at = CURRENT_TIMESTAMP WHERE subject_ref = ? AND status = 'open'",
+                        (resolution, person_id),
+                    )
                 conn.commit()
             finally:
                 conn.close()
@@ -4353,6 +4406,284 @@ class SQLiteStore:
                 )
         finally:
             conn.close()
+
+    # --- Questions Tab (Spec Section 5f, Col 2026-10-22) ---
+
+    def create_question(
+        self,
+        source: str,
+        text: str,
+        subject_ref: str | None = None,
+        context: str | None = None,
+        image_refs: list[str] | str | None = None,
+        status: str = "open",
+        thread_id: str | None = None,
+        question_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or return an existing open question for the subject_ref."""
+        import uuid
+        if not question_id:
+            question_id = f"q_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        if thread_id is None:
+            thread_id = question_id
+
+        if isinstance(image_refs, list):
+            image_refs_str = json.dumps(image_refs)
+        elif isinstance(image_refs, str):
+            image_refs_str = image_refs
+        else:
+            image_refs_str = "[]"
+
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                if subject_ref:
+                    existing = conn.execute(
+                        "SELECT * FROM questions WHERE subject_ref = ? AND status IN ('open', 'later') LIMIT 1",
+                        (subject_ref,),
+                    ).fetchone()
+                    if existing:
+                        return dict(existing)
+
+                conn.execute(
+                    """
+                    INSERT INTO questions (question_id, source, subject_ref, text, context, image_refs, status, thread_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (question_id, source, subject_ref, text, context or "", image_refs_str, status, thread_id),
+                )
+                conn.commit()
+                row = conn.execute("SELECT * FROM questions WHERE question_id = ?", (question_id,)).fetchone()
+                return dict(row) if row else {}
+            finally:
+                conn.close()
+
+    def get_questions(self, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        """Fetch questions ordered by updated_at DESC."""
+        import os
+        watch_env = os.environ.get("ARCHER_ITEMS_WATCH", "").lower()
+        items_watch_on = (watch_env == "true") if watch_env else bool(getattr(self._config, "items_watch", False))
+
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                # If items_watch is off, filter out item questions
+                source_filter = "" if items_watch_on else "AND source != 'item'"
+                if status:
+                    rows = conn.execute(
+                        f"SELECT * FROM questions WHERE status = ? {source_filter} ORDER BY updated_at DESC LIMIT ?",
+                        (status, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        f"""
+                        SELECT * FROM questions
+                        WHERE status != 'deleted' {source_filter}
+                        ORDER BY CASE status WHEN 'open' THEN 1 WHEN 'later' THEN 2 ELSE 3 END, updated_at DESC
+                        LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                conn.close()
+
+    def get_open_questions_count(self) -> int:
+        """Return number of questions with status = 'open'."""
+        import os
+        watch_env = os.environ.get("ARCHER_ITEMS_WATCH", "").lower()
+        items_watch_on = (watch_env == "true") if watch_env else bool(getattr(self._config, "items_watch", False))
+        source_filter = "" if items_watch_on else "AND source != 'item'"
+
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                row = conn.execute(
+                    f"SELECT COUNT(*) as cnt FROM questions WHERE status = 'open' {source_filter}"
+                ).fetchone()
+                return row["cnt"] if row else 0
+            finally:
+                conn.close()
+
+    def get_question(self, question_id: str) -> dict[str, Any] | None:
+        """Retrieve single question by question_id."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                row = conn.execute("SELECT * FROM questions WHERE question_id = ?", (question_id,)).fetchone()
+                return dict(row) if row else None
+            finally:
+                conn.close()
+
+    def update_question_status(self, question_id: str, status: str) -> bool:
+        """Update question status (open, later, answered, deleted)."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    "UPDATE questions SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE question_id = ?",
+                    (status, question_id),
+                )
+                conn.commit()
+                return True
+            finally:
+                conn.close()
+
+    def answer_question(self, question_id: str, answer_text: str) -> dict[str, Any] | None:
+        """Mark question answered with answer text."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    """
+                    UPDATE questions
+                    SET status = 'answered', answer_text = ?, answered_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                    WHERE question_id = ?
+                    """,
+                    (answer_text, question_id),
+                )
+                conn.commit()
+                row = conn.execute("SELECT * FROM questions WHERE question_id = ?", (question_id,)).fetchone()
+                return dict(row) if row else None
+            finally:
+                conn.close()
+
+    def add_question_thread(
+        self,
+        parent_question_id: str,
+        text: str,
+        source: str = "archer",
+        image_refs: list[str] | str | None = None,
+        context: str | None = None,
+    ) -> dict[str, Any]:
+        """Add threaded follow-up question under an existing card."""
+        import uuid
+        child_id = f"q_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        if isinstance(image_refs, list):
+            image_refs_str = json.dumps(image_refs)
+        elif isinstance(image_refs, str):
+            image_refs_str = image_refs
+        else:
+            image_refs_str = "[]"
+
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                parent = conn.execute("SELECT * FROM questions WHERE question_id = ?", (parent_question_id,)).fetchone()
+                thread_root = parent["thread_id"] if (parent and parent["thread_id"]) else parent_question_id
+                subject_ref = parent["subject_ref"] if parent else None
+
+                conn.execute(
+                    """
+                    INSERT INTO questions (question_id, source, subject_ref, text, context, image_refs, status, thread_id)
+                    VALUES (?, ?, ?, ?, ?, ?, 'open', ?)
+                    """,
+                    (child_id, source, subject_ref, text, context or "", image_refs_str, thread_root),
+                )
+                conn.execute("UPDATE questions SET updated_at = CURRENT_TIMESTAMP WHERE question_id = ?", (parent_question_id,))
+                conn.commit()
+                row = conn.execute("SELECT * FROM questions WHERE question_id = ?", (child_id,)).fetchone()
+                return dict(row) if row else {}
+            finally:
+                conn.close()
+
+    def delete_question(self, question_id: str) -> bool:
+        """Mark question deleted and dismiss underlying subject if person/item."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                q = conn.execute("SELECT * FROM questions WHERE question_id = ?", (question_id,)).fetchone()
+                if not q:
+                    return False
+                conn.execute(
+                    "UPDATE questions SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE question_id = ?",
+                    (question_id,),
+                )
+                conn.commit()
+                q_dict = dict(q)
+            finally:
+                conn.close()
+
+        if q_dict.get("source") == "person" and q_dict.get("subject_ref"):
+            self.resolve_pending_person_confirmation_by_person_id(q_dict["subject_ref"], status="dismissed")
+        return True
+
+    def create_or_update_person_question(
+        self,
+        person_id: str,
+        snapshot_path: str | None = None,
+        timestamp: float | None = None,
+        context: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or update a question card for an unrecognized person (Spec 5f)."""
+        ts = timestamp or time.time()
+        ctx = context or f"Room camera · {format_room_transcript_timestamp(ts)}"
+        text = f"I saw someone on the room camera that I didn't recognize. Who is this?"
+
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                existing = conn.execute(
+                    "SELECT * FROM questions WHERE subject_ref = ? AND status IN ('open', 'later') ORDER BY id DESC LIMIT 1",
+                    (person_id,),
+                ).fetchone()
+                if existing:
+                    row_dict = dict(existing)
+                    qid = row_dict["question_id"]
+                    if snapshot_path:
+                        try:
+                            imgs = json.loads(row_dict.get("image_refs") or "[]")
+                            if not isinstance(imgs, list):
+                                imgs = [row_dict["image_refs"]] if row_dict["image_refs"] else []
+                        except Exception:
+                            imgs = []
+                        if snapshot_path not in imgs and len(imgs) < 3:
+                            imgs.append(snapshot_path)
+                            conn.execute(
+                                "UPDATE questions SET image_refs = ?, updated_at = CURRENT_TIMESTAMP WHERE question_id = ?",
+                                (json.dumps(imgs), qid),
+                            )
+                            conn.commit()
+                            row_dict["image_refs"] = json.dumps(imgs)
+                    return row_dict
+            finally:
+                conn.close()
+
+        img_list = [snapshot_path] if snapshot_path else []
+        return self.create_question(
+            source="person",
+            subject_ref=person_id,
+            text=text,
+            context=ctx,
+            image_refs=img_list,
+            status="open",
+        )
+
+    def create_or_update_item_question(
+        self,
+        item_id: int | str,
+        item: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Create or update a question card for an unnamed item (Spec 5f). Only when items_watch is active."""
+        import os
+        watch_env = os.environ.get("ARCHER_ITEMS_WATCH", "").lower()
+        items_watch_on = (watch_env == "true") if watch_env else bool(getattr(self._config, "items_watch", False))
+        if not items_watch_on:
+            return None
+
+        subject_ref = f"item_{item_id}"
+        place = item.get("place") or "a spot in the room"
+        text = f"The room camera saw someone put down an item {place} that I couldn't identify. What is it?"
+        ctx = f"Room camera · {place}"
+        photo = item.get("last_seen_image_path") or item.get("image_path")
+        return self.create_question(
+            source="item",
+            subject_ref=subject_ref,
+            text=text,
+            context=ctx,
+            image_refs=[photo] if photo else [],
+            status="open",
+        )
 
 # ====== END OF NEW METHODS ======
 

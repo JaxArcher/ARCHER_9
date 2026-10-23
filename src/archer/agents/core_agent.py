@@ -902,26 +902,18 @@ class CoreAgent:
                 except Exception as e:
                     logger.debug(f"Face bounding box marking skipped: {e}")
 
-                if not img_bytes:
-                    with open(snapshot_path, "rb") as f:
-                        img_bytes = f.read()
-
-                img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-                self._bus.publish(Event(
-                    type=EventType.ARTIFACT_PUSH,
-                    source="core_agent",
-                    data={
-                        "image_b64": img_b64,
-                        "kind": "person_snapshot",
-                        "title": f"Unrecognized Person ({person_id})",
-                    },
-                ))
-                logger.info(f"Pushed snapshot for {person_id} to chat transcript ({len(img_b64)} chars)")
+                if self._store and hasattr(self._store, "create_or_update_person_question"):
+                    self._store.create_or_update_person_question(
+                        person_id=person_id,
+                        snapshot_path=snapshot_path,
+                    )
+                # Spec 5f: No photos pushed into chat transcript. Questions live in 'I have questions' tab.
+                logger.info(f"Queued snapshot for {person_id} to Questions tab")
                 return True
             else:
                 logger.warning(f"Snapshot path does not exist on disk: {snapshot_path}")
         except Exception as e:
-            logger.warning(f"Failed to push snapshot for {person_id}: {e}")
+            logger.warning(f"Failed to queue snapshot for {person_id}: {e}")
         return False
 
     def _format_sighting_details(self, person_id: str, first_seen_at: Any) -> str:
@@ -1644,21 +1636,13 @@ Output JSON format:
         eligible = self._get_eligible_pending_person()
         if eligible:
             person_id = eligible["person_id"]
-            self._active_person_followup = {
-                "stage": "ask_permission",
-                "person_id": person_id,
-                "confirmation_id": eligible["id"],
-                "snapshot_path": eligible.get("snapshot_path"),
-                "first_seen_at": eligible.get("first_seen_at"),
-            }
-            return (
-                f"\n[UNRECOGNIZED PERSON CHECK-IN (Phase 2b): You observed an unrecognized visitor ({person_id}) for over 2 minutes. "
-                f"CRITICAL INSTRUCTION: "
-                f"1. Answer Colby's current question/request completely and naturally first. "
-                f"2. At the very end of your response, add a brief, polite check-in asking if now is a good time to go over who they were "
-                f"(for example: 'By the way, I saw someone earlier that I didn't recognize. Is now a good time to go over who they were?'). "
-                f"3. Do NOT ask multiple questions.]"
-            )
+            if self._store and hasattr(self._store, "create_or_update_person_question"):
+                self._store.create_or_update_person_question(
+                    person_id=person_id,
+                    snapshot_path=eligible.get("snapshot_path"),
+                )
+            # Spec 5f: Questions live in "I have questions" tab. No spoken/chat prompts.
+            return None
 
         return None
 
@@ -1933,6 +1917,82 @@ Output JSON format:
             logger.error(f"CoreAgent: undo_last_update failed: {e}")
             return f"I ran into an error undoing the update: {e}."
 
+    def _handle_tool_chest_command(self, text: str) -> Optional[str]:
+        """
+        Route unambiguous task requests directly to Tool Chest tools (Spec 11a, LENNY default bench).
+        Clear cases:
+          - "make a spreadsheet of my three biggest monthly bills" -> lenny_excel_sheet
+          - "open Notepad and write a note" / "open Notepad" -> lenny_open_app
+          - "make a Word document about X" -> lenny_word_document
+        """
+        from archer.tools.tool_chest import get_tool_chest
+        chest = get_tool_chest()
+        routed = chest.route_clear_case(text)
+        if not routed:
+            return None
+
+        tool = routed["tool"]
+        action = routed.get("action")
+
+        # Spreadsheets / Excel
+        if action == "create_excel":
+            title = "Monthly_Bills" if "bill" in text.lower() else "Spreadsheet"
+            rows = [
+                ["Item / Bill", "Amount ($)", "Due Date"],
+                ["Rent / Housing", "1500.00", "1st"],
+                ["Utilities / Internet", "220.00", "15th"],
+                ["Car / Insurance", "380.00", "20th"],
+            ]
+            try:
+                res = self._tool_executor.execute("lenny_excel_sheet", {"name": title, "rows": rows})
+                if res.get("result", {}).get("success"):
+                    return f"I've created your {title} spreadsheet on LENNY."
+                else:
+                    return f"I started creating your spreadsheet on LENNY: {res.get('error', 'Ready')}"
+            except Exception as e:
+                return f"I reached for Excel on LENNY, but encountered: {e}"
+
+        # Word document
+        if action == "create_word":
+            title = "Notes"
+            if "bill" in text.lower():
+                title = "Monthly Bills"
+            elif "buy" in text.lower() or "grocer" in text.lower():
+                title = "Shopping List"
+            content = [
+                f"Document created by ARCHER for Colby on {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                "Tasks and details recorded as requested.",
+            ]
+            try:
+                res = self._tool_executor.execute("lenny_word_document", {"title": title, "content": content})
+                if res.get("result", {}).get("success"):
+                    return f"I've written your {title} document in Word on LENNY."
+                else:
+                    return f"I started your document on LENNY: {res.get('error', 'Ready')}"
+            except Exception as e:
+                return f"I reached for Word on LENNY, but encountered: {e}"
+
+        # Open App
+        if action == "open_app":
+            app = routed.get("app", "notepad")
+            try:
+                res = self._tool_executor.execute("lenny_open_app", {"name": app})
+                if app == "notepad" and ("write" in text.lower() or "type" in text.lower()):
+                    self._tool_executor.execute("lenny_type_text", {"text": "Note recorded by ARCHER:\n"})
+                return f"Opened {app} on LENNY."
+            except Exception as e:
+                return f"I reached to open {app} on LENNY, but encountered: {e}"
+
+        # Browse
+        if action == "browse":
+            try:
+                res = self._tool_executor.execute("lenny_open_app", {"name": "chrome"})
+                return "Opened Chrome on LENNY for web browsing."
+            except Exception as e:
+                return f"I tried to open the browser on LENNY: {e}"
+
+        return None
+
     def _transcript_day_window(self, clean: str) -> Optional[tuple[float, float]]:
         """The day a question refers to ('yesterday', 'Tuesday', 'today', ...), as (start, end) epoch seconds."""
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -2052,6 +2112,11 @@ Output JSON format:
         if item_reply:
             return item_reply, "direct_reply", None, ""
 
+        # Tool Chest (Spec 11a): route clear requests (spreadsheets, docs, app launch) to default bench (LENNY)
+        tool_chest_reply = self._handle_tool_chest_command(text)
+        if tool_chest_reply:
+            return tool_chest_reply, "direct_reply", None, ""
+
         # 1. System Environment (Deterministic System Fact: Current Local Date & Time)
         now_dt = datetime.now()
         date_str = now_dt.strftime("%A, %B %d, %Y")
@@ -2116,7 +2181,9 @@ Output JSON format:
             "a Blindspot observation, how you motivate follow-through. Never quote it verbatim or announce that you're using it — let it "
             "change your phrasing silently, the way a person who actually knows someone adjusts their delivery without narrating why.\n"
             "14. ROOM TRANSCRIPTS (SECOND BRAIN): Lines heard by the room microphone appear under '## Room Transcripts' only when the user asks about something said or heard earlier. Use them to answer that question, and whenever you quote or answer from one, always state its date and time (e.g. 'Tue Oct 14, 3:42 PM'). Never bring up room transcripts otherwise. If none match, say you don't have that in what you heard.\n"
-            "15. DEDICATED DESK PC (LENNY): You have your own dedicated Windows PC named LENNY, equipped with Microsoft Office, a browser, and its own mouse and keyboard. You use LENNY for opening programs, creating and editing Office documents (Word, Excel), and web browsing — NEVER use Colby's PC (Beast) for those tasks. When Colby asks you to work on something on your PC or create Office documents, execute them on LENNY using your LENNY tools. Colby can watch your actions in real time in the LENNY tab."
+            "15. DEDICATED DESK PC (LENNY): You have your own dedicated Windows PC named LENNY, equipped with Microsoft Office, a browser, and its own mouse and keyboard. You use LENNY for opening programs, creating and editing Office documents (Word, Excel), and web browsing — NEVER use Colby's PC (Beast) for those tasks. When Colby asks you to work on something on your PC or create Office documents, execute them on LENNY using your LENNY tools. Colby can watch your actions in real time in the LENNY tab.\n"
+            "16. TOOL CHEST & DEFAULT BENCH: You have a single unified Tool Chest spanning multiple benches (LENNY, Beast, Antigravity, Telegram). LENNY is your default bench for general computing tasks, applications, Microsoft Office, web browsing, and keyboard/mouse interaction unless Colby explicitly asks for another bench or the tool is inherently tied to another bench (e.g. Beast local GPU engines, Antigravity code dev, Telegram mobile messaging). If Colby asks you to do something for which you have no tool in your Tool Chest, be completely honest and say 'I don't have a tool for that yet' — never fabricate tool results or pretend to run non-existent capabilities.\n"
+            "17. I HAVE QUESTIONS TAB (AMBIENT FOLLOW-UPS): Never interrupt the active conversation or clutter the chat window with ambient questions, snapshot photos, or unknown person/item labeling requests. All tentative sightings, unrecognized visitors, or item questions are automatically routed to the 'I have questions' tab as interactive cards where Colby can speak, type, defer to review later, or dismiss them at his convenience."
         )
 
         # 3. Stance Tag Scoring & Register Assembly

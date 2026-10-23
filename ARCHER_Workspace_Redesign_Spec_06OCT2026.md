@@ -1048,6 +1048,68 @@ newest at the bottom, keeping today's existing Pause / Clear and the
 
 ---
 
+## 5f. "I have questions" tab (Col, 2026-10-22)
+
+**Goal:** everything ARCHER wants to follow up on with Col lives in one tab,
+not in the chat. Col: "Because ARCHER is a small brain, maybe we should add a
+tab … named 'I have questions'. This tab will include any of these sorts of
+things ARCHER intends to follow up on … ARCHER doesn't need to send the
+screenshots in the chat box, everything in this regard can be kept in this
+new tab."
+
+**The tab**
+- **I HAVE QUESTIONS**, among the other tabs.
+- When there are open questions, the tab label changes colour (amber) and
+  shows the count. That's the only signal: no photos and no questions in the
+  chat box, and no spoken questions.
+- Voice and text tab switching accept "questions" and "I have questions".
+
+**What goes in it** (each question is its own card)
+- Unrecognised people (Phase 2b): replaces asking in conversation and the
+  snapshot pushed into the chat.
+- Unnamed items (Phase 2d), when item watching is on.
+- Anything else ARCHER intends to follow up on: an unclear task or
+  commitment, a Blindspot observation that needs Col's input, a memory fact
+  to confirm, an R&D proposal that needs his view. The code that has the
+  question writes it to the tab; it isn't left to the brain to remember.
+- Not approvals. Phase 3 prompts stay where they are, because they're
+  blocking.
+
+**Each card shows**
+- The question, in one or two plain sentences, written by the code that
+  raised it.
+- Context: when, where, and what triggered it.
+- Any relevant images or artifacts: face snapshot, item photo, a file link,
+  a screenshot from LENNY.
+
+**Col's actions on each card**
+- **Speak a response:** a mic button records his answer, which is
+  transcribed locally with whisper. Typing is also allowed.
+- **Delete:** the question is dismissed and never raised again for that
+  person or item.
+- **Review later:** it moves to a "Later" section, stays visible, and
+  doesn't count toward the colour.
+- **Follow-ups:** after Col answers, ARCHER acts on it (enrolls the name,
+  names the item, updates the task) and may add a follow-up question to the
+  same card as a thread. The tab lights up again for it.
+
+**Storage:** a `questions` table in `archer.db` (source, subject reference,
+text, image references, status: open / later / answered / deleted, thread).
+The observer service can write to it too, so questions raised while the GUI
+is closed are waiting when it opens.
+
+**Acceptance:**
+- An unrecognised person and an unnamed item show up as two cards with their
+  photos, and nothing appears in the chat.
+- The tab is amber with "2".
+- Col speaks a name for the person: it's enrolled, and the card is marked
+  answered.
+- Deleting the item's card means it isn't raised again.
+- "Review later" keeps a card without the colour.
+- A follow-up appears threaded under the original card.
+
+---
+
 ## 6. Phase 3 — Approval system
 
 **Goal:** ARCHER asks before any change, with a per-session "approve all".
@@ -1637,6 +1699,59 @@ ARCHER asks:
   the worklog.
 - ARCHER browses a site on LENNY, and Col watches it live.
 - With LENNY switched off, browsing falls back to the main PC and says so.
+
+---
+
+## 11a. ARCHER's tool chest (Col, 2026-10-22)
+
+**Goal:** ARCHER's first move on any *task* (as opposed to a question it can
+simply answer) is to reach for its tool chest. Col: "LENNY should be defined
+to ARCHER as his tool chest for certain tasks. Eventually I'll want to add
+tools to ARCHER that won't be able to be done on LENNY (e.g. image generating
+models), but ARCHER's default steps should be to turn to its tool chest to do
+tasks first."
+
+**The tool chest**
+- A single registry of everything ARCHER can use to get work done. Each
+  entry has: name; what it's for, in one plain line; **where it runs**;
+  how to call it; whether it needs approval; and whether it's available
+  right now. The places it can run are:
+  - **LENNY:** programs, Office, browsing, anything with a mouse and
+    keyboard.
+  - **Beast:** document building, the terminal, the virtual phone, GPU
+    models such as future image generation, specialists.
+  - **Antigravity:** coding.
+  - **Telegram:** messaging.
+- It's built from what already exists: the skills (`*_SKILL.md`), the
+  Phase 4 tools, LENNY's installed programs (Hands reports them), and
+  Beast's local models. New tools join it when they're added, wherever they
+  run.
+- **LENNY is the default bench.** If a task needs a program, a website or a
+  mouse and keyboard, it's done on LENNY. If it needs something LENNY can't
+  do (the 5080, Beast-only tools), it runs on Beast. Col's own PC is never
+  used for ARCHER's hands-on work.
+- The Tools tab shows the tool chest: each tool with where it runs and a
+  green / grey "available" dot.
+
+**ARCHER's default steps on a task**
+1. Look in the tool chest: `tool_chest_find(task)` returns the best
+   matches. Only a short category summary goes in the system prompt, to keep
+   the small brain's prompt lean.
+2. Use the best tool, at its place: LENNY first when it fits.
+3. If nothing fits, say so plainly and suggest adding a tool. That becomes an
+   R&D proposal (11b), or a Phase 4 install when it's a GitHub tool.
+- Don't rely on the small model alone. Clear cases are routed in code too:
+  "open / launch X", "browse / look up on the web", "make a Word / Excel /
+  PowerPoint…", "fill in…", "click…". Those go to the matching tool-chest
+  entry before the model improvises.
+
+**Acceptance:**
+- Without saying "on LENNY", Col asks ARCHER to "make a spreadsheet of my
+  three biggest monthly bills" and to "open Notepad and write a note". Both
+  happen on LENNY.
+- Asking for something no tool covers gets an honest "I don't have a tool
+  for that yet", plus a suggestion.
+- The Tools tab lists the tool chest, with where each tool runs.
 
 ---
 

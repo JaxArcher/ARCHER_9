@@ -376,6 +376,12 @@ class PersonIdentifier:
                             face_box=face_box_json,
                             stay_id=stay_id,
                         )
+                        if hasattr(store, "create_or_update_person_question"):
+                            store.create_or_update_person_question(
+                                person_id=person_id,
+                                snapshot_path=snapshot_path,
+                                timestamp=time.time(),
+                            )
                     except Exception as e:
                         logger.debug(f"Pending person-confirmation upsert failed (non-fatal): {e}")
 

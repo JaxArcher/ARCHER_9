@@ -882,6 +882,15 @@ class ObserverPipeline:
                             status="pending",
                         )
                         self._store.update_pending_confirmation_duration(waiting_lbl, track.duration)
+                        if hasattr(self._store, "create_or_update_person_question"):
+                            try:
+                                self._store.create_or_update_person_question(
+                                    person_id=waiting_lbl,
+                                    snapshot_path=snap_path,
+                                    timestamp=now,
+                                )
+                            except Exception as e:
+                                logger.debug(f"Failed to create/update person question card: {e}")
 
             # Should-fix Item 9: Throttle sighting logging for unconfirmed stays to at most once per 30s
             last_sight = getattr(track, "_last_sighting_log_ts", 0.0)

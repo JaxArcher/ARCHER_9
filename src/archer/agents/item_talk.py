@@ -293,20 +293,19 @@ class ItemTalk:
                     "Tell him briefly, in your own words, at a natural point in this reply: "
                     + " ".join(lines) + "]"
                 )
-            now = time.time()
-            if self._asked_unnamed is None and now - self._last_unnamed_ask >= UNNAMED_ASK_EVERY:
-                unnamed = self.store.unnamed_items()
-                if unnamed:
-                    item = unnamed[0]
-                    self._asked_unnamed = (item["id"], now)
-                    self._last_unnamed_ask = now
-                    self._show(item)
-                    when = when_text(item["last_seen_ts"]) if item.get("last_seen_ts") else "earlier"
-                    parts.append(
-                        f"[Item question: the room camera saw someone put down something you couldn't identify, "
-                        f"{_place_text(item)} {when}. Its photo is now shown to Colby. After answering him, ask him "
-                        "in one short sentence what it is. Don't guess what it is.]"
-                    )
+            # Spec 5f (Col 2026-10-22): No photos or questions in chat.
+            # When ARCHER_ITEMS_WATCH is true, unnamed items become question cards in the 'I have questions' tab.
+            # While ARCHER_ITEMS_WATCH=false (Phase 2d paused), item questions stay off completely.
+            import os
+            items_watch_on = (os.environ.get("ARCHER_ITEMS_WATCH", "false").lower() == "true")
+            if items_watch_on:
+                from archer.memory.sqlite_store import get_sqlite_store
+                store = get_sqlite_store()
+                if hasattr(store, "create_or_update_item_question"):
+                    unnamed = self.store.unnamed_items()
+                    if unnamed:
+                        item = unnamed[0]
+                        store.create_or_update_item_question(item["id"], item)
         except Exception as e:
             logger.debug(f"Item notes failed (non-fatal): {e}")
         return ("\n" + "\n".join(parts)) if parts else ""

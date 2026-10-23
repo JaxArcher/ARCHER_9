@@ -132,6 +132,13 @@ Item 1 is done and checked (loopback runs on the LG soundbar). Then:
       regression tests.
     - Asks Col only for the steps on LENNY itself: running the script and the
       pairing code.
+13a. **"I have questions" tab** (spec 5f, Col 2026-10-22). It replaces the
+    photos-in-chat fix in reviews entry "2026-10-22, 16:30": nothing goes in
+    the chat, and everything goes in the tab.
+13b. **ARCHER's tool chest** (spec 11a, Col 2026-10-22). Build the
+    registry, `tool_chest_find`, the code-level routing of clear requests
+    (LENNY first), and the Tools-tab view. Then add the LENNY self-update
+    channel (reviews entry "2026-10-22, 14:10").
 14. **After LENNY: R&D scouting** (spec 11b, "R&D scouting"). Build ARCHER's
     weekly downtime routine, in which ARCHER's R&D agent researches and
     benchmarks newer brain and specialist models itself, and reports to Col.

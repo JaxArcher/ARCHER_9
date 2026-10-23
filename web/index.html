@@ -119,6 +119,7 @@
           <button class="tab-btn" data-tab="android" type="button">ANDROID</button>
           <button class="tab-btn" data-tab="lenny" type="button">LENNY</button>
           <button class="tab-btn" data-tab="tools" type="button">TOOLS</button>
+          <button class="tab-btn" data-tab="questions" id="tab-btn-questions" type="button">I HAVE QUESTIONS</button>
           <button class="tab-btn" data-tab="away_tasks" type="button">AWAY &amp; TASKS</button>
           <button class="tab-btn" data-tab="system" type="button">SYSTEM</button>
           <button class="tab-btn" data-tab="logs" type="button">LOGS</button>
@@ -221,6 +222,13 @@
             <!-- js/tools.js renders the tools & skills list -->
           </div>
 
+          <!-- QUESTIONS Tab: Spec Section 5f "I have questions" -->
+          <div id="tab-questions" class="tab-panel">
+            <div id="archer-questions-container" class="archer-dashboard-card questions-container-card">
+              <!-- js/questions.js renders questions cards here -->
+            </div>
+          </div>
+
           <!-- AWAY & TASKS Tab: While You Were Away interventions + Tasks & Habits + R&D Self-Development -->
           <div id="tab-away_tasks" class="tab-panel">
             <div id="tab-memory" class="archer-dashboard-card">
@@ -268,6 +276,7 @@
   <script src="/static/vendor/xterm/addon-fit.js"></script>
   <script src="/static/js/terminal.js"></script>
   <script src="/static/js/tools.js"></script>
+  <script src="/static/js/questions.js"></script>
   <script src="/static/js/barehands.js"></script>
   <script src="/static/js/android.js"></script>
   <script src="/static/js/lenny.js"></script>

@@ -14,7 +14,7 @@ import time as _time
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Generator
 
-from fastapi import FastAPI, HTTPException, Header, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Header, Depends, Query, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,6 +33,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("archer-server")
 
 app = FastAPI(title="ARCHER Mobile API", version="1.0.0")
+
+def _get_store():
+    import archer.memory.sqlite_store as _store_mod
+    return _store_mod.get_sqlite_store()
 
 # CORS - only allow Tailscale network (open by default, restrict via config if needed)
 app.add_middleware(
@@ -737,6 +741,227 @@ def _broadcast_ws(msg: dict) -> None:
     text = json.dumps(msg, default=str)
     for ws in list(_ws_clients):
         loop.create_task(_ws_send_safe(ws, text))
+
+
+# --- Questions Tab Endpoints (Spec Section 5f, Col 2026-10-22) ---
+
+@app.get("/api/questions")
+async def get_questions_endpoint(status: Optional[str] = None):
+    """Return all questions and open count for 'I have questions' tab (Spec 5f)."""
+    store = _get_store()
+    raw_questions = store.get_questions(status=status)
+    open_count = store.get_open_questions_count()
+
+    processed = []
+    for q in raw_questions:
+        q_copy = dict(q)
+        imgs = []
+        try:
+            parsed = json.loads(q_copy.get("image_refs") or "[]")
+            if isinstance(parsed, list):
+                imgs = parsed
+            elif isinstance(parsed, str):
+                imgs = [parsed]
+        except Exception:
+            raw_val = q_copy.get("image_refs")
+            imgs = [raw_val] if raw_val else []
+
+        data_uris = []
+        for img_path in imgs:
+            if img_path:
+                uri = _person_snapshot_data_uri(img_path)
+                if uri:
+                    data_uris.append(uri)
+                elif str(img_path).startswith("data:"):
+                    data_uris.append(img_path)
+        q_copy["images"] = data_uris
+        processed.append(q_copy)
+
+    # Organize threaded children
+    top_level = []
+    thread_map = {}
+    for q in processed:
+        qid = q["question_id"]
+        tid = q.get("thread_id") or qid
+        if tid == qid:
+            q["threads"] = []
+            thread_map[qid] = q
+            top_level.append(q)
+
+    for q in processed:
+        qid = q["question_id"]
+        tid = q.get("thread_id") or qid
+        if tid != qid and tid in thread_map:
+            thread_map[tid]["threads"].append(q)
+        elif tid != qid and tid not in thread_map:
+            q["threads"] = []
+            top_level.append(q)
+
+    return {
+        "questions": top_level,
+        "open_count": open_count,
+    }
+
+
+@app.post("/api/questions/{question_id}/respond")
+async def respond_to_question_endpoint(question_id: str, data: dict):
+    """Submit a response to an open question card."""
+    import re
+    store = _get_store()
+    q = store.get_question(question_id)
+    if not q:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    response_text = (data.get("response") or "").strip()
+    if not response_text:
+        raise HTTPException(status_code=400, detail="Response text required")
+
+    source = q.get("source")
+    subject_ref = q.get("subject_ref")
+
+    if source == "person" and subject_ref:
+        clean = response_text.lower()
+        if any(w in clean for w in ["statue", "poster", "tv", "sculpture", "not a person", "decor", "mannequin"]):
+            store.resolve_pending_person_confirmation_by_person_id(subject_ref, status="decor", confirmed_name="decor")
+            store.answer_question(question_id, response_text)
+            store.log_action(
+                agent_name="core_agent",
+                action_type="mark_decor",
+                description=f"Marked {subject_ref} as decor ('{response_text}').",
+                metadata={"person_id": subject_ref, "answer": response_text}
+            )
+        elif any(w in clean for w in ["forget", "delete", "remove", "dismiss"]):
+            store.delete_question(question_id)
+            store.forget_pending_person_by_person_id(subject_ref)
+        else:
+            name = response_text
+            m = re.match(r"^(?:that(?:'s|\s+is)|it(?:'s|\s+is)|he(?:'s|\s+is)|she(?:'s|\s+is)|they(?:'re|\s+are)|this\s+is)\s+(.+)$", clean, re.IGNORECASE)
+            if m:
+                name = m.group(1).strip()
+            cand_name = name.title()
+
+            pending = store.get_pending_person_confirmation_by_person_id(subject_ref)
+            emb = pending.get("embedding") if pending else None
+            cid = pending.get("id") if pending else None
+            if cid:
+                store.resolve_pending_person_confirmation(cid, status="confirmed", confirmed_name=cand_name)
+            else:
+                store.resolve_pending_person_confirmation_by_person_id(subject_ref, status="confirmed", confirmed_name=cand_name)
+
+            if emb:
+                store.add_person_face(name=cand_name, embedding=emb, source="conversation")
+
+            store.upsert_contact(name=cand_name, relationship="contact", metadata={"notes": response_text})
+            store.log_interaction(contact_name=cand_name, interaction_type="in-person", notes=f"Identified from questions tab: {response_text}")
+            store.log_action(
+                agent_name="core_agent",
+                action_type="confirm_person",
+                description=f"Learned that {subject_ref} is {cand_name} (from questions tab).",
+                metadata={"person_id": subject_ref, "name": cand_name, "notes": response_text}
+            )
+            store.answer_question(question_id, response_text)
+            store.add_question_thread(
+                parent_question_id=question_id,
+                text=f"Enrolled {cand_name} as a recognized person.",
+                source="archer",
+            )
+    elif source == "item" and subject_ref:
+        clean = response_text.lower()
+        if any(w in clean for w in ["forget", "delete", "dismiss", "nothing", "junk"]):
+            store.delete_question(question_id)
+        else:
+            store.answer_question(question_id, response_text)
+            store.add_question_thread(
+                parent_question_id=question_id,
+                text=f"Learned item: {response_text}.",
+                source="archer",
+            )
+    else:
+        store.answer_question(question_id, response_text)
+
+    open_cnt = store.get_open_questions_count()
+    _broadcast_ws({"type": "questions_count", "open_count": open_cnt})
+    _broadcast_ws({"type": "questions_updated"})
+    return {"success": True, "open_count": open_cnt}
+
+
+@app.post("/api/questions/{question_id}/later")
+async def later_question_endpoint(question_id: str):
+    """Move question card to review later section (removes from open count)."""
+    store = _get_store()
+    store.update_question_status(question_id, "later")
+    open_cnt = store.get_open_questions_count()
+    _broadcast_ws({"type": "questions_count", "open_count": open_cnt})
+    _broadcast_ws({"type": "questions_updated"})
+    return {"success": True, "open_count": open_cnt}
+
+
+@app.post("/api/questions/{question_id}/delete")
+async def delete_question_endpoint(question_id: str):
+    """Dismiss question card permanently and dismiss underlying entity."""
+    store = _get_store()
+    store.delete_question(question_id)
+    open_cnt = store.get_open_questions_count()
+    _broadcast_ws({"type": "questions_count", "open_count": open_cnt})
+    _broadcast_ws({"type": "questions_updated"})
+    return {"success": True, "open_count": open_cnt}
+
+
+@app.post("/api/questions/transcribe")
+async def transcribe_question_endpoint(request: Request):
+    """Transcribe spoken voice recording using local whisper engine."""
+    import tempfile
+    import os
+    content = await request.body()
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+    try:
+        from archer.voice.whisper_engine import get_whisper_engine
+        engine = get_whisper_engine()
+        text = await asyncio.to_thread(engine.transcribe_file, tmp_path)
+        return {"text": (text or "").strip()}
+    except Exception as e:
+        logger.warning(f"Voice transcription failed: {e}")
+        return {"text": "", "error": str(e)}
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+# --- Tool Chest Endpoints (Spec Section 11a, Col 2026-10-22) ---
+
+@app.get("/api/tool_chest")
+async def get_tool_chest_endpoint():
+    """Return all tools registered in ARCHER's Tool Chest with their target benches."""
+    from archer.tools.tool_chest import get_tool_chest
+    chest = get_tool_chest()
+    all_tools = chest.get_all_tools()
+    summary = chest.get_summary()
+    return {
+        "tools": all_tools,
+        "summary": summary,
+        "benches": summary["benches"],
+        "default_bench": summary["default_bench"],
+    }
+
+
+@app.post("/api/tool_chest/find")
+async def find_tool_chest_endpoint(data: dict):
+    """Find best matching tools in the tool chest for a given task."""
+    from archer.tools.tool_chest import get_tool_chest
+    task = data.get("task", "")
+    chest = get_tool_chest()
+    matches = chest.tool_chest_find(task)
+    routed = chest.route_clear_case(task)
+    return {
+        "task": task,
+        "routed": routed,
+        "clear_case": routed,
+        "matches": matches,
+    }
 
 
 # --- Dedicated binary Android frame streaming (Phase 7b, review 2026-10-21) ---

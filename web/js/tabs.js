@@ -35,6 +35,11 @@
     apps: "android",
     lenny: "lenny",
     desk: "lenny",
+    questions: "questions",
+    "i have questions": "questions",
+    "have questions": "questions",
+    question: "questions",
+    "follow ups": "questions",
   };
 
   let activeTabName = "";
