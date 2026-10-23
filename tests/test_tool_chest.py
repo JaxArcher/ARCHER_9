@@ -72,22 +72,22 @@ class TestToolChestFindAndDefaultBench:
     def test_route_clear_cases_deterministic(self):
         chest = ToolChest()
 
-        # Clear case: Spreadsheet
-        route_excel = chest.route_clear_case("make a spreadsheet of my three biggest monthly bills")
+        # Clear case: Spreadsheet (non-finance: chores)
+        route_excel = chest.route_clear_case("make a spreadsheet of this week's chores: dishes Monday, laundry Wednesday, vacuum Saturday")
         assert route_excel is not None
         assert route_excel["tool"] == "lenny_excel_sheet"
         assert route_excel["action"] == "create_excel"
         assert route_excel["bench"] == "LENNY"
 
-        # Clear case: Word document
-        route_word = chest.route_clear_case("make a Word document about the project roadmap")
+        # Clear case: Word document (story)
+        route_word = chest.route_clear_case("write a 10-sentence story in Word")
         assert route_word is not None
         assert route_word["tool"] == "lenny_word_document"
         assert route_word["action"] == "create_word"
         assert route_word["bench"] == "LENNY"
 
-        # Clear case: Open notepad
-        route_notepad = chest.route_clear_case("open notepad and write note")
+        # Clear case: Open notepad with specific text
+        route_notepad = chest.route_clear_case("open Notepad and write 'call the vet'")
         assert route_notepad is not None
         assert route_notepad["tool"] == "lenny_open_app"
         assert route_notepad["action"] == "open_app"
@@ -110,9 +110,80 @@ class TestToolChestFindAndDefaultBench:
 
 
 class TestCoreAgentToolChestIntegration:
-    """Test CoreAgent handles tool chest requests and guidelines."""
+    """Test CoreAgent handles tool chest requests with brain-driven content and no hardcoded rows."""
 
-    def test_core_agent_routes_spreadsheet_command(self):
+    def test_core_agent_routes_spreadsheet_chores_matching_content(self):
+        agent = CoreAgent()
+        mock_executor = MagicMock()
+        mock_executor.execute.return_value = {"result": {"success": True}}
+        agent._tool_executor = mock_executor
+
+        reply = agent._handle_tool_chest_command(
+            "make a spreadsheet of this week's chores: dishes Monday, laundry Wednesday, vacuum Saturday"
+        )
+        assert reply is not None
+        assert "spreadsheet on LENNY" in reply
+
+        # Verify lenny_excel_sheet was called with exactly the chores from the prompt
+        mock_executor.execute.assert_called_once()
+        call_args = mock_executor.execute.call_args[0]
+        assert call_args[0] == "lenny_excel_sheet"
+        payload = call_args[1]
+        rows = payload.get("rows", [])
+
+        # Flatten rows text for matching
+        flat_rows_text = " ".join(" ".join(str(c) for c in r) for r in rows).lower()
+        assert "dishes" in flat_rows_text and "monday" in flat_rows_text
+        assert "laundry" in flat_rows_text and "wednesday" in flat_rows_text
+        assert "vacuum" in flat_rows_text and "saturday" in flat_rows_text
+
+        # Verify NO canned finance figures
+        assert "1500.00" not in flat_rows_text
+        assert "rent" not in flat_rows_text
+        assert "utilities" not in flat_rows_text
+
+    def test_core_agent_routes_word_story_matching_content(self):
+        agent = CoreAgent()
+        mock_executor = MagicMock()
+        mock_executor.execute.return_value = {"result": {"success": True}}
+        agent._tool_executor = mock_executor
+
+        reply = agent._handle_tool_chest_command("write a 10-sentence story in Word")
+        assert reply is not None
+        assert "Word on LENNY" in reply
+
+        # Verify lenny_word_document was called with actual story content (not boilerplate)
+        mock_executor.execute.assert_called_once()
+        call_args = mock_executor.execute.call_args[0]
+        assert call_args[0] == "lenny_word_document"
+        payload = call_args[1]
+        content = payload.get("content", [])
+
+        full_content_text = " ".join(content)
+        # Content must be a real story with multiple sentences
+        assert len(full_content_text.split(".")) >= 8
+        # Must NOT contain old placeholder strings
+        assert "Document created by ARCHER for Colby on" not in full_content_text
+        assert "Tasks and details recorded as requested" not in full_content_text
+
+    def test_core_agent_routes_notepad_exact_text(self):
+        agent = CoreAgent()
+        mock_executor = MagicMock()
+        mock_executor.execute.return_value = {"result": {"success": True}}
+        agent._tool_executor = mock_executor
+
+        reply = agent._handle_tool_chest_command("open Notepad and write 'call the vet'")
+        assert reply is not None
+        assert "notepad" in reply.lower()
+
+        # Verify lenny_open_app was called for notepad
+        mock_executor.execute.assert_any_call("lenny_open_app", {"name": "notepad"})
+
+        # Verify lenny_type_text was called with exactly "call the vet"
+        mock_executor.execute.assert_any_call("lenny_type_text", {"text": "call the vet"})
+
+    def test_core_agent_missing_facts_creates_question_card_and_does_not_fabricate(self):
+        """When user asks for facts ARCHER lacks (e.g. bills), ARCHER must ask Colby and NOT fabricate rows."""
         agent = CoreAgent()
         mock_executor = MagicMock()
         mock_executor.execute.return_value = {"result": {"success": True}}
@@ -120,21 +191,36 @@ class TestCoreAgentToolChestIntegration:
 
         reply = agent._handle_tool_chest_command("make a spreadsheet of my three biggest monthly bills")
         assert reply is not None
-        assert "spreadsheet on LENNY" in reply
-        mock_executor.execute.assert_called_once()
-        call_args = mock_executor.execute.call_args[0]
-        assert call_args[0] == "lenny_excel_sheet"
 
-    def test_core_agent_routes_notepad_command(self):
-        agent = CoreAgent()
-        mock_executor = MagicMock()
-        mock_executor.execute.return_value = {"result": {"success": True}}
-        agent._tool_executor = mock_executor
+        # Must NOT have executed excel creation with fake numbers
+        mock_executor.execute.assert_not_called()
 
-        reply = agent._handle_tool_chest_command("open notepad and write a quick note")
-        assert reply is not None
-        assert "notepad on LENNY" in reply.lower() or "Opened notepad" in reply
-        assert mock_executor.execute.call_count >= 1
+        # Must mention Questions tab or ask for details
+        assert "Questions tab" in reply or "details" in reply or "bills" in reply
+
+        # Question card was recorded in store
+        questions = agent._store.get_questions()
+        assert any(q.get("source") == "tool_chest" or "bills" in q.get("text", "").lower() for q in questions)
+
+    def test_no_hardcoded_content_strings_in_routing_path(self):
+        """Assert that no canned rows or placeholder strings remain in core_agent.py."""
+        from pathlib import Path
+        core_agent_path = Path(__file__).parent.parent / "src" / "archer" / "agents" / "core_agent.py"
+        content = core_agent_path.read_text(encoding="utf-8")
+
+        canned_strings = [
+            "1500.00",
+            "Rent / Housing",
+            "220.00",
+            "Utilities / Internet",
+            "380.00",
+            "Car / Insurance",
+            "Document created by ARCHER for Colby on",
+            "Tasks and details recorded as requested.",
+            "Note recorded by ARCHER:\n",
+        ]
+        for s in canned_strings:
+            assert s not in content, f"Found banned canned string '{s}' in core_agent.py!"
 
     def test_guidelines_16_and_17_present(self):
         agent = CoreAgent()

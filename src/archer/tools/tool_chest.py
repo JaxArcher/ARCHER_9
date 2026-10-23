@@ -303,8 +303,8 @@ class ToolChest:
             }
 
         # 2. Word / Documents
-        if re.search(r"\b(make|create|write|draft|open)\s+(?:a\s+)?(?:word\s+document|doc|word\s+doc)\b", t) or \
-           re.search(r"\bword\s+document\s+(?:listing|about|on)\b", t):
+        if re.search(r"\b(make|create|write|draft|open)\s+.*?\b(?:in\s+word|in\s+microsoft\s+word|word\s+document|word\s+doc)\b", t) or \
+           re.search(r"\b(?:word\s+document|word\s+doc)\b", t):
             return {
                 "tool": "lenny_word_document",
                 "bench": BENCH_LENNY,
@@ -313,7 +313,18 @@ class ToolChest:
                 "reason": "Routed to LENNY native Word (default bench for Office tasks).",
             }
 
-        # 3. Launch / Open specific applications
+        # 3. Direct write to Notepad
+        if re.search(r"\b(?:write|type)\s+.*?\bin\s+notepad\b", t):
+            return {
+                "tool": "lenny_open_app",
+                "bench": BENCH_LENNY,
+                "target": BENCH_LENNY,
+                "app": "notepad",
+                "action": "open_app",
+                "reason": "Routed to Notepad on LENNY to type note.",
+            }
+
+        # 4. Launch / Open specific applications
         m_open = re.search(r"\b(?:open|launch|start)\s+([a-z0-9_\-\.\s]+)\b", t)
         if m_open:
             app_raw = m_open.group(1).strip()
