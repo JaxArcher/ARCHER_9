@@ -3,13 +3,23 @@
 _Mirrored from ARCHER's dashboard -- this fills in as you talk with ARCHER._
 
 ## Known Entities
+- **YouTube** (organization, 3x) -> YouTube -- a video-sharing platform
 - **Col** (nickname, 3x) -- a person visible in the webcam feed
+- **Archer** (nickname, 2x)
 - **Col** (person, 2x) -- a person visible in the webcam feed
+- **Beyonce** (person, 1x) -> Beyonce -- a singer
 - **World Warcraft** (organization, 1x) -- a popular massively multiplayer online role-playing game
 
 ## Recurring Themes
 - **uses 'like' at the beginning of a request** (verbal_filler, 2x) -- "like you to look inside"
 - **repeats phrases for emphasis** (verbal_filler, 2x) -- "better proficiency, better proficiency"
+- **requests specific format** (other, 1x) -- "use any title yud' like. Make it a short 10 sentence story of your experiences"
+- **assertive statement** (other, 1x) -- "You can't control my life."
+- **repeated address** (verbal_filler, 1x) -- "Hey Archer. Hey Archer. Hey Archer."
+- **vague reference** (other, 1x) -- "up in YouTube"
+- **questions AI's context or previous actions** (frustration_trigger, 1x) -- "Why did you ask me the last question about my calendar?"
+- **uses 'um' frequently** (verbal_filler, 1x) -- "Um, after walking through just about, um, I want to just go find a beach somewhere at night and just go sit out by the water and, um, just kind of have a nice self-care Sunday."
+- **frustrated when AI fails to execute previous requests** (frustration_trigger, 1x) -- "Can you explain to me why you didn't follow through with the last request?"
 - **requests repetition of previous action** (other, 1x) -- "I want you to, again, please describe what you see in your camera vision feed."
 - **incomplete thought/trailing off** (other, 1x) -- "Come back to..."
 - **vague topic introduction** (other, 1x) -- "Okay, service."

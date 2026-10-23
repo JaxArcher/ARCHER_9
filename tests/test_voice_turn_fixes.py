@@ -270,6 +270,7 @@ def drive_listening(vad_results):
     p._listen_preroll = collections.deque(maxlen=15)
     p._pre_buffer = collections.deque(maxlen=33)
     p._NO_SPEECH_TIMEOUT_SECONDS = 60
+    p._state_lock = threading.RLock()
     current = {}
 
     def next_chunk(timeout=0.1):
@@ -312,6 +313,121 @@ def test_speech_ends_after_a_second_of_silence():
 def test_no_speech_means_no_request():
     handled, _ = drive_listening([False] * 60)
     assert handled == []
+
+
+def test_follow_up_listening_race_with_stale_silence_frames():
+    """
+    Claude 2026-10-22 18:10 review:
+    Drive the real _pipeline_loop with stale _heard_speech=True and _silence_frames=40,
+    finish a response, and assert the state stays LISTENING and a following utterance
+    is processed.
+    """
+    import threading
+    from archer.voice.pipeline import VoicePipelineState
+
+    p = VoicePipeline.__new__(VoicePipeline)
+    p._running = threading.Event()
+    p._running.set()
+    p._halted = threading.Event()
+    p._wake_ack_playing = threading.Event()
+    p._state_lock = threading.RLock()
+    p._NO_SPEECH_TIMEOUT_SECONDS = 10.0
+
+    # Simulate stale state left from prior turn while speaking
+    p._state = VoicePipelineState.SPEAKING
+    p._heard_speech = True
+    p._silence_frames = 40
+    p._speech_buffer = [b"stale_buffer_chunk"]
+    p._listen_preroll = collections.deque(maxlen=15)
+    p._pre_buffer = collections.deque(maxlen=33)
+
+    # 1. Response completes: reset VAD/buffers/preroll/_heard_speech/_silence_frames BEFORE setting LISTENING
+    with p._state_lock:
+        p._speech_buffer.clear()
+        p._listen_preroll.clear()
+        vad_mock = SimpleNamespace(reset=lambda: None, process_audio=None)
+        p._vad = vad_mock
+        p._heard_speech = False
+        p._silence_frames = 0
+        p._listen_start = time.monotonic()
+        p._set_state = lambda state: setattr(p, "_state", state)
+        p._set_state(VoicePipelineState.LISTENING)
+
+    assert p._state == VoicePipelineState.LISTENING
+    assert not p._heard_speech
+    assert p._silence_frames == 0
+    assert len(p._speech_buffer) == 0
+
+    # 2. Drive the real _pipeline_loop with incoming audio:
+    # 5 frames of silence, 10 frames of speech, 35 frames of silence
+    vad_results = [False] * 5 + [True] * 10 + [False] * 35
+    chunks = [bytes([i % 256]) * 960 for i in range(len(vad_results))]
+    feed = iter(zip(chunks, vad_results))
+    current = {}
+
+    def next_chunk(timeout=0.1):
+        try:
+            chunk, speech = next(feed)
+        except StopIteration:
+            p._running.clear()
+            return None
+        current["speech"] = speech
+        return chunk
+
+    p._audio = SimpleNamespace(get_audio_chunk=next_chunk, is_playing=False)
+    p._halt = SimpleNamespace(process_audio=lambda chunk: None)
+    p._wake_word = SimpleNamespace(process_audio=lambda chunk: False, reset=lambda: None)
+    p._vad.process_audio = lambda chunk: current["speech"]
+    p._bus = SimpleNamespace(publish=lambda event: None)
+
+    handled = []
+
+    def process():
+        handled.append(list(p._speech_buffer))
+        p._speech_buffer.clear()
+        p._state = VoicePipelineState.PROCESSING
+
+    p._process_utterance = process
+    p._pipeline_loop()
+
+    # Assert following utterance was collected and processed
+    assert len(handled) == 1, "Following utterance must be processed"
+    audio = handled[0]
+    assert len(audio) == 5 + 10 + 33
+
+
+def test_follow_up_window_stays_open_on_empty_or_short_captures():
+    """
+    Claude 2026-10-22 18:10 review:
+    In the follow-up window, an empty or too-short capture goes back to LISTENING
+    until the window's time runs out. It never goes to IDLE straight away.
+    """
+    import threading
+    from archer.voice.pipeline import VoicePipelineState
+
+    p = VoicePipeline.__new__(VoicePipeline)
+    p._state_lock = threading.RLock()
+    p._NO_SPEECH_TIMEOUT_SECONDS = 10.0
+    p._state = VoicePipelineState.LISTENING
+    p._listen_start = time.monotonic()  # Fresh follow-up window
+    p._speech_buffer = [b"tiny"]
+    p._listen_preroll = collections.deque(maxlen=15)
+    p._vad = SimpleNamespace(reset=lambda: None)
+    p._heard_speech = True
+    p._silence_frames = 20
+    p._set_state = lambda state: setattr(p, "_state", state)
+
+    # Empty / too-short capture within the 10-second window
+    p._resume_listening_or_idle(was_empty_stt=True)
+    assert p._state == VoicePipelineState.LISTENING
+    assert not p._heard_speech
+    assert p._silence_frames == 0
+    assert len(p._speech_buffer) == 0
+
+    # Once window expires (> 10s elapsed)
+    p._listen_start = time.monotonic() - 15.0
+    p._resume_listening_or_idle(was_empty_stt=True)
+    assert p._state == VoicePipelineState.IDLE
 
 
 def test_play_on_youtube_is_done_directly():

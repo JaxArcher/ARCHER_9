@@ -292,7 +292,8 @@ class ToolChest:
             return None
 
         # 1. Excel / Spreadsheets
-        if re.search(r"\b(make|create|build|open|start)\s+(?:a\s+)?(?:excel|spreadsheet|sheet)\b", t) or \
+        if re.search(r"\b(make|create|build|open|start|lay\s+down)\s+(?:an?|the)?\s*(?:excel\s+spreadsheet|excel\s+sheet|excel|spreadsheet|sheet)\b", t) or \
+           re.search(r"\b(?:excel\s+spreadsheet|excel\s+sheet)\b", t) or \
            re.search(r"\bspreadsheet\s+of\b", t):
             return {
                 "tool": "lenny_excel_sheet",

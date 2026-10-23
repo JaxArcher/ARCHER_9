@@ -99,6 +99,21 @@ class TestToolChestFindAndDefaultBench:
         assert route_browse["tool"] == "lenny_open_app"
         assert route_browse["action"] == "browse"
 
+    def test_excel_voice_phrasings_route_deterministic(self):
+        """Test Colby's exact Excel phrasings route directly to lenny_excel_sheet."""
+        chest = ToolChest()
+        s1 = "Open an Excel spreadsheet and lay down a one-week workout routine for me day by day"
+        r1 = chest.route_clear_case(s1)
+        assert r1 is not None
+        assert r1["tool"] == "lenny_excel_sheet"
+        assert r1["bench"] == "LENNY"
+
+        s2 = "Create an Excel spreadsheet with the days of the week, eight rows for each hour, where I should have breakfast, lunch and dinner"
+        r2 = chest.route_clear_case(s2)
+        assert r2 is not None
+        assert r2["tool"] == "lenny_excel_sheet"
+        assert r2["bench"] == "LENNY"
+
     def test_unsupported_task_honesty(self):
         """Honest 'I don't have a tool for that yet' message for unsupported requests."""
         chest = ToolChest()
@@ -201,6 +216,58 @@ class TestCoreAgentToolChestIntegration:
         # Question card was recorded in store
         questions = agent._store.get_questions()
         assert any(q.get("source") == "tool_chest" or "bills" in q.get("text", "").lower() for q in questions)
+
+    def test_colby_excel_voice_requests_with_sensible_first_version(self):
+        """
+        Claude 2026-10-22 18:10 review:
+        Test both of Col's exact sentences from entry 18:10:
+        1. "Open an Excel spreadsheet and lay down a one-week workout routine for me day by day"
+        2. "Create an Excel spreadsheet with the days of the week, eight rows for each hour, where I should have breakfast, lunch and dinner"
+        The brain writes a sensible first version instead of asking or refusing.
+        """
+        agent = CoreAgent()
+        mock_executor = MagicMock()
+        mock_executor.execute.return_value = {"result": {"success": True}}
+        agent._tool_executor = mock_executor
+
+        # Sentence 1: Workout routine
+        s1 = "Open an Excel spreadsheet and lay down a one-week workout routine for me day by day"
+        reply1 = agent._handle_tool_chest_command(s1)
+        assert reply1 is not None
+        assert "sensible first version" in reply1
+        assert "tell me what to change" in reply1.lower()
+
+        mock_executor.execute.assert_called()
+        call_args1 = mock_executor.execute.call_args[0]
+        assert call_args1[0] == "lenny_excel_sheet"
+        payload1 = call_args1[1]
+        rows1 = payload1.get("rows", [])
+        assert len(rows1) >= 7, "Workout routine must have at least 7 days/rows"
+        flat_workout = " ".join(" ".join(str(c) for c in r) for r in rows1).lower()
+        for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
+            assert day in flat_workout
+
+        mock_executor.reset_mock()
+
+        # Sentence 2: Daily meal & hour schedule
+        s2 = "Create an Excel spreadsheet with the days of the week, eight rows for each hour, where I should have breakfast, lunch and dinner"
+        reply2 = agent._handle_tool_chest_command(s2)
+        assert reply2 is not None
+        assert "sensible first version" in reply2
+        assert "tell me what to change" in reply2.lower()
+
+        mock_executor.execute.assert_called()
+        call_args2 = mock_executor.execute.call_args[0]
+        assert call_args2[0] == "lenny_excel_sheet"
+        payload2 = call_args2[1]
+        rows2 = payload2.get("rows", [])
+        assert len(rows2) >= 8, "Must have at least 8 hourly rows"
+        flat_meal = " ".join(" ".join(str(c) for c in r) for r in rows2).lower()
+        assert "breakfast" in flat_meal
+        assert "lunch" in flat_meal
+        assert "dinner" in flat_meal
+        for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
+            assert day in flat_meal
 
     def test_no_hardcoded_content_strings_in_routing_path(self):
         """Assert that no canned rows or placeholder strings remain in core_agent.py."""

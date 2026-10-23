@@ -114,6 +114,7 @@ class VoicePipeline:
     # no speech has started. Kept generous enough to cover the wake-ack phrase
     # playing (~2-3s) plus reaction time.
     _NO_SPEECH_TIMEOUT_SECONDS: float = 10.0
+    _state_lock: threading.RLock = threading.RLock()
 
     def __init__(self, agent_callback=None, agent_streaming_callback=None) -> None:
         """
@@ -235,7 +236,7 @@ class VoicePipeline:
         # shared state at each checkpoint -- a stale thread (superseded by
         # a newer turn) just exits quietly instead of racing.
         self._turn_seq: int = 0
-        self._state_lock = threading.Lock()
+        self._state_lock = threading.RLock()
 
         # The agent-streaming generator currently in flight for the active
         # turn's UtteranceWorker (or the text-input equivalent), if any.
@@ -373,14 +374,15 @@ class VoicePipeline:
 
                     detected = self._wake_word.process_audio(audio_chunk)
                     if detected:
-                        self._set_state(VoicePipelineState.LISTENING)
-                        self._vad.reset()
-                        self._speech_buffer.clear()
-                        self._heard_speech = False  # VAD hasn't detected speech yet
-                        self._silence_frames = 0    # Consecutive silent frames after speech
-                        self._listen_start = time.monotonic()
-                        self._pre_buffer.clear()    # Discard wake word audio
-                        self._listen_preroll.clear()
+                        with self._state_lock:
+                            self._vad.reset()
+                            self._speech_buffer.clear()
+                            self._heard_speech = False  # VAD hasn't detected speech yet
+                            self._silence_frames = 0    # Consecutive silent frames after speech
+                            self._listen_start = time.monotonic()
+                            self._pre_buffer.clear()    # Discard wake word audio
+                            self._listen_preroll.clear()
+                            self._set_state(VoicePipelineState.LISTENING)
                         logger.info("🎤 Wake word detected — listening...")
                         self._play_wake_ack()
 
@@ -445,62 +447,52 @@ class VoicePipeline:
                     # Collect ALL audio while listening (speech + pauses).
                     # The STT model handles noise/silence far better than
                     # trying to gate audio frames ourselves.
-                    is_speech = self._vad.process_audio(audio_chunk)
+                    should_process = False
+                    with self._state_lock:
+                        if self._state != VoicePipelineState.LISTENING:
+                            continue
+                        is_speech = self._vad.process_audio(audio_chunk)
 
-                    # Use the RAW per-frame result to track speech/silence.
-                    if is_speech:
+                        # Use the RAW per-frame result to track speech/silence.
+                        if is_speech:
+                            if not self._heard_speech:
+                                # Start with the moments before the VAD noticed
+                                # speech (see _listen_preroll).
+                                self._speech_buffer.extend(self._listen_preroll)
+                                self._listen_preroll.clear()
+                            self._heard_speech = True
+                            self._silence_frames = 0
+                        elif self._heard_speech:
+                            self._silence_frames += 1
+
                         if not self._heard_speech:
-                            # Start with the moments before the VAD noticed
-                            # speech (see _listen_preroll).
-                            self._speech_buffer.extend(self._listen_preroll)
+                            self._listen_preroll.append(audio_chunk)
+
+                        if self._heard_speech:
+                            # Always buffer audio once speech has started
+                            self._speech_buffer.append(audio_chunk)
+
+                            # End utterance after ~1.0 seconds of continuous silence
+                            if self._silence_frames >= 33:
+                                should_process = True
+
+                        # Hard timeout: cap utterance at 30 seconds
+                        elapsed = time.monotonic() - self._listen_start
+                        if not should_process and self._heard_speech and elapsed > 30.0:
+                            logger.warning("Max utterance duration reached (30s) — processing")
+                            should_process = True
+
+                        # Timeout: if no speech within N seconds of wake word, go idle
+                        if not self._heard_speech and (time.monotonic() - self._listen_start) > self._NO_SPEECH_TIMEOUT_SECONDS:
+                            logger.info("No speech after wake word — returning to idle")
+                            self._set_state(VoicePipelineState.IDLE)
+                            self._speech_buffer.clear()
                             self._listen_preroll.clear()
-                        self._heard_speech = True
-                        self._silence_frames = 0
-                    elif self._heard_speech:
-                        self._silence_frames += 1
-
-                    if not self._heard_speech:
-                        self._listen_preroll.append(audio_chunk)
-
-                    if self._heard_speech:
-                        # Always buffer audio once speech has started
-                        self._speech_buffer.append(audio_chunk)
-
-                        # End utterance after ~1.0 seconds of continuous silence
-                        if self._silence_frames >= 33:
-                            self._process_utterance()
-                            # _process_utterance() blocks THIS thread (the
-                            # pipeline loop) until the agent's first sentence
-                            # is ready -- fine for a fast reply, but a slow
-                            # local-model turn (confirmed 2026-09-17: visual
-                            # Q&A regularly takes 50-90s) means it can return
-                            # 30+ seconds after self._listen_start. Nothing
-                            # above resets self._heard_speech/_listen_start
-                            # while blocked, so falling through to the "Hard
-                            # timeout" check below on THIS SAME iteration was
-                            # firing a SECOND, spurious _process_utterance()
-                            # call every single time -- bumping _turn_seq,
-                            # stopping playback, and closing the turn we just
-                            # dispatched before it ever got spoken (visible
-                            # in the logs as "SpeakResponse for turn N
-                            # superseded by turn N+1" on every slow turn,
-                            # every time). continue skips the now-stale
-                            # LISTENING-only checks below; state has already
-                            # moved to PROCESSING inside _process_utterance().
                             continue
 
-                    # Hard timeout: cap utterance at 30 seconds
-                    elapsed = time.monotonic() - self._listen_start
-                    if self._heard_speech and elapsed > 30.0:
-                        logger.warning("Max utterance duration reached (30s) — processing")
+                    if should_process:
                         self._process_utterance()
                         continue
-
-                    # Timeout: if no speech within N seconds of wake word, go idle
-                    if not self._heard_speech and (time.monotonic() - self._listen_start) > self._NO_SPEECH_TIMEOUT_SECONDS:
-                        logger.info("No speech after wake word — returning to idle")
-                        self._set_state(VoicePipelineState.IDLE)
-                        self._speech_buffer.clear()
 
                 elif self._state == VoicePipelineState.SPEAKING:
                     # During TTS playback — monitor for barge-in. This branch
@@ -590,12 +582,14 @@ class VoicePipeline:
                                 source="voice_pipeline",
                                 data={"text": snippet_text},
                             ))
-                            self._set_state(VoicePipelineState.LISTENING)
-                            self._speech_buffer.clear()
-                            self._vad.reset()
-                            self._heard_speech = False
-                            self._silence_frames = 0
-                            self._listen_start = time.monotonic()
+                            with self._state_lock:
+                                self._speech_buffer.clear()
+                                self._listen_preroll.clear()
+                                self._vad.reset()
+                                self._heard_speech = False
+                                self._silence_frames = 0
+                                self._listen_start = time.monotonic()
+                                self._set_state(VoicePipelineState.LISTENING)
                         elif snippet_text:
                             logger.debug(f"Barge-in check discarded as self-echo: '{snippet_text}'")
 
@@ -675,7 +669,7 @@ class VoicePipeline:
 
         if len(audio_data) < 3200:  # Less than ~100ms of audio — too short
             logger.debug("Audio too short, ignoring.")
-            self._set_state(VoicePipelineState.IDLE)
+            self._resume_listening_or_idle(was_empty_stt=True)
             return
 
         if self._agent_streaming_callback is None and self._agent_callback is None:
@@ -866,7 +860,7 @@ class VoicePipeline:
 
         # Stream ended immediately with no sentences
         if first is None and not sentence_queue.empty():
-            self._set_state(VoicePipelineState.IDLE)
+            self._resume_listening_or_idle(was_empty_stt=True)
             return
 
         # Play filler if no first sentence arrived in time
@@ -1159,13 +1153,14 @@ class VoicePipeline:
 
     def _listen_after_wake(self) -> None:
         """The wake word ended what was heard: acknowledge it and listen for the request."""
-        self._set_state(VoicePipelineState.LISTENING)
-        self._vad.reset()
-        self._speech_buffer.clear()
-        self._listen_preroll.clear()
-        self._heard_speech = False
-        self._silence_frames = 0
-        self._listen_start = time.monotonic()
+        with self._state_lock:
+            self._vad.reset()
+            self._speech_buffer.clear()
+            self._listen_preroll.clear()
+            self._heard_speech = False
+            self._silence_frames = 0
+            self._listen_start = time.monotonic()
+            self._set_state(VoicePipelineState.LISTENING)
         self._play_wake_ack()
 
     def _pc_played_it(self, text: str, start: float, end: float) -> bool:
@@ -1198,27 +1193,22 @@ class VoicePipeline:
 
     def _resume_listening_or_idle(self, was_empty_stt: bool) -> None:
         """
-        Decide what to do after an utterance was discarded (empty STT / HALT
+        Decide what to do after an utterance was discarded (empty STT / too-short / HALT
         text check) instead of always snapping back to idle.
 
-        A real HALT is handled entirely by the parallel HALT listener and
-        never reaches here with was_empty_stt=True, so this only covers the
-        "STT came back empty" case. That can legitimately mean the user
-        hasn't started talking yet — e.g. a brief input-overflow glitch
-        right as playback stops gets mistaken by webrtcvad for ~1s of
-        speech, Whisper's own VAD then strips all of it back out, and we're
-        left with an empty transcript within a second of entering LISTENING.
-        Snapping straight to idle in that case silently eats the user's
-        entire response window. Instead, keep listening as long as we're
-        still within the no-speech timeout from when listening started.
+        In the follow-up window, an empty or too-short capture goes back to LISTENING
+        until the window's time runs out. It never goes to IDLE straight away.
         """
-        if was_empty_stt and (time.monotonic() - self._listen_start) < self._NO_SPEECH_TIMEOUT_SECONDS:
-            logger.debug("Empty STT within listening window — resuming listening instead of going idle.")
-            self._set_state(VoicePipelineState.LISTENING)
-            self._vad.reset()
-            self._speech_buffer.clear()
-            self._heard_speech = False
-            self._silence_frames = 0
+        remaining = self._NO_SPEECH_TIMEOUT_SECONDS - (time.monotonic() - self._listen_start)
+        if was_empty_stt and remaining > 0:
+            logger.debug(f"Empty/short capture within follow-up window ({remaining:.1f}s remaining) — resuming listening instead of going idle.")
+            with self._state_lock:
+                self._vad.reset()
+                self._speech_buffer.clear()
+                self._listen_preroll.clear()
+                self._heard_speech = False
+                self._silence_frames = 0
+                self._set_state(VoicePipelineState.LISTENING)
             return
 
         self._set_state(VoicePipelineState.IDLE)
@@ -1636,12 +1626,14 @@ class VoicePipeline:
             return
 
         logger.info(f"Response streaming completed ({len(collected_text)} sentences). Transitioning pipeline state: SPEAKING -> LISTENING.")
-        self._set_state(VoicePipelineState.LISTENING)
-        self._vad.reset()
-        self._speech_buffer.clear()
-        self._heard_speech = False
-        self._silence_frames = 0
-        self._listen_start = time.monotonic()
+        with self._state_lock:
+            self._vad.reset()
+            self._speech_buffer.clear()
+            self._listen_preroll.clear()
+            self._heard_speech = False
+            self._silence_frames = 0
+            self._listen_start = time.monotonic()
+            self._set_state(VoicePipelineState.LISTENING)
         logger.info("🎤 Listening for follow-up...")
 
     def _get_guest_response(self, text: str) -> str:
