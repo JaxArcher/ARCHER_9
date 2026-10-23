@@ -44,11 +44,123 @@ html, body {
   border-radius: 50%;
   background: #4dffb8;
   box-shadow: 0 0 6px #4dffb8;
-  margin-right: auto;
+  margin-right: 6px;
+  flex-shrink: 0;
 }
 .status-dot.is-offline {
   background: #ff4d4d;
   box-shadow: 0 0 6px #ff4d4d;
+}
+
+/* Voice Status Light (Claude Review 2026-10-22 18:30) */
+.voice-status-light {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-right: auto;
+  box-sizing: border-box;
+  transition: background-color 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+  cursor: default;
+}
+
+/* Off (dim grey): idle, waiting for the wake word */
+.voice-status-light.voice-state-idle {
+  background: #2a2e36;
+  border: 1.5px solid rgba(151, 229, 244, 0.22);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+
+/* Red, steady: listening for Col (after wake word, and during follow-up window) */
+.voice-status-light.voice-state-listening {
+  background: #ff3b30;
+  border: 1.5px solid #ff6961;
+  box-shadow: 0 0 8px #ff3b30, 0 0 16px rgba(255, 59, 48, 0.55), inset 0 0 4px rgba(255, 255, 255, 0.45);
+}
+
+/* Yellow, steady: processing (transcribing or thinking) */
+.voice-status-light.voice-state-processing {
+  background: #ffd60a;
+  border: 1.5px solid #ffe66d;
+  box-shadow: 0 0 8px #ffd60a, 0 0 16px rgba(255, 214, 10, 0.55), inset 0 0 4px rgba(255, 255, 255, 0.5);
+}
+
+/* Green, blinking: ARCHER is speaking (fillers included) */
+.voice-status-light.voice-state-speaking {
+  background: #30d158;
+  border: 1.5px solid #63e685;
+  box-shadow: 0 0 8px #30d158, 0 0 16px rgba(48, 209, 88, 0.55), inset 0 0 4px rgba(255, 255, 255, 0.45);
+  animation: voice-light-blink 0.75s ease-in-out infinite;
+}
+
+@keyframes voice-light-blink {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.28;
+    transform: scale(0.96);
+  }
+}
+
+/* Respects reduced-motion: steady green instead of blinking */
+@media (prefers-reduced-motion: reduce) {
+  .voice-status-light.voice-state-speaking {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Error state (fallback) */
+.voice-status-light.voice-state-error {
+  background: #8b0000;
+  border: 1.5px solid #ff4d4d;
+  box-shadow: 0 0 6px #ff4d4d;
+}
+
+/* Slash when muted or listening is paused */
+.voice-status-light .voice-status-slash {
+  display: none;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 2px;
+  height: 24px;
+  background: #ff453a;
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.9);
+  transform: translate(-50%, -50%) rotate(45deg);
+  border-radius: 1px;
+  pointer-events: none;
+}
+
+.voice-status-light.is-muted-or-paused {
+  background: #252830 !important;
+  border-color: rgba(255, 69, 58, 0.45) !important;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.8) !important;
+  animation: none !important;
+}
+
+.voice-status-light.is-muted-or-paused .voice-status-slash {
+  display: block;
+}
+
+/* Screen-reader utility */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 #archer-toolbar button {

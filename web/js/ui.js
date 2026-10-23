@@ -12,6 +12,8 @@ const transcriptEl = document.getElementById("archer-transcript");
 const textInputEl = document.getElementById("archer-text-input");
 const textFormEl = document.getElementById("archer-text-form");
 const statusDotEl = document.getElementById("archer-status");
+const voiceStatusEl = document.getElementById("archer-voice-status");
+const voiceStatusSrEl = document.getElementById("archer-voice-status-sr");
 const modeBtnEl = document.getElementById("archer-mode-btn");
 const micBtnEl = document.getElementById("archer-mic-btn");
 const ttsBtnEl = document.getElementById("archer-tts-btn");
@@ -106,9 +108,75 @@ function setModeButton(mode) {
   modeBtnEl.classList.toggle("is-cloud", mode === "cloud");
 }
 
+let currentVoicePipelineState = "idle";
+let isMicMuted = false;
+let isRoomListeningPaused = false;
+
+function updateVoiceStatusLight() {
+  if (!voiceStatusEl) return;
+
+  voiceStatusEl.classList.remove(
+    "voice-state-idle",
+    "voice-state-listening",
+    "voice-state-processing",
+    "voice-state-speaking",
+    "voice-state-error",
+    "is-muted-or-paused"
+  );
+
+  let stateLabel = "Idle";
+  let stateTitle = "Voice: Idle";
+
+  if (isMicMuted) {
+    voiceStatusEl.classList.add("voice-state-idle", "is-muted-or-paused");
+    stateLabel = "Muted";
+    stateTitle = "Voice: Muted (Microphone off)";
+  } else if (isRoomListeningPaused) {
+    voiceStatusEl.classList.add("voice-state-idle", "is-muted-or-paused");
+    stateLabel = "Paused";
+    stateTitle = "Voice: Paused";
+  } else {
+    switch (currentVoicePipelineState) {
+      case "listening":
+        voiceStatusEl.classList.add("voice-state-listening");
+        stateLabel = "Listening";
+        stateTitle = "Voice: Listening";
+        break;
+      case "processing":
+        voiceStatusEl.classList.add("voice-state-processing");
+        stateLabel = "Processing";
+        stateTitle = "Voice: Processing";
+        break;
+      case "speaking":
+        voiceStatusEl.classList.add("voice-state-speaking");
+        stateLabel = "Speaking";
+        stateTitle = "Voice: Speaking";
+        break;
+      case "error":
+        voiceStatusEl.classList.add("voice-state-error");
+        stateLabel = "Error";
+        stateTitle = "Voice: Error";
+        break;
+      default:
+        voiceStatusEl.classList.add("voice-state-idle");
+        stateLabel = "Idle";
+        stateTitle = "Voice: Idle";
+        break;
+    }
+  }
+
+  voiceStatusEl.setAttribute("title", stateTitle);
+  voiceStatusEl.setAttribute("aria-label", `Voice: ${stateLabel}`);
+  if (voiceStatusSrEl) {
+    voiceStatusSrEl.textContent = `Voice: ${stateLabel}`;
+  }
+}
+
 function setMicButton(muted) {
+  isMicMuted = !!muted;
   micBtnEl.textContent = muted ? "🔇 MIC MUTED" : "🎤 MIC ON";
   micBtnEl.classList.toggle("is-muted", muted);
+  updateVoiceStatusLight();
 }
 
 function setTtsButton(muted) {
@@ -231,18 +299,36 @@ if (endSessionBtnEl) {
   });
 }
 
-ArcherClient.on("hello", ({ mode, micMuted, ttsMuted, listeningState, sessionApprovalActive }) => {
+ArcherClient.on("hello", ({ mode, micMuted, ttsMuted, listeningState, sessionApprovalActive, voice_state, voiceState }) => {
   if (mode) setModeButton(mode);
   setMicButton(!!micMuted);
   setTtsButton(!!ttsMuted);
+  const vState = voice_state || voiceState;
+  if (vState) currentVoicePipelineState = vState;
   if (listeningState) setListeningState(listeningState.state, listeningState.until);
   if (sessionApprovalActive !== undefined) setSessionApproval(sessionApprovalActive);
+  updateVoiceStatusLight();
 });
 ArcherClient.on("mode", setModeButton);
 ArcherClient.on("micMute", setMicButton);
 ArcherClient.on("ttsMute", setTtsButton);
 ArcherClient.on("connected", () => statusDotEl.classList.remove("is-offline"));
 ArcherClient.on("disconnected", () => statusDotEl.classList.add("is-offline"));
+
+ArcherClient.on("state", (state) => {
+  currentVoicePipelineState = (typeof state === "string" ? state : state?.state) || "idle";
+  updateVoiceStatusLight();
+});
+
+ArcherClient.on("wakeWord", () => {
+  currentVoicePipelineState = "listening";
+  updateVoiceStatusLight();
+});
+
+ArcherClient.on("halt", () => {
+  currentVoicePipelineState = "idle";
+  updateVoiceStatusLight();
+});
 
 // Room listening state (Phase 2c). state: "listening" | "paused" | "empty" | "off".
 // until: for "paused", the epoch seconds it ends, or -1 for "until resumed".
@@ -254,11 +340,13 @@ const LISTENING_LOOK = {
 };
 
 function setListeningState(state, until) {
+  isRoomListeningPaused = (state === "paused");
   if (!listeningIndicatorEl) return;
   const look = LISTENING_LOOK[state] || LISTENING_LOOK.off;
   listeningIndicatorEl.classList.remove("badge-listening", "badge-paused", "badge-empty", "badge-off");
   listeningIndicatorEl.classList.add(look.badge);
   listeningIndicatorEl.textContent = look.label;
+  updateVoiceStatusLight();
 
   const paused = state === "paused";
   for (const btn of [pause15mBtnEl, pause1hBtnEl, pauseHoldBtnEl]) {
@@ -286,6 +374,9 @@ modeBtnEl.addEventListener("click", () => ArcherClient.sendModeToggle());
 micBtnEl.addEventListener("click", () => ArcherClient.sendMicMuteToggle());
 ttsBtnEl.addEventListener("click", () => ArcherClient.sendTtsMuteToggle());
 haltBtnEl.addEventListener("click", () => ArcherClient.sendHalt());
+if (voiceStatusEl) {
+  voiceStatusEl.addEventListener("click", () => ArcherClient.sendMicMuteToggle());
+}
 
 if (pause15mBtnEl) pause15mBtnEl.addEventListener("click", () => ArcherClient.sendSetListeningPause(900));
 if (pause1hBtnEl) pause1hBtnEl.addEventListener("click", () => ArcherClient.sendSetListeningPause(3600));

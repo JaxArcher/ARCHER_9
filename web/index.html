@@ -19,6 +19,10 @@
   <div id="archer-shell">
     <div id="archer-toolbar">
       <span id="archer-status" class="status-dot" title="Connection status"></span>
+      <div id="archer-voice-status" class="voice-status-light voice-state-idle" role="status" aria-live="polite" aria-label="Voice: Idle" title="Voice: Idle">
+        <span class="voice-status-slash" aria-hidden="true"></span>
+        <span id="archer-voice-status-sr" class="sr-only">Voice: Idle</span>
+      </div>
       <button id="archer-mode-btn" type="button" title="Toggle whether ARCHER's brain runs LOCAL (Ollama, private, no API cost) or CLOUD (Claude/NVIDIA, smarter, needs internet)">MODE</button>
       <button id="archer-mic-btn" type="button" title="Mute/unmute your microphone -- ARCHER stops listening for the wake word or any speech while muted">MIC</button>
       <button id="archer-tts-btn" type="button" title="Mute/unmute ARCHER's spoken replies -- text replies still work while muted">SPEAKER</button>

@@ -52,7 +52,7 @@ again).
 
 ```
 +---------------------------------------------------------------------------------+
-| toolbar: status dot, MODE, MIC, SPEAKER, HALT                                   |
+| toolbar: status dot, voice status light, MODE, MIC, SPEAKER, HALT               |
 +---------------------------------------------------------------------------------+
 | controls bar: Brain Model / Microphone / Speaker dropdowns                      |  <- always visible
 +---------------------------------------------------------------------------------+
@@ -130,7 +130,7 @@ doesn't require starting it by hand in a separate window.
 
 | `type`               | Fields                          | Meaning                                                                 |
 |-----------------------|----------------------------------|--------------------------------------------------------------------------|
-| `state`               | `state`                         | Pipeline state: `idle` \| `listening` \| `processing` \| `speaking` \| `error` \| `halted` |
+| `state`               | `state`                         | Pipeline state: `idle` \| `listening` \| `processing` \| `speaking` \| `error` \| `halted` (drives top-left voice status light: red = listening, yellow = processing, blinking green = speaking, dim/off = idle, slash = muted/paused) |
 | `amplitude`           | `value` (0.0–1.0)                | Live TTS output amplitude, drives orb pulse while `state === "speaking"` |
 | `stt_partial`         | `text`                          | Live (in-progress) transcription while listening                        |
 | `stt_final`           | `text`                          | Finalized user utterance                                                 |

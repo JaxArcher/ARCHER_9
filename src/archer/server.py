@@ -1009,11 +1009,19 @@ def _on_bus_event(msg_type: str, **data) -> None:
         pass  # loop already closed/shutting down
 
 
+_current_voice_state: str = "idle"
+
+
 def _register_event_bridge() -> None:
     """Subscribe to the internal event bus once, at import time."""
     bus = get_event_bus()
-    bus.subscribe(EventType.PIPELINE_STATE_CHANGED, lambda e: _on_bus_event(
-        "state", state=e.data.get("state", "idle")))
+
+    def _on_state_event(e: Event) -> None:
+        global _current_voice_state
+        _current_voice_state = e.data.get("state", "idle")
+        _on_bus_event("state", state=_current_voice_state)
+
+    bus.subscribe(EventType.PIPELINE_STATE_CHANGED, _on_state_event)
     bus.subscribe(EventType.STT_PARTIAL, lambda e: _on_bus_event(
         "stt_partial", text=e.data.get("text", "")))
     bus.subscribe(EventType.STT_FINAL, lambda e: _on_bus_event(
@@ -1732,6 +1740,11 @@ async def ws_voice(websocket: WebSocket):
             "camera_available": _observer is not None,
             "listening_state": listening_status,
             "session_approval_active": get_approval_manager().session_approval_active,
+            "voice_state": _current_voice_state,
+        }))
+        await _ws_send_safe(websocket, json.dumps({
+            "type": "state",
+            "state": _current_voice_state,
         }))
     except Exception as e:
         logger.debug(f"Could not send initial state snapshot to browser client: {e}")
